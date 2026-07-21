@@ -130,6 +130,68 @@
   }
 }
 
+@layer components {
+  .docs-prose {
+    @apply font-sans text-[0.95rem] leading-7 text-foreground/90;
+  }
+
+  .docs-prose > *:first-child {
+    margin-top: 0;
+  }
+
+  .docs-prose h1 {
+    @apply font-display text-4xl font-medium tracking-tight text-foreground;
+  }
+
+  .docs-prose h2 {
+    @apply mt-12 mb-4 border-t border-border pt-8 font-display text-2xl font-medium tracking-tight text-foreground;
+  }
+
+  .docs-prose h3 {
+    @apply mt-8 mb-3 font-sans text-lg font-semibold text-foreground;
+  }
+
+  .docs-prose p {
+    @apply mt-4 leading-7;
+  }
+
+  .docs-prose a {
+    @apply text-primary underline underline-offset-4 decoration-primary/40 transition-colors hover:decoration-primary;
+  }
+
+  .docs-prose :not(pre) > code {
+    @apply rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em] text-foreground;
+  }
+
+  .docs-prose ul {
+    @apply mt-4 list-disc space-y-2 pl-5 marker:text-muted-foreground;
+  }
+
+  .docs-prose ol {
+    @apply mt-4 list-decimal space-y-2 pl-5;
+  }
+
+  .docs-prose blockquote {
+    @apply border-l-2 border-primary/40 pl-4 text-muted-foreground italic;
+  }
+
+  .docs-prose strong {
+    @apply font-semibold text-foreground;
+  }
+
+  .docs-prose table {
+    @apply w-full border-collapse text-sm;
+  }
+
+  .docs-prose th {
+    @apply border-b border-border py-2 text-left font-medium text-muted-foreground;
+  }
+
+  .docs-prose td {
+    @apply border-b border-border/60 py-2;
+  }
+}
+
 @layer utilities {
   .bg-stone-grid {
     background-image:
