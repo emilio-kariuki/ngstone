@@ -2,6 +2,7 @@ package tui
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -92,6 +93,149 @@ func TestRenderRowNonASCIIPathsStayAligned(t *testing.T) {
 				t.Errorf("path=%q width=%d: lipgloss.Width(row) = %d, want %d", p, w, got, w)
 			}
 		}
+	}
+}
+
+func TestRowPathHidesHostKeepsPath(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"absolute path only", "http://plain-juniper-54.ngstone.site/_next/static/chunks/_1anvha4._.js", "/_next/static/chunks/_1anvha4._.js"},
+		{"absolute with query", "https://example.com/api/orders?id=7", "/api/orders?id=7"},
+		{"root no path", "http://example.com", "/"},
+		{"root with slash", "http://example.com/", "/"},
+		{"already relative", "/_next/static/chunks/_1anvha4._.js", "/_next/static/chunks/_1anvha4._.js"},
+	}
+	for _, c := range cases {
+		if got := rowPath(c.in); got != c.want {
+			t.Errorf("%s: rowPath(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+func TestRowPathMalformedFallsBackToRawWithoutPanic(t *testing.T) {
+	malformed := []string{
+		"http://[::1:bad",
+		"://not-a-url",
+		"%zz-invalid-escape",
+	}
+	for _, raw := range malformed {
+		var got string
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("rowPath(%q) panicked: %v", raw, r)
+				}
+			}()
+			got = rowPath(raw)
+		}()
+		if got != raw {
+			t.Errorf("rowPath(%q) = %q, want raw fallback %q", raw, got, raw)
+		}
+	}
+}
+
+func TestRenderRowShowsPathNotFullURL(t *testing.T) {
+	ex := &inspect.Exchange{
+		Kind: inspect.KindHTTP,
+		Req: inspect.CapturedReq{
+			Method: "GET",
+			URL:    "http://plain-juniper-54.ngstone.site/_next/static/chunks/_1anvha4._.js",
+			Header: http.Header{},
+		},
+		Resp: inspect.CapturedResp{Status: 200},
+	}
+	row := renderRow(ex, 100, false, false)
+	if strings.Contains(row, "plain-juniper-54") {
+		t.Errorf("row still shows host: %q", row)
+	}
+	if !strings.Contains(row, "/_next/static/chunks/_1anvha4._.js") {
+		t.Errorf("row missing path: %q", row)
+	}
+}
+
+func TestRenderRowMalformedURLDoesNotPanicOrBlank(t *testing.T) {
+	ex := &inspect.Exchange{
+		Kind: inspect.KindHTTP,
+		Req: inspect.CapturedReq{
+			Method: "GET",
+			URL:    "http://[::1:bad",
+			Header: http.Header{},
+		},
+		Resp: inspect.CapturedResp{Status: 200},
+	}
+	var row string
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("renderRow panicked on malformed URL: %v", r)
+			}
+		}()
+		row = renderRow(ex, 60, false, false)
+	}()
+	if strings.TrimSpace(row) == "" {
+		t.Errorf("expected non-blank row for malformed URL, got %q", row)
+	}
+}
+
+func TestListHeaderAlignsWithDataRow(t *testing.T) {
+	ex := &inspect.Exchange{
+		Kind: inspect.KindHTTP,
+		Req: inspect.CapturedReq{
+			Method: "GET",
+			URL:    "https://example.com/api/orders?id=7",
+			Header: http.Header{},
+		},
+		Resp: inspect.CapturedResp{Status: 200},
+	}
+	for _, w := range []int{30, 40, 60, 80, 100} {
+		header := renderListHeader(w)
+		row := renderRow(ex, w, false, false)
+		if hw, rw := lipgloss.Width(header), lipgloss.Width(row); hw != rw {
+			t.Errorf("width=%d: header width %d != row width %d", w, hw, rw)
+		}
+	}
+}
+
+func TestListHeaderContainsColumnLabels(t *testing.T) {
+	header := renderListHeader(80)
+	for _, want := range []string{"METHOD", "PATH", "STATUS", "TIME"} {
+		if !strings.Contains(header, want) {
+			t.Errorf("header %q missing column label %q", header, want)
+		}
+	}
+}
+
+func TestViewIncludesListHeader(t *testing.T) {
+	m := newTestModel(t, []*inspect.Exchange{
+		mkExchange("a", "GET", "https://example.com/api/orders", 200),
+	})
+	view := m.View()
+	for _, want := range []string{"METHOD", "PATH", "STATUS", "TIME"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("expected view to contain column label %q, view:\n%s", want, view)
+		}
+	}
+}
+
+func TestFilterMatchesPathNotHost(t *testing.T) {
+	m := newTestModel(t, []*inspect.Exchange{
+		mkExchange("a", "GET", "https://tenant-one.ngstone.site/api/orders", 200),
+		mkExchange("b", "GET", "https://tenant-one.ngstone.site/api/users", 200),
+	})
+
+	m.filterQuery = "tenant-one"
+	m.rebuildRows()
+	if len(m.rows) != 0 {
+		t.Fatalf("expected host substring to match nothing, got %d rows", len(m.rows))
+	}
+
+	m.filterQuery = "orders"
+	m.rebuildRows()
+	if len(m.rows) != 1 {
+		t.Fatalf("expected path substring to match 1 row, got %d", len(m.rows))
 	}
 }
 

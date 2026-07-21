@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -12,9 +13,11 @@ import (
 
 const (
 	methodColWidth = 9
-	statusColWidth = 5
+	statusColWidth = 6
 	timeColWidth   = 11
 )
+
+const listHeaderRows = 1
 
 const (
 	glyphReplayed  = "↺"
@@ -57,6 +60,18 @@ func rowTimeCol(ex *inspect.Exchange) string {
 		return "-"
 	}
 	return ex.Duration.Round(time.Millisecond).String()
+}
+
+func rowPath(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	p := u.RequestURI()
+	if p == "" {
+		return raw
+	}
+	return p
 }
 
 func fmtBytes(n int64) string {
@@ -159,18 +174,38 @@ func renderRow(ex *inspect.Exchange, width int, selected bool, replaying bool) s
 	if pathWidth < 0 {
 		pathWidth = 0
 	}
-	path := padRight(truncatePath(ex.Req.URL, pathWidth), pathWidth)
+	path := padRight(truncatePath(rowPath(ex.Req.URL), pathWidth), pathWidth)
 
-	line := prefix +
-		methodStyle(method).Render(methodField) +
-		path +
-		statusStyle(ex.Resp.Status).Render(statusField) +
-		timeField
-
+	methodSt := methodStyle(method)
+	statusSt := statusStyle(ex.Resp.Status)
+	plainSt := lipgloss.NewStyle()
 	if selected {
-		return selectedRowStyle.Render(line)
+		methodSt = methodSt.Background(colorHighlightBg)
+		statusSt = statusSt.Background(colorHighlightBg)
+		plainSt = plainSt.Background(colorHighlightBg)
 	}
-	return line
+
+	return plainSt.Render(prefix) +
+		methodSt.Render(methodField) +
+		plainSt.Render(path) +
+		statusSt.Render(statusField) +
+		plainSt.Render(timeField)
+}
+
+func renderListHeader(width int) string {
+	prefix := "  "
+	methodField := padRight("METHOD", methodColWidth)
+	statusField := padLeft("STATUS", statusColWidth)
+	timeField := padLeft("TIME", timeColWidth)
+
+	pathWidth := width - len(prefix) - methodColWidth - statusColWidth - timeColWidth
+	if pathWidth < 0 {
+		pathWidth = 0
+	}
+	pathField := padRight("PATH", pathWidth)
+
+	line := prefix + methodField + pathField + statusField + timeField
+	return listHeaderStyle.Render(line)
 }
 
 func visibleRowWindow(total, height, cursor int) (start, end int) {

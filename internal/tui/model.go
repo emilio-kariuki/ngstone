@@ -188,6 +188,10 @@ func (m *Model) recomputeLayout() {
 			avail = 0
 		}
 	}
+	avail -= listHeaderRows
+	if avail < 0 {
+		avail = 0
+	}
 	listH := avail / 2
 	detailH := avail - listH
 	if listH < 0 {
@@ -396,6 +400,7 @@ func (m Model) View() string {
 		sections = append(sections, "Filter: "+m.filterInput.View())
 	}
 
+	sections = append(sections, renderListHeader(m.width))
 	sections = append(sections, renderList(&m))
 
 	m.detailVP.SetContent(buildDetail(m.selectedExchange()))
