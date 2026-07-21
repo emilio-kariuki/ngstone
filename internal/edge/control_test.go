@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"crypto/sha256"
+	"fmt"
 	"net"
 	"net/netip"
 	"runtime"
@@ -232,6 +233,116 @@ func TestNegotiateVersion(t *testing.T) {
 	if _, ok := negotiateVersion(nil); ok {
 		t.Fatalf("negotiateVersion(nil) should report no common version")
 	}
+}
+
+func TestUnauthSlotReleasedAfterAuthAllowsSecondAgent(t *testing.T) {
+	controlAddr := freeTCPAddr(t)
+	publicAddr := freeTCPAddr(t)
+
+	s, err := New(Config{
+		ControlAddr:  controlAddr,
+		PublicAddr:   publicAddr,
+		Domain:       "example.com",
+		TokenSHA256:  sumToken("tok"),
+		PublicScheme: "http",
+		Insecure:     true,
+		Limits:       LimitsConfig{UnauthSessions: 1},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- s.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-runErrCh
+	})
+
+	dialAndAuth := func(instanceID string) (tunnel.Session, error) {
+		conn, err := net.Dial("tcp", controlAddr)
+		if err != nil {
+			return nil, err
+		}
+		sess, err := tunnel.Client(conn)
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+		ctrl := sess.Control()
+		if err := ctrl.Write(proto.TypeAuth, 1, proto.Auth{
+			Token:         "tok",
+			InstanceID:    instanceID,
+			ProtoVersions: []int{proto.ProtoVersion},
+		}); err != nil {
+			sess.Close("write auth failed")
+			return nil, err
+		}
+		reply, err := ctrl.Read()
+		if err != nil {
+			sess.Close("read auth reply failed")
+			return nil, err
+		}
+		if reply.Type != proto.TypeAuthOK {
+			sess.Close("unexpected auth reply")
+			return nil, fmt.Errorf("auth reply = %+v, want %q", reply, proto.TypeAuthOK)
+		}
+		return sess, nil
+	}
+
+	closeGracefully := func(sess tunnel.Session) {
+		ctrl := sess.Control()
+		ctrl.Write(proto.TypeGoodbye, 99, proto.Goodbye{Reason: "test done"})
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			ctrl.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			if _, err := ctrl.Read(); err != nil {
+				break
+			}
+		}
+		sess.Close("test done")
+	}
+
+	var sessA tunnel.Session
+	authAttemptDeadline := time.Now().Add(5 * time.Second)
+	for {
+		var aerr error
+		sessA, aerr = dialAndAuth("agent-a")
+		if aerr == nil {
+			break
+		}
+		if time.Now().After(authAttemptDeadline) {
+			t.Fatalf("first agent never managed to authenticate against the just-started listener: %v", aerr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	type result struct {
+		sess tunnel.Session
+		err  error
+	}
+	resCh := make(chan result, 1)
+	go func() {
+		sess, err := dialAndAuth("agent-b")
+		resCh <- result{sess, err}
+	}()
+
+	var sessB tunnel.Session
+	select {
+	case r := <-resCh:
+		if r.err != nil {
+			closeGracefully(sessA)
+			t.Fatalf("second agent could not authenticate while an already-authenticated agent held the connection (UnauthSessions=1): %v — the unauth slot is not being released at the authentication boundary", r.err)
+		}
+		sessB = r.sess
+	case <-time.After(3 * time.Second):
+		closeGracefully(sessA)
+		t.Fatalf("second agent's authentication attempt hung; the unauth slot from the first, now-authenticated agent was never released")
+	}
+
+	closeGracefully(sessA)
+	closeGracefully(sessB)
 }
 
 func TestHandleControlConnSessionSurvivesPastAuthDeadline(t *testing.T) {
