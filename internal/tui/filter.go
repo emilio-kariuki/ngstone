@@ -57,6 +57,6 @@ func matchFilter(q string, ex *inspect.Exchange) bool {
 		}
 		return strconv.Itoa(ex.Resp.Status/100) == val
 	default:
-		return strings.Contains(strings.ToLower(ex.Req.URL), val)
+		return strings.Contains(strings.ToLower(rowPath(ex.Req.URL)), val)
 	}
 }

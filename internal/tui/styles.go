@@ -29,7 +29,7 @@ const (
 var (
 	headerTitleStyle   = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
 	sectionHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(colorAccent)
-	selectedRowStyle   = lipgloss.NewStyle().Background(colorHighlightBg)
+	listHeaderStyle    = lipgloss.NewStyle().Foreground(colorMuted)
 	footerStyle        = lipgloss.NewStyle().Foreground(colorMuted)
 	errorStyle         = lipgloss.NewStyle().Foreground(colorError)
 	helpStyle          = lipgloss.NewStyle().Foreground(colorMuted)
