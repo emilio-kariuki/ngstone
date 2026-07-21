@@ -199,7 +199,7 @@ type StreamOpen struct {
 - **Agent-side verification:** standard WebPKI validation (`ServerName: "ngstone.site"`, system roots). **Optional SPKI pin** (`--pin sha256/BASE64`) checked in `VerifyPeerCertificate` *in addition to* chain validation; off by default because pins + auto-renewing certs is a footgun (pin the *key* and reuse it across renewals via certmagic's key reuse if enabled — document loudly).
 - **Agent authentication is the bearer token,** not client certs. Rejected mTLS: adds a private CA, issuance, and rotation ceremony for a single user with zero security gain over a 256-bit token inside TLS.
 
-Token hygiene: generated once via `ngstone token new` (32 random bytes, base64url). Edge config stores the SHA-256 (`token_sha256 = "…"`); env var `NGSTONE_TOKEN` on the agent. Plaintext token never lives on the VPS disk.
+Token hygiene: generated once with `openssl rand -base64 32` on the agent host and saved via `ngstone auth <token>`. The edge stores only the SHA-256 (`NGSTONE_TOKEN_SHA256`, hex); the plaintext token never lives on the VPS disk.
 
 ---
 

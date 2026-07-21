@@ -25,12 +25,12 @@ This token can create and delete `_acme-challenge` TXT records in the one zone a
 `ngstoned` reads its Cloudflare token from `-cf-api-token` or `$NGSTONE_CF_API_TOKEN`. Create `/etc/ngstoned/env` (mode 0600, owned by root, referenced by the unit's `EnvironmentFile=`):
 
 ```
-NGSTONE_TOKEN_SHA256=<sha256 of the agent auth token, hex, from `ngstone token new`>
+NGSTONE_TOKEN_SHA256=<sha256 of the agent auth token, hex>
 NGSTONE_CERT_EMAIL=<your email, required by Let's Encrypt>
 NGSTONE_CF_API_TOKEN=<the scoped Cloudflare token above>
 ```
 
-The agent side needs the plaintext token in `$NGSTONE_TOKEN` on the laptop; it is never written to disk on the VPS, only its SHA-256 is.
+Generate the token pair on the laptop: `token=$(openssl rand -base64 32)` produces the plaintext the agent authenticates with (`ngstone auth "$token"`), and `printf %s "$token" | shasum -a 256 | cut -d' ' -f1` produces the hex digest that goes in `NGSTONE_TOKEN_SHA256`. The plaintext token is never written to disk on the VPS, only its SHA-256 is.
 
 Secrets must only ever reach `ngstoned` through `EnvironmentFile=`, never through `ExecStart` flags: `/proc/<pid>/cmdline` is world-readable, so any local user can read a flag value with `ps auxww`, but not the process's environment. `ngstoned` reads `$NGSTONE_TOKEN_SHA256` and `$NGSTONE_CF_API_TOKEN` in preference to the equivalent `-token-sha256`/`-cf-api-token` flags for exactly this reason — do not add those flags to the unit's `ExecStart`. The agent has the same exposure: prefer `$NGSTONE_TOKEN` over `-token` whenever the agent runs somewhere another local user could run `ps`.
 
