@@ -3,7 +3,6 @@ import { Eye, Laptop, Server } from "lucide-react"
 
 import type { TocItem } from "@/lib/docs-nav"
 import { Anchor } from "@/components/docs/anchor"
-import { Callout } from "@/components/docs/callout"
 import { Card, CardGrid } from "@/components/docs/card"
 import { CodeBlock } from "@/components/docs/code-block"
 import { DocsArticle } from "@/components/docs/docs-article"
@@ -50,7 +49,7 @@ export default function CoreConceptsPage() {
           The edge. Public TLS, certificate issuance, request routing.
         </Card>
         <Card title="ngstone" icon={Laptop}>
-          The agent and CLI. The local inspector doesn&apos;t exist yet —
+          The agent and CLI. Also opens the terminal request inspector —
           see below.
         </Card>
       </CardGrid>
@@ -113,16 +112,17 @@ export default function CoreConceptsPage() {
       </p>
 
       <Anchor id="the-inspector">The inspector</Anchor>
-      <Callout variant="warning" title="Planned, not built (M5)">
-        The request inspector — a local web UI for viewing and replaying
-        captured traffic — is designed but not implemented. There is no{" "}
-        <code>127.0.0.1:4040</code> listener today. Each agent process
-        currently runs exactly one tunnel and nothing else alongside it.
-      </Callout>
+      <p>
+        <code>ngstone port</code> opens a full-screen terminal dashboard —
+        not a web UI, no <code>localhost:4040</code>, no HTTP API — showing
+        every request and response your tunnel handles as it happens. One
+        agent process runs exactly one tunnel and one inspector; a second
+        tunnel is a second terminal tab.
+      </p>
       <CardGrid columns={1}>
         <Card title="Request inspector" icon={Eye} href="/docs/guides/request-inspector">
-          The planned design for viewing every request and response your
-          tunnel handles, live, at localhost:4040 — not yet shipped.
+          Every request and response your tunnel handles, live, right in
+          your terminal.
         </Card>
       </CardGrid>
     </DocsArticle>

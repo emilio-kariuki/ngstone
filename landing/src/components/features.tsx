@@ -38,9 +38,9 @@ const FEATURES = [
   },
   {
     icon: Activity,
-    title: "Request inspector (planned)",
+    title: "Terminal request inspector",
     description:
-      "A local web UI at localhost:4040 is on the roadmap — every request and response live, headers, bodies, timing, replay and edit-and-replay. Not built yet.",
+      "ngstone port opens a full-screen terminal dashboard — every request and response live, headers, decoded bodies, timing, replay and edit-and-replay, right in your terminal.",
   },
   {
     icon: Waves,

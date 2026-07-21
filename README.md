@@ -12,14 +12,18 @@ one operator running their own domain and their own VPS.
 
 v1 is **HTTP/HTTPS tunnels only**. It handles plain request/response traffic
 end to end, with real TLS (via certmagic + DNS-01), per-IP rate limiting,
-in-flight caps, and graceful reconnect/takeover semantics.
+in-flight caps, and graceful reconnect/takeover semantics. `ngstone port`
+opens a terminal request inspector — a full-screen dashboard with a live
+request list, headers/body detail pane, and replay — with no web UI and no
+`localhost:4040` involved.
 
 Not built yet:
 
 - **WebSocket / SSE hardening (M4)** — long-lived and streamed connections are
   not yet specifically tested or hardened. Don't rely on them in production.
-- **Local request inspector (M5)** — there is no `localhost:4040` UI for
-  viewing or replaying captured requests yet.
+  (WebSocket upgrades do already show up in the inspector at connect time —
+  see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §6 — this note is about
+  the underlying tunnel hardening, not inspector support.)
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design doc,
 including the milestone-by-milestone build order and what "done" means for
@@ -121,3 +125,7 @@ go build ./cmd/ngstoned
 
 Or `make build` to build both into `bin/`. See the [Makefile](Makefile) for
 cross-compiling and deploy targets.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

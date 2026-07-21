@@ -85,7 +85,12 @@ verified against ngstone.site:4443 and saved`} />
       <Anchor id="ngstone-port">ngstone port</Anchor>
       <p>
         Starts a tunnel to a local port or URL. This is the command that
-        actually opens a connection to the edge and forwards traffic.
+        actually opens a connection to the edge and forwards traffic. When
+        stdout is a terminal, it also opens a full-screen inspector
+        dashboard showing every request and response live, with headers,
+        decoded bodies, timing, and replay — see{" "}
+        <a href="/docs/guides/request-inspector">Using the request
+        inspector</a>.
       </p>
       <CodeBlock
         language="bash"
@@ -123,6 +128,13 @@ $ ngstone port 3000 --subdomain demo`}
         <Property name="--pin" type="string">
           Optional SPKI pin, checked in addition to normal chain
           validation. Off by default.
+        </Property>
+        <Property name="--no-tui" type="bool" defaultValue="false">
+          Disable the terminal inspector UI and log plain text to stderr
+          instead. The inspector is also skipped automatically whenever
+          stdout isn&apos;t a terminal (piping, CI, running under{" "}
+          <code>&amp;</code>), so this flag mainly matters when stdout
+          <em>is</em> a terminal and you still want plain logs.
         </Property>
       </ParamTable>
 
