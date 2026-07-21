@@ -2,10 +2,10 @@ package agent
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"sync"
@@ -35,6 +35,11 @@ type Config struct {
 	TargetURL   string
 
 	InstanceID string
+
+	Insecure   bool
+	ServerName string
+	Pin        string
+	RootCAs    *x509.CertPool
 }
 
 type Status struct {
@@ -110,10 +115,9 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 func (a *Agent) runOnce(ctx context.Context, bo *backoff) error {
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "tcp", a.cfg.ControlAddr)
+	conn, err := dialControl(ctx, a.cfg)
 	if err != nil {
-		return fmt.Errorf("agent: dial control: %w", err)
+		return err
 	}
 
 	sess, err := tunnel.Client(conn)

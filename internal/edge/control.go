@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -142,6 +143,19 @@ func (s *Server) handleControlConn(ctx context.Context, conn net.Conn) {
 	if err := conn.SetWriteDeadline(deadline); err != nil {
 		conn.Close()
 		return
+	}
+
+	if s.tlsMgr != nil {
+		tlsConn := tls.Server(conn, s.tlsMgr.ApexTLSConfig())
+		hctx, cancel := context.WithDeadline(ctx, deadline)
+		err := tlsConn.HandshakeContext(hctx)
+		cancel()
+		if err != nil {
+			slog.Warn("edge: control TLS handshake failed", "ip", ip, "err", err)
+			conn.Close()
+			return
+		}
+		conn = tlsConn
 	}
 
 	sess, err := tunnel.Server(conn)
@@ -418,6 +432,6 @@ func (s *Server) finishBind(id uint64, ctrl *proto.Conn, hostname string, evicte
 	}
 	ctrl.Write(proto.TypeBindOK, id, proto.BindOK{
 		Hostname: hostname,
-		URL:      "http://" + hostname,
+		URL:      s.cfg.PublicScheme + "://" + hostname,
 	})
 }
