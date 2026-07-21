@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -11,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"ngstone/internal/agent"
 	"ngstone/internal/config"
+	"ngstone/internal/tui"
 )
 
 type syncBuffer struct {
@@ -276,6 +280,301 @@ func TestParsePermissiveAcceptsFlagsBeforePositional(t *testing.T) {
 	}
 	if *subdomain != "demo" {
 		t.Fatalf("subdomain = %q, want demo", *subdomain)
+	}
+}
+
+func TestPortFlagSetParsesNoTUI(t *testing.T) {
+	fs, pf := newPortFlagSet()
+	positionals, err := parsePermissive(fs, []string{"3001", "--no-tui"})
+	if err != nil {
+		t.Fatalf("parsePermissive: %v", err)
+	}
+	if len(positionals) != 1 || positionals[0] != "3001" {
+		t.Fatalf("positionals = %v, want [3001]; --no-tui must be treated as a boolean flag", positionals)
+	}
+	if !pf.noTUI {
+		t.Fatalf("pf.noTUI = false after --no-tui, want true")
+	}
+
+	fs, pf = newPortFlagSet()
+	if _, err := parsePermissive(fs, []string{"3001"}); err != nil {
+		t.Fatalf("parsePermissive: %v", err)
+	}
+	if pf.noTUI {
+		t.Fatalf("pf.noTUI = true without the flag, want false")
+	}
+
+	fs, pf = newPortFlagSet()
+	if _, err := parsePermissive(fs, []string{"3001", "-no-tui", "--subdomain", "demo"}); err != nil {
+		t.Fatalf("parsePermissive with single-dash form: %v", err)
+	}
+	if !pf.noTUI {
+		t.Fatalf("pf.noTUI = false after -no-tui, want true")
+	}
+	if pf.subdomain != "demo" {
+		t.Fatalf("subdomain = %q, want demo; -no-tui must not swallow the next argument", pf.subdomain)
+	}
+}
+
+func TestShouldUseTUIRequiresFlagAndTerminal(t *testing.T) {
+	orig := stdoutIsTerminal
+	t.Cleanup(func() { stdoutIsTerminal = orig })
+
+	cases := []struct {
+		terminal bool
+		noTUI    bool
+		want     bool
+	}{
+		{terminal: true, noTUI: false, want: true},
+		{terminal: true, noTUI: true, want: false},
+		{terminal: false, noTUI: false, want: false},
+		{terminal: false, noTUI: true, want: false},
+	}
+	for _, tc := range cases {
+		stdoutIsTerminal = func() bool { return tc.terminal }
+		if got := shouldUseTUI(tc.noTUI); got != tc.want {
+			t.Fatalf("shouldUseTUI(noTUI=%v) with terminal=%v = %v, want %v", tc.noTUI, tc.terminal, got, tc.want)
+		}
+	}
+}
+
+func TestNonTTYStdoutSelectsPlainMode(t *testing.T) {
+	if defaultStdoutIsTerminal() {
+		t.Skip("test process stdout is a terminal; this check needs a non-TTY stdout")
+	}
+	if shouldUseTUI(false) {
+		t.Fatalf("shouldUseTUI(false) = true with a non-TTY stdout, want plain mode")
+	}
+}
+
+func TestDefaultStdoutIsTerminalRejectsPipes(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer r.Close()
+	defer w.Close()
+
+	orig := os.Stdout
+	os.Stdout = w
+	got := defaultStdoutIsTerminal()
+	os.Stdout = orig
+
+	if got {
+		t.Fatalf("defaultStdoutIsTerminal() = true for a pipe, want false")
+	}
+}
+
+func TestLegacyPathNeverUsesTUI(t *testing.T) {
+	orig := stdoutIsTerminal
+	t.Cleanup(func() { stdoutIsTerminal = orig })
+	stdoutIsTerminal = func() bool { return true }
+
+	for _, noTUI := range []bool{false, true} {
+		if legacyShouldUseTUI(noTUI) {
+			t.Fatalf("legacyShouldUseTUI(%v) = true, want the legacy bare-flag path to always stay plain", noTUI)
+		}
+	}
+}
+
+func TestSuperviseCancelsAgentWhenTUIExits(t *testing.T) {
+	agentSawCancel := make(chan struct{})
+	runAgent := func(ctx context.Context) error {
+		<-ctx.Done()
+		close(agentSawCancel)
+		return nil
+	}
+	runTUI := func(ctx context.Context) error { return nil }
+
+	start := time.Now()
+	res := supervise(context.Background(), 2*time.Second, runAgent, runTUI)
+	elapsed := time.Since(start)
+
+	if !res.agentStopped {
+		t.Fatalf("agentStopped = false, want the agent context to be cancelled when the TUI exits")
+	}
+	select {
+	case <-agentSawCancel:
+	default:
+		t.Fatalf("agent goroutine never observed context cancellation")
+	}
+	if res.agentErr != nil || res.tuiErr != nil {
+		t.Fatalf("agentErr = %v, tuiErr = %v, want both nil", res.agentErr, res.tuiErr)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("supervise took %s, want it to return as soon as the agent stops", elapsed)
+	}
+}
+
+func TestSuperviseTearsDownTUIWhenAgentExitsFirst(t *testing.T) {
+	fatal := errors.New("bad token")
+	runAgent := func(ctx context.Context) error { return fatal }
+
+	tuiTornDown := make(chan struct{})
+	runTUI := func(ctx context.Context) error {
+		<-ctx.Done()
+		close(tuiTornDown)
+		return nil
+	}
+
+	var res superviseResult
+	superviseDone := make(chan struct{})
+	go func() {
+		defer close(superviseDone)
+		res = supervise(context.Background(), 2*time.Second, runAgent, runTUI)
+	}()
+
+	select {
+	case <-superviseDone:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("supervise did not return; the TUI was never torn down after the agent exited")
+	}
+
+	select {
+	case <-tuiTornDown:
+	default:
+		t.Fatalf("TUI was never torn down after the agent exited")
+	}
+	if !errors.Is(res.agentErr, fatal) {
+		t.Fatalf("agentErr = %v, want the fatal agent error to be surfaced", res.agentErr)
+	}
+	if !res.agentStopped {
+		t.Fatalf("agentStopped = false, want true")
+	}
+}
+
+func TestSuperviseReportsAgentThatIgnoresCancellation(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	runAgent := func(ctx context.Context) error {
+		<-release
+		return nil
+	}
+	runTUI := func(ctx context.Context) error { return nil }
+
+	res := supervise(context.Background(), 50*time.Millisecond, runAgent, runTUI)
+	if res.agentStopped {
+		t.Fatalf("agentStopped = true, want false when the agent outlives the grace period")
+	}
+}
+
+func TestDumpLogRingWritesEveryLineInOrder(t *testing.T) {
+	var buf syncBuffer
+	dumpLogRing(&buf, []string{"a", "b", "c"})
+
+	if got := buf.String(); got != "a\nb\nc\n" {
+		t.Fatalf("dumped log ring = %q, want every line in order", got)
+	}
+}
+
+func TestDumpLogRingWithNoLinesWritesNothing(t *testing.T) {
+	var buf syncBuffer
+	dumpLogRing(&buf, nil)
+	dumpLogRing(&buf, []string{})
+
+	if got := buf.String(); got != "" {
+		t.Fatalf("dumped empty log ring = %q, want nothing written", got)
+	}
+}
+
+func TestFinishPortTUIDumpsLogsAndReportsExitCode(t *testing.T) {
+	agentFatal := errors.New("bad token")
+	tuiFatal := errors.New("inspector blew up")
+
+	cases := []struct {
+		name     string
+		res      superviseResult
+		wantCode int
+		wantMsg  string
+	}{
+		{
+			name:     "clean shutdown",
+			res:      superviseResult{agentStopped: true},
+			wantCode: 0,
+		},
+		{
+			name:     "agent error",
+			res:      superviseResult{agentStopped: true, agentErr: agentFatal},
+			wantCode: 1,
+			wantMsg:  "ngstone: exited with error: bad token",
+		},
+		{
+			name:     "tui error",
+			res:      superviseResult{agentStopped: true, tuiErr: tuiFatal},
+			wantCode: 1,
+			wantMsg:  "ngstone: inspector exited with error: inspector blew up",
+		},
+		{
+			name:     "agent outlived grace",
+			res:      superviseResult{agentStopped: false, tuiErr: tuiFatal},
+			wantCode: 1,
+			wantMsg:  "ngstone: timed out after 5s waiting for the tunnel to shut down",
+		},
+	}
+
+	lines := []string{"level=INFO msg=starting", "level=ERROR msg=dial failed"}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf syncBuffer
+			got := finishPortTUI(&buf, lines, tc.res, 5*time.Second)
+			out := buf.String()
+
+			if got != tc.wantCode {
+				t.Fatalf("finishPortTUI exit code = %d, want %d (output %q)", got, tc.wantCode, out)
+			}
+			for _, line := range lines {
+				if !strings.Contains(out, line+"\n") {
+					t.Fatalf("finishPortTUI output = %q, want the buffered log line %q to survive the TUI teardown", out, line)
+				}
+			}
+			if tc.wantMsg != "" && !strings.Contains(out, tc.wantMsg) {
+				t.Fatalf("finishPortTUI output = %q, want it to contain %q", out, tc.wantMsg)
+			}
+			if tc.wantCode == 0 && strings.Contains(out, "ngstone: ") {
+				t.Fatalf("finishPortTUI output = %q, want no failure message on a clean exit", out)
+			}
+		})
+	}
+}
+
+func TestBridgeStatusConvertsAndExitsOnContextDone(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	in := make(chan agent.StatusEvent, 4)
+	out := make(chan tui.StatusEvent, 4)
+
+	done := make(chan struct{})
+	go func() {
+		bridgeStatus(ctx, in, out)
+		close(done)
+	}()
+
+	in <- agent.StatusEvent{State: agent.StateOnline, Hostname: "demo.ngstone.site", URL: "https://demo.ngstone.site"}
+	in <- agent.StatusEvent{State: agent.StateOffline, Err: "boom"}
+
+	got := make([]tui.StatusEvent, 0, 2)
+	for len(got) < 2 {
+		select {
+		case ev := <-out:
+			got = append(got, ev)
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for bridged status events, got %v", got)
+		}
+	}
+
+	if got[0].State != agent.StateOnline || got[0].Hostname != "demo.ngstone.site" || got[0].Err != nil {
+		t.Fatalf("first bridged event = %+v, want the online event with a nil error", got[0])
+	}
+	if got[1].Err == nil || got[1].Err.Error() != "boom" {
+		t.Fatalf("second bridged event err = %v, want an error carrying %q", got[1].Err, "boom")
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("bridgeStatus did not exit after context cancellation")
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -12,9 +13,12 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"ngstone/internal/agent"
 	"ngstone/internal/config"
+	"ngstone/internal/inspect"
+	"ngstone/internal/tui"
 	"ngstone/internal/version"
 )
 
@@ -159,6 +163,29 @@ func parsePermissive(fs *flag.FlagSet, args []string) ([]string, error) {
 	return positionals, nil
 }
 
+const agentShutdownGrace = 5 * time.Second
+
+var stdoutIsTerminal = defaultStdoutIsTerminal
+
+func defaultStdoutIsTerminal() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+func shouldUseTUI(noTUI bool) bool {
+	if noTUI {
+		return false
+	}
+	return stdoutIsTerminal()
+}
+
+func legacyShouldUseTUI(noTUI bool) bool {
+	return false
+}
+
 func displayOrNone(s string) string {
 	if s == "" {
 		return "(none)"
@@ -223,17 +250,34 @@ func cmdAuth(args []string) int {
 	return 0
 }
 
-func cmdPort(args []string) int {
+type portFlags struct {
+	subdomain  string
+	server     string
+	token      string
+	instanceID string
+	insecure   bool
+	serverName string
+	pin        string
+	noTUI      bool
+}
+
+func newPortFlagSet() (*flag.FlagSet, *portFlags) {
 	fs := flag.NewFlagSet("port", flag.ContinueOnError)
-	var subdomain string
-	fs.StringVar(&subdomain, "subdomain", "", "requested subdomain (empty = server-assigned)")
-	fs.StringVar(&subdomain, "s", "", "shorthand for -subdomain")
-	serverFlag := fs.String("server", "", "edge control plane address override (defaults to config or "+defaultServer+")")
-	tokenFlag := fs.String("token", "", "auth token override (defaults to NGSTONE_TOKEN or the saved config)")
-	instanceID := fs.String("instance-id", "", "internal/undocumented: force a specific instance id (testing only)")
-	insecure := fs.Bool("insecure", false, "dial the control plane in plaintext (dev/test only, no certificates involved)")
-	serverName := fs.String("server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
-	pin := fs.String("pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation")
+	pf := &portFlags{}
+	fs.StringVar(&pf.subdomain, "subdomain", "", "requested subdomain (empty = server-assigned)")
+	fs.StringVar(&pf.subdomain, "s", "", "shorthand for -subdomain")
+	fs.StringVar(&pf.server, "server", "", "edge control plane address override (defaults to config or "+defaultServer+")")
+	fs.StringVar(&pf.token, "token", "", "auth token override (defaults to NGSTONE_TOKEN or the saved config)")
+	fs.StringVar(&pf.instanceID, "instance-id", "", "internal/undocumented: force a specific instance id (testing only)")
+	fs.BoolVar(&pf.insecure, "insecure", false, "dial the control plane in plaintext (dev/test only, no certificates involved)")
+	fs.StringVar(&pf.serverName, "server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
+	fs.StringVar(&pf.pin, "pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation")
+	fs.BoolVar(&pf.noTUI, "no-tui", false, "disable the terminal inspector UI and log plain text to stderr")
+	return fs, pf
+}
+
+func cmdPort(args []string) int {
+	fs, pf := newPortFlagSet()
 	positionals, err := parsePermissive(fs, args)
 	if err != nil {
 		return 2
@@ -255,37 +299,175 @@ func cmdPort(args []string) int {
 		return 1
 	}
 
-	token, err := resolveToken(*tokenFlag, os.Getenv("NGSTONE_TOKEN"), cfg)
+	token, err := resolveToken(pf.token, os.Getenv("NGSTONE_TOKEN"), cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ngstone: "+err.Error())
 		return 1
 	}
-	server := resolveServer(*serverFlag, cfg)
+	server := resolveServer(pf.server, cfg)
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	slog.SetDefault(logger)
+	acfg := agent.Config{
+		ControlAddr: server,
+		Token:       token,
+		Subdomain:   pf.subdomain,
+		TargetURL:   targetURL,
+		InstanceID:  pf.instanceID,
+
+		Insecure:   pf.insecure,
+		ServerName: pf.serverName,
+		Pin:        pf.pin,
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	a := agent.New(agent.Config{
-		ControlAddr: server,
-		Token:       token,
-		Subdomain:   subdomain,
-		TargetURL:   targetURL,
-		InstanceID:  *instanceID,
+	if shouldUseTUI(pf.noTUI) {
+		return runPortTUI(ctx, acfg)
+	}
+	return runPortPlain(ctx, acfg)
+}
 
-		Insecure:   *insecure,
-		ServerName: *serverName,
-		Pin:        *pin,
-	})
+func runPortPlain(ctx context.Context, acfg agent.Config) int {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	slog.SetDefault(logger)
 
-	logger.Info("ngstone: starting", "control", server, "target", targetURL, "insecure", *insecure)
+	a := agent.New(acfg)
+
+	logger.Info("ngstone: starting", "control", acfg.ControlAddr, "target", acfg.TargetURL, "insecure", acfg.Insecure)
 	if err := a.Run(ctx); err != nil {
 		logger.Error("ngstone: exited with error", "err", err)
 		return 1
 	}
 	return 0
+}
+
+func runPortTUI(ctx context.Context, acfg agent.Config) int {
+	ring := tui.NewLogRing(500)
+	logger := slog.New(ring)
+	slog.SetDefault(logger)
+
+	events := make(chan agent.StatusEvent, 16)
+	acfg.Store = inspect.NewStore()
+	acfg.Events = events
+
+	a := agent.New(acfg)
+
+	logger.Info("ngstone: starting", "control", acfg.ControlAddr, "target", acfg.TargetURL, "insecure", acfg.Insecure)
+
+	status := make(chan tui.StatusEvent, 16)
+
+	res := supervise(ctx, agentShutdownGrace,
+		func(agentCtx context.Context) error {
+			go bridgeStatus(agentCtx, events, status)
+			return a.Run(agentCtx)
+		},
+		func(tuiCtx context.Context) error {
+			return tui.Run(tuiCtx, tui.Options{
+				Store:  a.Store(),
+				Target: a.Target(),
+				RT:     a.Transport(),
+				Status: status,
+				Logs:   ring,
+			})
+		})
+
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	return finishPortTUI(os.Stderr, ring.Lines(), res, agentShutdownGrace)
+}
+
+func dumpLogRing(w io.Writer, lines []string) {
+	for _, line := range lines {
+		fmt.Fprintln(w, line)
+	}
+}
+
+func finishPortTUI(w io.Writer, lines []string, res superviseResult, grace time.Duration) int {
+	dumpLogRing(w, lines)
+
+	if !res.agentStopped {
+		fmt.Fprintf(w, "ngstone: timed out after %s waiting for the tunnel to shut down\n", grace)
+		return 1
+	}
+	if res.agentErr != nil {
+		fmt.Fprintf(w, "ngstone: exited with error: %v\n", res.agentErr)
+		return 1
+	}
+	if res.tuiErr != nil {
+		fmt.Fprintf(w, "ngstone: inspector exited with error: %v\n", res.tuiErr)
+		return 1
+	}
+	return 0
+}
+
+type superviseResult struct {
+	agentErr     error
+	tuiErr       error
+	agentStopped bool
+}
+
+func supervise(ctx context.Context, grace time.Duration, runAgent, runTUI func(context.Context) error) superviseResult {
+	agentCtx, cancelAgent := context.WithCancel(ctx)
+	defer cancelAgent()
+
+	var agentErr error
+	agentDone := make(chan struct{})
+	go func() {
+		defer close(agentDone)
+		agentErr = runAgent(agentCtx)
+	}()
+
+	tuiCtx, cancelTUI := context.WithCancel(ctx)
+	defer cancelTUI()
+
+	tuiDone := make(chan struct{})
+	go func() {
+		select {
+		case <-agentDone:
+			cancelTUI()
+		case <-tuiDone:
+		}
+	}()
+
+	tuiErr := runTUI(tuiCtx)
+	close(tuiDone)
+
+	cancelAgent()
+
+	agentStopped := true
+	select {
+	case <-agentDone:
+	case <-time.After(grace):
+		agentStopped = false
+	}
+
+	res := superviseResult{tuiErr: tuiErr, agentStopped: agentStopped}
+	if agentStopped {
+		res.agentErr = agentErr
+	}
+	return res
+}
+
+func bridgeStatus(ctx context.Context, in <-chan agent.StatusEvent, out chan<- tui.StatusEvent) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-in:
+			if !ok {
+				return
+			}
+			var err error
+			if ev.Err != "" {
+				err = errors.New(ev.Err)
+			}
+			select {
+			case out <- tui.StatusEvent{State: ev.State, Hostname: ev.Hostname, URL: ev.URL, Err: err}:
+			case <-ctx.Done():
+				return
+			default:
+			}
+		}
+	}
 }
 
 func cmdConfig(args []string) int {
@@ -390,6 +572,7 @@ func legacyMain() {
 	serverName := flag.String("server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
 	pin := flag.String("pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation (off by default)")
 	showVersion := flag.Bool("version", false, "print version and exit")
+	noTUI := flag.Bool("no-tui", false, "disable the terminal inspector UI (this legacy flag form is always plain output)")
 	flag.Parse()
 
 	if *showVersion {
@@ -422,7 +605,7 @@ func legacyMain() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	a := agent.New(agent.Config{
+	acfg := agent.Config{
 		ControlAddr: ctl,
 		Token:       tok,
 		Subdomain:   *subdomain,
@@ -432,7 +615,13 @@ func legacyMain() {
 		Insecure:   *insecure,
 		ServerName: *serverName,
 		Pin:        *pin,
-	})
+	}
+
+	if legacyShouldUseTUI(*noTUI) {
+		os.Exit(runPortTUI(ctx, acfg))
+	}
+
+	a := agent.New(acfg)
 
 	logger.Info("ngstone: starting", "control", ctl, "target", *target, "insecure", *insecure)
 	if err := a.Run(ctx); err != nil {
