@@ -12,11 +12,15 @@ import (
 )
 
 func main() {
-	controlAddr := flag.String("control", "127.0.0.1:4443", "edge control plane address")
+	controlAddr := flag.String("control", "ngstone.site:4443", "edge control plane address")
 	token := flag.String("token", "", "shared auth token (defaults to NGSTONE_TOKEN env var)")
 	target := flag.String("target", "http://127.0.0.1:3000", "local target URL to forward requests to")
 	subdomain := flag.String("subdomain", "", "requested subdomain (empty = server-assigned)")
 	instanceID := flag.String("instance-id", "", "internal/undocumented: force a specific instance id (testing only)")
+
+	insecure := flag.Bool("insecure", false, "dial the control plane in plaintext (dev/test only, no certificates involved)")
+	serverName := flag.String("server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
+	pin := flag.String("pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation (off by default)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -40,9 +44,13 @@ func main() {
 		Subdomain:   *subdomain,
 		TargetURL:   *target,
 		InstanceID:  *instanceID,
+
+		Insecure:   *insecure,
+		ServerName: *serverName,
+		Pin:        *pin,
 	})
 
-	logger.Info("ngstone: starting", "control", *controlAddr, "target", *target)
+	logger.Info("ngstone: starting", "control", *controlAddr, "target", *target, "insecure", *insecure)
 	if err := a.Run(ctx); err != nil {
 		logger.Error("ngstone: exited with error", "err", err)
 		os.Exit(1)
