@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"ngstone/internal/edge"
+	"ngstone/internal/version"
 )
 
 func main() {
@@ -41,7 +43,14 @@ func main() {
 	handshakeConcurrency := flag.Int("handshake-concurrency", edge.DefaultHandshakeConcurrency, ":4443 concurrent TLS handshake cap")
 	unauthSessions := flag.Int("unauth-sessions", edge.DefaultUnauthSessions, ":4443 unauthenticated-session cap")
 
+	showVersion := flag.Bool("version", false, "print version and exit")
+
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("ngstoned " + version.String())
+		return
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	slog.SetDefault(logger)
