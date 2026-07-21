@@ -36,16 +36,17 @@ export default function CustomSubdomainsPage() {
       </p>
       <CodeBlock
         language="bash"
-        code={`$ ngstone http 3000
+        code={`$ ngstone port 3000
 → https://amber-fox-42.ngstone.site`}
       />
       <p>
-        Pass <code>--subdomain</code> to request a specific one instead:
+        Pass <code>--subdomain</code> (or its shorthand <code>-s</code>) to
+        request a specific one instead:
       </p>
       <CodeBlock
         language="bash"
-        code={`$ ngstone http 3000 --subdomain api
-→ https://api.ngstone.site`}
+        code={`$ ngstone port 3000 --subdomain demo
+→ https://demo.ngstone.site`}
       />
 
       <Anchor id="naming-rules">Naming rules</Anchor>

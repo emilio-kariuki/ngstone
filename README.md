@@ -30,19 +30,28 @@ each one.
 Install the agent binary:
 
 ```
+brew install emilio-kariuki/tap/ngstone
+# or
 curl -fsSL https://raw.githubusercontent.com/emilio-kariuki/ngstone/main/install.sh | sh
 ```
 
-Then point it at a local port:
+(The short `brew install ngstone` works too, but only after
+`brew tap emilio-kariuki/tap && brew trust emilio-kariuki/tap` — Homebrew 6
+requires explicitly trusting third-party taps first.)
+
+Authenticate against your edge, then expose a local port:
 
 ```
-ngstone -target http://127.0.0.1:3000 -subdomain demo
+ngstone auth <token>
+ngstone port 3000
+ngstone port 3000 --subdomain demo   # request a specific name instead of a random one
 ```
 
 This assumes you (or someone) already has `ngstoned` running on a VPS with a
 domain pointed at it — see [Self-hosting](#self-hosting) below. `ngstoned` is
 not installed by this script; it's server infrastructure, not something to
-curl-pipe onto a box.
+curl-pipe onto a box. There's no `ngstone token` command — the token is a
+plain shell one-liner, shown in the next section.
 
 ## Run it locally, no TLS
 
@@ -58,12 +67,14 @@ NGSTONE_TOKEN="$TOKEN" go run ./cmd/ngstone -insecure -control 127.0.0.1:7443 -t
 curl -H 'Host: demo.ngstone.site' http://127.0.0.1:8443/
 ```
 
-The first command starts the edge listening in plaintext, generating a random
-auth token and hashing it. The second starts the agent, connects it to the
-edge, and binds it to the `demo` subdomain, forwarding to whatever is
-listening on `127.0.0.1:3001`. The third simulates a browser request by
-setting the `Host` header directly (in production this would be the real
-hostname, resolved via DNS).
+The first two lines generate a random auth token and its SHA-256 hash — there
+is no `ngstone token` command, this is the whole procedure. The third command
+starts the edge listening in plaintext, configured with only the hash (the
+edge never sees the plaintext token). The fourth starts the agent using the
+legacy flag form, connects it to the edge, and binds it to the `demo`
+subdomain, forwarding to whatever is listening on `127.0.0.1:3001`. The last
+line simulates a browser request by setting the `Host` header directly (in
+production this would be the real hostname, resolved via DNS).
 
 ## Self-hosting
 

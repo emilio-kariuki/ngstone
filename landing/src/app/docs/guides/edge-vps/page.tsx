@@ -63,17 +63,30 @@ export default function EdgeVpsPage() {
 
       <Anchor id="starting-ngstoned">Starting ngstoned</Anchor>
       <p>
-        With DNS in place, start the edge with your domain and an email
-        address for the ACME account:
+        There&apos;s no <code>ngstone token</code> command — generate a
+        token yourself first, and hash it:
       </p>
       <CodeBlock
         language="bash"
-        code={`$ ngstoned --domain ngstone.site --email you@ngstone.site`}
+        code={`$ TOKEN=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
+$ HASH=$(printf '%s' "$TOKEN" | shasum -a 256 | cut -d' ' -f1)   # sha256sum on Linux`}
+      />
+      <p>
+        With DNS in place, start the edge with your domain, a certificate
+        contact email, a scoped Cloudflare API token, and the hash above:
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstoned --domain ngstone.site --cert-email you@ngstone.site \\
+    --cf-api-token "$CF_API_TOKEN" --token-sha256 "$HASH"`}
       />
       <p>
         On first boot, <code>ngstoned</code> requests both certificates and
-        prints an auth token for the agent to use. From here it&apos;s
-        typically run as a systemd service — see{" "}
+        starts listening — it does not generate or print a token itself;
+        the edge only ever stores the hash you gave it. Keep{" "}
+        <code>$TOKEN</code> for <code>ngstone auth</code> on whichever
+        machines will run the agent. From here it&apos;s typically run as a
+        systemd service — see{" "}
         <a href="/docs/operations/deployment-systemd">
           Deployment &amp; systemd
         </a>

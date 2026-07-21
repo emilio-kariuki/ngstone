@@ -35,7 +35,7 @@ export default function ExposeLocalAppPage() {
       </p>
       <CodeBlock
         language="bash"
-        code={`$ ngstone http 3000
+        code={`$ ngstone port 3000
 → https://amber-fox-42.ngstone.site`}
       />
       <p>
@@ -71,15 +71,13 @@ export default function ExposeLocalAppPage() {
 
       <Anchor id="the-host-header">The Host header</Anchor>
       <p>
-        By default the original public <code>Host</code> header is
-        preserved end to end — what most OAuth callback URLs and vhost
-        routers expect. If your app is picky about the <code>Host</code> it
-        receives and wants <code>localhost:3000</code> instead, rewrite it:
+        The original public <code>Host</code> header is preserved end to
+        end — what most OAuth callback URLs and vhost routers expect.
+        There is currently no flag to rewrite it to something like{" "}
+        <code>localhost:3000</code> instead; if your app is picky about the{" "}
+        <code>Host</code> it receives, it needs to accept the public
+        hostname (e.g. <code>amber-fox-42.ngstone.site</code>) for now.
       </p>
-      <CodeBlock
-        language="bash"
-        code={`$ ngstone http 3000 --host-header=localhost:3000`}
-      />
 
       <Anchor id="app-not-running">When the local app isn&apos;t running</Anchor>
       <p>

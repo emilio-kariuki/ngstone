@@ -40,7 +40,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/ngstoned --domain ngstone.site --email you@ngstone.site
+ExecStart=/usr/local/bin/ngstoned --domain ngstone.site --cert-email you@ngstone.site
 DynamicUser=yes
 StateDirectory=ngstoned
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -86,10 +86,15 @@ WantedBy=multi-user.target`}
       <Anchor id="secrets">Secrets</Anchor>
       <Callout variant="danger" title="Never pass secrets as ExecStart flags">
         <code>/proc/&lt;pid&gt;/cmdline</code> is world-readable on stock
-        Linux, so a token passed as a command-line flag is readable by any
-        local user via <code>ps auxww</code>. Put{" "}
-        <code>NGSTONE_TOKEN</code> in an <code>EnvironmentFile=</code>{" "}
-        instead and read it from the environment.
+        Linux, so a token hash or API token passed as a command-line flag
+        is readable by any local user via <code>ps auxww</code>. Put{" "}
+        <code>NGSTONE_TOKEN_SHA256</code> and{" "}
+        <code>NGSTONE_CF_API_TOKEN</code> in the unit&apos;s{" "}
+        <code>EnvironmentFile=</code> instead — <code>ngstoned</code> reads
+        both in preference to the equivalent <code>-token-sha256</code>/
+        <code>-cf-api-token</code> flags for exactly this reason. (The
+        plaintext token itself, <code>NGSTONE_TOKEN</code>, belongs on the
+        agent side, not on the VPS.)
       </Callout>
 
       <Anchor id="restart-behavior">Restart behavior</Anchor>
