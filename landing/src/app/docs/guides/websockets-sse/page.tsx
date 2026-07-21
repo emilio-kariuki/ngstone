@@ -7,7 +7,7 @@ import { DocsArticle } from "@/components/docs/docs-article"
 
 export const metadata: Metadata = {
   title: "WebSockets & SSE",
-  description: "Long-lived and streaming connections through the tunnel.",
+  description: "Long-lived and streaming connections through the tunnel — hardening not yet complete (M4).",
 }
 
 const TOC: TocItem[] = [
@@ -21,20 +21,30 @@ export default function WebsocketsSsePage() {
   return (
     <DocsArticle href="/docs/guides/websockets-sse" toc={TOC}>
       <h1>WebSockets &amp; SSE</h1>
+      <Callout variant="warning" title="Not hardened yet (M4)">
+        Plain HTTP request/response is what ngstone has actually been
+        built and tested for. WebSocket and SSE traffic is not yet
+        specifically tested or hardened — it may work today as a side
+        effect of the stdlib reverse proxy&apos;s default behavior, but
+        don&apos;t rely on it in production until M4 lands.
+      </Callout>
       <p>
-        Long-lived connections aren&apos;t a special case in ngstone — they
-        ride the same per-request yamux stream as any other HTTP exchange,
-        for as long as they stay open.
+        Long-lived connections aren&apos;t meant to be a special case in
+        ngstone&apos;s design — they&apos;d ride the same per-request yamux
+        stream as any other HTTP exchange, for as long as they stay open.
       </p>
 
       <Anchor id="websocket-passthrough">WebSocket passthrough</Anchor>
       <p>
-        The edge&apos;s <code>ReverseProxy</code> handles{" "}
-        <code>Connection: Upgrade</code> natively. It hijacks the connection,
-        completes the <code>101</code> handshake, and then bidirectionally
-        copies bytes for the rest of the socket&apos;s life — over the exact
-        same yamux stream that was opened for the original upgrade request.
-        No separate channel, no re-dialing.
+        Both the edge and the agent use Go&apos;s stdlib{" "}
+        <code>httputil.ReverseProxy</code>, which handles{" "}
+        <code>Connection: Upgrade</code> on its own — hijacking the
+        connection, completing the <code>101</code> handshake, and copying
+        bytes bidirectionally for the rest of the socket&apos;s life, over
+        the same yamux stream that was opened for the original upgrade
+        request. That&apos;s the mechanism in place today; it just
+        hasn&apos;t been specifically exercised or hardened yet (see the
+        callout above), so treat it as untested rather than guaranteed.
       </p>
 
       <Anchor id="ws-over-h2">WebSocket over HTTP/2</Anchor>
@@ -47,21 +57,25 @@ export default function WebsocketsSsePage() {
 
       <Anchor id="server-sent-events">Server-Sent Events</Anchor>
       <p>
-        SSE works because both proxies set <code>FlushInterval: -1</code>,
-        which flushes bytes to the client as soon as they arrive instead of
-        batching them. <code>text/event-stream</code> responses are detected
-        automatically, so there&apos;s nothing to configure — point ngstone
-        at an SSE endpoint and it streams.
+        SSE is plain HTTP streaming, not an upgrade, and both proxies set{" "}
+        <code>FlushInterval: -1</code>, which flushes bytes to the client as
+        soon as they arrive instead of batching them. That part rides the
+        same code path as ordinary HTTP responses, so it&apos;s on firmer
+        ground than WebSockets — but it hasn&apos;t been separately
+        load-tested for long-lived streams either, which is why it&apos;s
+        grouped under the same M4 milestone.
       </p>
 
-      <Anchor id="in-the-inspector">How they appear in the inspector</Anchor>
+      <Anchor id="in-the-inspector">How they&apos;d appear in the inspector</Anchor>
       <p>
-        WebSockets are finalized in the inspector at{" "}
-        <strong>101 time</strong>, not at close. The capture middleware
-        records the request and response headers the moment the upgrade
-        completes, so the entry shows up in the request list instantly —
-        rather than staying invisible until the socket eventually closes,
-        possibly hours later.
+        There is no inspector today (see{" "}
+        <a href="/docs/guides/request-inspector">Using the request
+        inspector</a>
+        , also planned for a later milestone). Once both exist, the design
+        intent is for WebSockets to finalize in the inspector at{" "}
+        <strong>101 time</strong>, not at close, so a long-lived connection
+        would show up in the request list instantly instead of staying
+        invisible until the socket eventually closes.
       </p>
     </DocsArticle>
   )

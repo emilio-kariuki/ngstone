@@ -38,15 +38,15 @@ const FEATURES = [
   },
   {
     icon: Activity,
-    title: "Built-in request inspector",
+    title: "Request inspector (planned)",
     description:
-      "A local web UI at localhost:4040 shows every request and response live — headers, bodies, timing — and lets you replay or edit-and-replay any of them.",
+      "A local web UI at localhost:4040 is on the roadmap — every request and response live, headers, bodies, timing, replay and edit-and-replay. Not built yet.",
   },
   {
     icon: Waves,
     title: "Constant-memory streaming",
     description:
-      "Bodies are never buffered — a 1 GiB download or 100 MB upload passes through at constant memory. WebSockets and SSE ride the same tunnel and just work.",
+      "Bodies are never buffered — a 1 GiB download or 100 MB upload passes through at constant memory. WebSockets and SSE ride the same tunnel, though hardening for them is still in progress.",
   },
   {
     icon: RefreshCw,

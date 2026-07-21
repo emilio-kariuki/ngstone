@@ -17,13 +17,17 @@ export function Inspector() {
   return (
     <section id="inspector" className="mx-auto max-w-6xl px-6 py-24 sm:py-28">
       <div className="mx-auto max-w-2xl text-center">
+        <Badge variant="outline" className="mb-4 font-mono text-xs">
+          Planned — not yet shipped
+        </Badge>
         <h2 className="font-display text-3xl font-medium tracking-tight sm:text-4xl">
           Watch every request land, live
         </h2>
         <p className="mt-4 text-balance text-muted-foreground">
-          A local web UI at localhost:4040 shows every request and response
-          as it happens, with headers, bodies, and timing — and lets you
-          replay any of them straight to your app.
+          The design: a local web UI at localhost:4040 showing every request
+          and response as it happens, with headers, bodies, and timing — and
+          letting you replay any of them straight to your app. This is on
+          the roadmap, not in your hands today.
         </p>
       </div>
 

@@ -16,12 +16,12 @@ export const NAV: NavGroup[] = [
       {
         title: "Quickstart",
         href: "/docs/quickstart",
-        description: "From clone to a public URL in three commands.",
+        description: "From a fresh VPS to a public URL on your laptop.",
       },
       {
         title: "Installation",
         href: "/docs/installation",
-        description: "Build both binaries and put them where they run.",
+        description: "Install the agent, and build the edge from source.",
       },
       {
         title: "Core Concepts",
@@ -51,17 +51,17 @@ export const NAV: NavGroup[] = [
       {
         title: "Using the request inspector",
         href: "/docs/guides/request-inspector",
-        description: "See every request and response at localhost:4040.",
+        description: "Planned design, not yet implemented (M5).",
       },
       {
         title: "Replaying requests",
         href: "/docs/guides/replaying-requests",
-        description: "Re-send a captured request straight to your local app.",
+        description: "Planned design, not yet implemented (M5).",
       },
       {
         title: "WebSockets & SSE",
         href: "/docs/guides/websockets-sse",
-        description: "Long-lived and streaming connections through the tunnel.",
+        description: "Long-lived connections — not yet hardened (M4).",
       },
       {
         title: "Streaming & large transfers",
@@ -81,7 +81,7 @@ export const NAV: NavGroup[] = [
       {
         title: "Configuration",
         href: "/docs/reference/configuration",
-        description: "Flags and environment for both binaries.",
+        description: "The agent's config file, and the edge's flags and environment.",
       },
       {
         title: "The wire protocol",
@@ -101,7 +101,7 @@ export const NAV: NavGroup[] = [
       {
         title: "The inspector API",
         href: "/docs/reference/inspector-api",
-        description: "The HTTP API behind localhost:4040.",
+        description: "Planned design, not yet implemented (M5).",
       },
     ],
   },

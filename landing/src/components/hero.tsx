@@ -59,7 +59,7 @@ export function Hero() {
           <TerminalWindow>
             <div className="flex items-center gap-2 text-muted-foreground">
               <span className="select-none">$</span>
-              <span className="text-foreground">ngstone http 3000</span>
+              <span className="text-foreground">ngstone port 3000</span>
             </div>
             <div className="mt-3 flex items-center gap-2">
               <span className="text-primary">&rarr;</span>

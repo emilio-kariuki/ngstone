@@ -12,23 +12,27 @@ const STEPS = [
   {
     title: "Point DNS at your VPS, and start the edge",
     description:
-      "Add a wildcard A record for *.yourdomain.com pointing at your server, then run the edge binary there.",
-    code: `$ ngstoned --domain yourdomain.com --email you@yourdomain.com`,
+      "Add a wildcard A record for *.yourdomain.com pointing at your server, generate a token, then run the edge binary there.",
+    code: `$ TOKEN=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
+$ HASH=$(printf '%s' "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
+$ ngstoned --domain yourdomain.com --cert-email you@yourdomain.com \\
+    --cf-api-token "$CF_API_TOKEN" --token-sha256 "$HASH"`,
   },
   {
-    title: "Set your token",
+    title: "Install the agent, and authenticate",
     description:
-      "ngstoned prints a token on first boot. Export it wherever you run the agent, on your dev machine.",
-    code: `$ export NGSTONE_TOKEN=nst_••••••••••••••••••••`,
+      "Install the agent on your dev machine, then verify the plaintext token from step one against your edge.",
+    code: `$ brew install emilio-kariuki/tap/ngstone
+$ ngstone auth "$TOKEN"`,
   },
   {
     title: "Start tunneling",
     description:
       "Point the agent at any local port. Add --subdomain to pick your own name instead of a random one.",
-    code: `$ ngstone http 3000
+    code: `$ ngstone port 3000
 → https://amber-fox-42.yourdomain.com
 
-$ ngstone http 3000 --subdomain api
+$ ngstone port 3000 --subdomain api
 → https://api.yourdomain.com`,
   },
 ];

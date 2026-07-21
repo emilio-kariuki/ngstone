@@ -87,7 +87,7 @@ export default function WireProtocolPage() {
         code={`type Auth struct {
     Token         string \`json:"token"\`
     InstanceID    string \`json:"instance_id"\`     // stable per agent-process start
-    ClientVersion string \`json:"client_version"\`  // "ngstone/0.3.0 darwin/amd64"
+    ClientVersion string \`json:"client_version"\`  // e.g. "v0.1.0 (commit 3f1a9c2, built 2026-06-01T12:00:00Z)"
     ProtoVersions []int  \`json:"proto_versions"\`  // [1] — supported protocol majors
 }
 type AuthOK struct {

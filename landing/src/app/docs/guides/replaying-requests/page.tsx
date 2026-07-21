@@ -8,7 +8,7 @@ import { DocsArticle } from "@/components/docs/docs-article"
 
 export const metadata: Metadata = {
   title: "Replaying requests",
-  description: "Re-send a captured request straight to your local app.",
+  description: "Planned design for replaying captured requests — not yet implemented (M5).",
 }
 
 const TOC: TocItem[] = [
@@ -22,34 +22,42 @@ export default function ReplayingRequestsPage() {
   return (
     <DocsArticle href="/docs/guides/replaying-requests" toc={TOC}>
       <h1>Replaying requests</h1>
+      <Callout variant="warning" title="Not implemented yet (M5)">
+        Replay depends entirely on the request inspector, which doesn&apos;t
+        exist yet either — there is no <code>/api/exchanges</code> endpoint,
+        no captured-request store, nothing to replay. Everything below is
+        the <strong>planned</strong> design for milestone M5, not shipped
+        behavior.
+      </Callout>
       <p>
-        Every captured exchange in the inspector can be re-sent without
-        touching your browser. Replay reconstructs the original request and
-        fires it straight at your local app.
+        The intent is for every captured exchange in the inspector to be
+        re-sendable without touching your browser — replay would reconstruct
+        the original request and fire it straight at your local app.
       </p>
 
       <Anchor id="how-replay-works">How replay works</Anchor>
       <p>
-        The inspector rebuilds the request from what it captured — method,
-        URL path and query, headers minus the hop-by-hop ones, and body — and
-        sends it <strong>directly to the local app</strong> through the same
-        pooled transport the agent already uses. It does not go back through
-        the edge.
+        The plan: the inspector rebuilds the request from what it captured
+        — method, URL path and query, headers minus the hop-by-hop ones, and
+        body — and sends it <strong>directly to the local app</strong>{" "}
+        through the same pooled transport the agent already uses, without
+        going back through the edge.
       </p>
       <p>
-        That matters: replay is deterministic, it works even if the tunnel is
-        offline, and it tests your app rather than the tunnel itself.
+        That matters because replay would then be deterministic, would work
+        even if the tunnel is offline, and would test your app rather than
+        the tunnel itself.
       </p>
-      <Callout variant="tip" title="Works without a public URL">
-        Because replay never leaves your machine, you can keep iterating on a
-        request long after you&apos;ve closed the tunnel or stepped off the
-        network.
+      <Callout variant="tip" title="Planned: works without a public URL">
+        Because replay would never leave your machine, you&apos;d be able to
+        keep iterating on a request long after closing the tunnel or
+        stepping off the network.
       </Callout>
 
       <Anchor id="replaying">Replaying a request</Anchor>
       <p>
-        Click replay on any exchange in the request list, or call the
-        endpoint directly:
+        The design is to click replay on any exchange in the request list,
+        or call the endpoint directly:
       </p>
       <CodeBlock
         language="bash"
@@ -57,30 +65,29 @@ export default function ReplayingRequestsPage() {
   -H "X-Ngstone: 1"`}
       />
       <p>
-        The result is entered into the store as a new exchange, flagged{" "}
-        <code>Replayed: true</code>, so you can compare it against the
-        original side by side.
+        The result would be entered into the store as a new exchange,
+        flagged <code>Replayed: true</code>, so it could be compared against
+        the original side by side.
       </p>
 
       <Anchor id="edit-and-replay">Edit and replay</Anchor>
       <p>
-        &quot;Edit &amp; replay&quot; opens the captured request in an
-        editable form first, so you can tweak the method, headers, or body
-        before resending — handy for poking at an edge case without
-        re-triggering it from the browser.
+        &quot;Edit &amp; replay&quot; is planned to open the captured
+        request in an editable form first, so you could tweak the method,
+        headers, or body before resending.
       </p>
 
       <Anchor id="limitations">Limitations</Anchor>
       <p>
-        Bodies larger than the inspector&apos;s 256 KiB capture cap are
-        marked truncated, and replay is disabled for them with an
-        explanatory tooltip — there&apos;s no way to reconstruct bytes that
-        were never captured.
+        Once built, bodies larger than the inspector&apos;s planned 256 KiB
+        capture cap would be marked truncated, with replay disabled for
+        them — there&apos;s no way to reconstruct bytes that were never
+        captured.
       </p>
       <p>
-        Because replay is a mutating action, it requires the{" "}
+        Because replay is a mutating action, the design requires the{" "}
         <code>X-Ngstone: 1</code> header plus a matching <code>Origin</code>{" "}
-        check — the same protection that guards every mutating inspector
+        check — the same protection meant to guard every mutating inspector
         endpoint against cross-site requests.
       </p>
     </DocsArticle>

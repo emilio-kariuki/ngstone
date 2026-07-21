@@ -3,6 +3,7 @@ import { Eye, Laptop, Server } from "lucide-react"
 
 import type { TocItem } from "@/lib/docs-nav"
 import { Anchor } from "@/components/docs/anchor"
+import { Callout } from "@/components/docs/callout"
 import { Card, CardGrid } from "@/components/docs/card"
 import { CodeBlock } from "@/components/docs/code-block"
 import { DocsArticle } from "@/components/docs/docs-article"
@@ -41,15 +42,16 @@ export default function CoreConceptsPage() {
 
       <Anchor id="the-agent">The agent (ngstone)</Anchor>
       <p>
-        Runs on your macOS dev machine. Dials out to the edge, forwards
-        traffic to a local port, and serves the request inspector.
+        Runs on your dev machine (macOS or Linux). Dials out to the edge
+        and forwards traffic to a local port.
       </p>
       <CardGrid columns={2}>
         <Card title="ngstoned" icon={Server}>
           The edge. Public TLS, certificate issuance, request routing.
         </Card>
         <Card title="ngstone" icon={Laptop}>
-          The agent, CLI, and local inspector, all in one binary.
+          The agent and CLI. The local inspector doesn&apos;t exist yet —
+          see below.
         </Card>
       </CardGrid>
       <p>
@@ -111,16 +113,16 @@ export default function CoreConceptsPage() {
       </p>
 
       <Anchor id="the-inspector">The inspector</Anchor>
-      <p>
-        Each agent process runs one tunnel and one local inspector, bound to{" "}
-        <code>127.0.0.1:4040</code> by default. If you need more than one
-        tunnel at a time, run more than one agent process — pass{" "}
-        <code>--inspect-port</code> to avoid a collision on 4040.
-      </p>
+      <Callout variant="warning" title="Planned, not built (M5)">
+        The request inspector — a local web UI for viewing and replaying
+        captured traffic — is designed but not implemented. There is no{" "}
+        <code>127.0.0.1:4040</code> listener today. Each agent process
+        currently runs exactly one tunnel and nothing else alongside it.
+      </Callout>
       <CardGrid columns={1}>
         <Card title="Request inspector" icon={Eye} href="/docs/guides/request-inspector">
-          See every request and response your tunnel handles, live, at
-          localhost:4040.
+          The planned design for viewing every request and response your
+          tunnel handles, live, at localhost:4040 — not yet shipped.
         </Card>
       </CardGrid>
     </DocsArticle>

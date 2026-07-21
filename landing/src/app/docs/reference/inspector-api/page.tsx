@@ -9,7 +9,7 @@ import { Pill } from "@/components/docs/pill"
 
 export const metadata: Metadata = {
   title: "The inspector API",
-  description: "The HTTP API behind localhost:4040.",
+  description: "Planned design for the inspector's HTTP API — not yet implemented (M5).",
 }
 
 const TOC: TocItem[] = [
@@ -23,14 +23,21 @@ export default function InspectorApiPage() {
   return (
     <DocsArticle href="/docs/reference/inspector-api" toc={TOC}>
       <h1>The inspector API</h1>
+      <Callout variant="warning" title="Not implemented yet (M5)">
+        None of this API exists today. There is no inspector, no{" "}
+        <code>127.0.0.1:4040</code> listener, and no <code>/api/*</code>{" "}
+        endpoints anywhere in ngstone. This page describes the{" "}
+        <strong>planned</strong> shape of the API for milestone M5, not a
+        contract you can script against yet.
+      </Callout>
       <p>
-        The inspector&apos;s embedded UI is just a client of a small HTTP API
-        served on <code>127.0.0.1:4040</code>. Everything the UI can do — list
-        exchanges, inspect one, replay it, stream new ones — is available
-        directly if you want to script against it.
+        The intent is for the inspector&apos;s embedded UI to be just a
+        client of a small HTTP API served on <code>127.0.0.1:4040</code> —
+        everything the UI could do (list exchanges, inspect one, replay it,
+        stream new ones) would also be available directly for scripting.
       </p>
 
-      <Anchor id="endpoints">Endpoints</Anchor>
+      <Anchor id="endpoints">Endpoints (planned)</Anchor>
       <ul>
         <li>
           <Pill variant="outline">GET</Pill> <code>/api/exchanges</code> —
@@ -54,10 +61,10 @@ export default function InspectorApiPage() {
         </li>
       </ul>
 
-      <Anchor id="exchange-schema">Exchange schema</Anchor>
+      <Anchor id="exchange-schema">Exchange schema (planned)</Anchor>
       <p>
-        Every captured request/response pair is stored as an immutable{" "}
-        <code>Exchange</code>:
+        Every captured request/response pair would be stored as an
+        immutable <code>Exchange</code>:
       </p>
       <ParamTable>
         <Property name="ID" type="string">
@@ -88,31 +95,33 @@ export default function InspectorApiPage() {
         </Property>
       </ParamTable>
       <p>
-        Bodies are captured up to 256 KiB per side via a capped tee that
-        passes bytes through untouched — capture observes, it never gates
-        the stream. Gzipped bodies are decoded for display while the raw
-        bytes are kept for replay; binary bodies render as a hex preview.
+        The plan is to cap bodies at 256 KiB per side via a capped tee that
+        passes bytes through untouched — capture observing, never gating,
+        the stream. Gzipped bodies would be decoded for display while the
+        raw bytes are kept for replay; binary bodies would render as a hex
+        preview.
       </p>
 
-      <Anchor id="sse-events">SSE events</Anchor>
+      <Anchor id="sse-events">SSE events (planned)</Anchor>
       <p>
-        <code>GET /api/events</code> fans a new <code>Exchange</code> out to
-        every connected subscriber as soon as it&apos;s finalized. Slow
-        subscribers are dropped rather than allowed to block the fan-out —
-        the inspector never lets a stuck browser tab stall live capture. A
-        WebSocket entry appears at 101-connect time, so long-lived sockets
-        show up immediately instead of only after they close.
+        <code>GET /api/events</code> is designed to fan a new{" "}
+        <code>Exchange</code> out to every connected subscriber as soon as
+        it&apos;s finalized, dropping slow subscribers rather than letting
+        them block the fan-out. A WebSocket entry would appear at
+        101-connect time, so long-lived sockets show up immediately instead
+        of only after they close.
       </p>
 
-      <Anchor id="security">Security</Anchor>
-      <Callout variant="note" title="Loopback-only, CSRF-hardened">
-        The inspector binds <code>127.0.0.1</code> only — it is never
-        reachable from the public URL. Mutating endpoints (currently just
-        replay) additionally require the custom header{" "}
-        <code>X-Ngstone: 1</code>, which cannot be sent cross-origin without
-        CORS approval, plus an <code>Origin</code>/<code>Host</code>{" "}
-        validation check. Together these close off both cross-site replay
-        and DNS-rebinding attacks against the inspector.
+      <Anchor id="security">Security (planned)</Anchor>
+      <Callout variant="note" title="Design intent: loopback-only, CSRF-hardened">
+        The design is for the inspector to bind <code>127.0.0.1</code>{" "}
+        only — never reachable from the public URL — with mutating
+        endpoints (replay) additionally requiring the custom header{" "}
+        <code>X-Ngstone: 1</code>, which can&apos;t be sent cross-origin
+        without CORS approval, plus an <code>Origin</code>/<code>Host</code>{" "}
+        validation check. Together these are meant to close off both
+        cross-site replay and DNS-rebinding attacks against the inspector —
+        once it exists.
       </Callout>
     </DocsArticle>
   )
