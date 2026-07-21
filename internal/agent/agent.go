@@ -13,6 +13,7 @@ import (
 
 	"ngstone/internal/proto"
 	"ngstone/internal/tunnel"
+	"ngstone/internal/version"
 )
 
 const (
@@ -27,6 +28,20 @@ const (
 
 var errFatalHandshake = errors.New("agent: fatal handshake error")
 var errEdgeGoodbye = errors.New("agent: edge said goodbye")
+
+var (
+	ErrBadToken    = errors.New("agent: token rejected by server")
+	ErrUnreachable = errors.New("agent: cannot reach server")
+)
+
+type authErr struct {
+	code    string
+	message string
+}
+
+func (e *authErr) Error() string {
+	return fmt.Sprintf("auth failed: %s: %s", e.code, e.message)
+}
 
 type Config struct {
 	ControlAddr string
@@ -184,30 +199,39 @@ func (a *Agent) runOnce(ctx context.Context, bo *backoff) error {
 	}
 }
 
-func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK, error) {
+func (a *Agent) authenticate(sess tunnel.Session, idgen *proto.IDGen) error {
 	ctrl := sess.Control()
 
 	authID := idgen.Next()
 	if err := ctrl.Write(proto.TypeAuth, authID, proto.Auth{
 		Token:         a.cfg.Token,
 		InstanceID:    a.instanceID,
-		ClientVersion: "ngstone/m2",
+		ClientVersion: version.String(),
 		ProtoVersions: []int{proto.ProtoVersion},
 	}); err != nil {
-		return proto.BindOK{}, err
+		return err
 	}
 	msg, err := ctrl.Read()
 	if err != nil {
-		return proto.BindOK{}, err
+		return err
 	}
 	switch msg.Type {
 	case proto.TypeAuthErr:
 		e, _ := proto.Decode[proto.AuthErr](msg)
-		return proto.BindOK{}, fmt.Errorf("%w: auth failed: %s: %s", errFatalHandshake, e.Code, e.Message)
+		return fmt.Errorf("%w: %w", errFatalHandshake, &authErr{code: e.Code, message: e.Message})
 	case proto.TypeAuthOK:
+		return nil
 	default:
-		return proto.BindOK{}, fmt.Errorf("agent: unexpected reply %q to auth", msg.Type)
+		return fmt.Errorf("agent: unexpected reply %q to auth", msg.Type)
 	}
+}
+
+func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK, error) {
+	if err := a.authenticate(sess, idgen); err != nil {
+		return proto.BindOK{}, err
+	}
+
+	ctrl := sess.Control()
 
 	bindID := idgen.Next()
 	if err := ctrl.Write(proto.TypeBind, bindID, proto.Bind{
@@ -217,7 +241,7 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 	}); err != nil {
 		return proto.BindOK{}, err
 	}
-	msg, err = ctrl.Read()
+	msg, err := ctrl.Read()
 	if err != nil {
 		return proto.BindOK{}, err
 	}
@@ -328,4 +352,31 @@ func (a *Agent) controlLoop(sess tunnel.Session, idgen *proto.IDGen) error {
 			awaitingPong = true
 		}
 	}
+}
+
+func Verify(ctx context.Context, cfg Config) error {
+	conn, err := dialControl(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrUnreachable, err)
+	}
+
+	sess, err := tunnel.Client(conn)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("%w: %v", ErrUnreachable, err)
+	}
+	defer sess.Close("verify done")
+
+	a := New(cfg)
+	idgen := proto.NewAgentIDGen()
+	if err := a.authenticate(sess, idgen); err != nil {
+		var ae *authErr
+		if errors.As(err, &ae) && ae.code == proto.CodeBadToken {
+			return fmt.Errorf("%w: %s", ErrBadToken, ae.message)
+		}
+		return err
+	}
+
+	a.sendGoodbye(sess, idgen, "verify done")
+	return nil
 }
