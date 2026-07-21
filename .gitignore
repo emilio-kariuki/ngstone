@@ -16,3 +16,9 @@ coverage.html
 /fuzz/
 
 .DS_Store
+landing/node_modules/
+# secrets — never commit
+token.md
+*.token
+.env
+.env.*
