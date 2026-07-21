@@ -70,12 +70,17 @@ func TestConstantMemory100MB(t *testing.T) {
 	controlAddr := freeAddr(t)
 	publicAddr := freeAddr(t)
 
-	edgeSrv := edge.New(edge.Config{
-		ControlAddr: controlAddr,
-		PublicAddr:  publicAddr,
-		Domain:      domain,
-		TokenSHA256: mustSHA256(token),
+	edgeSrv, err := edge.New(edge.Config{
+		ControlAddr:  controlAddr,
+		PublicAddr:   publicAddr,
+		Domain:       domain,
+		TokenSHA256:  mustSHA256(token),
+		PublicScheme: "http",
+		Insecure:     true,
 	})
+	if err != nil {
+		t.Fatalf("edge.New: %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go edgeSrv.Run(ctx)
@@ -87,6 +92,7 @@ func TestConstantMemory100MB(t *testing.T) {
 		Token:       token,
 		Subdomain:   "mem",
 		TargetURL:   origin.URL,
+		Insecure:    true,
 	})
 	go agt.Run(ctx)
 

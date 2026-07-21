@@ -25,11 +25,14 @@ type Config struct {
 	Insecure bool
 
 	HTTPAddr string
+	OpsAddr  string
 
 	CertStoragePath    string
 	ACMEEmail          string
 	ACMECA             string
 	CloudflareAPIToken string
+
+	Limits LimitsConfig
 }
 
 type Server struct {
@@ -39,19 +42,41 @@ type Server struct {
 	authLimiter *authRateLimiter
 	randomName  func() string
 
+	perIPLimiter *perIPLimiter
+	globalSem    *globalSemaphore
+	handshakeSem *globalSemaphore
+	unauthSem    *globalSemaphore
+
 	tlsMgr *TLSManager
 }
 
-func New(cfg Config) *Server {
+func New(cfg Config) (*Server, error) {
 	if cfg.PublicScheme == "" {
 		cfg.PublicScheme = "https"
 	}
-	return &Server{
-		cfg:         cfg,
-		registry:    NewRegistry(),
-		authLimiter: newAuthRateLimiter(),
-		randomName:  randomSubdomain,
+	limits, err := cfg.Limits.withDefaults()
+	if err != nil {
+		return nil, fmt.Errorf("edge: invalid limits config: %w", err)
 	}
+	cfg.Limits = limits
+
+	registry := NewRegistry()
+	registry.SetLimits(limits)
+
+	return &Server{
+		cfg:          cfg,
+		registry:     registry,
+		authLimiter:  newAuthRateLimiter(),
+		randomName:   randomSubdomain,
+		perIPLimiter: newPerIPLimiter(limits.PerIPRate, limits.PerIPBurst, limits.PerIPLRU),
+		globalSem:    newGlobalSemaphore(limits.GlobalInFlight),
+		handshakeSem: newGlobalSemaphore(int64(limits.HandshakeConcurrency)),
+		unauthSem:    newGlobalSemaphore(int64(limits.UnauthSessions)),
+	}, nil
+}
+
+func (s *Server) limitsOrDefault() LimitsConfig {
+	return s.cfg.Limits
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -94,12 +119,16 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	var httpLn net.Listener
+	var opsLn net.Listener
 
 	closeAll := func() {
 		controlLn.Close()
 		publicLn.Close()
 		if httpLn != nil {
 			httpLn.Close()
+		}
+		if opsLn != nil {
+			opsLn.Close()
 		}
 	}
 
@@ -116,14 +145,39 @@ func (s *Server) Run(ctx context.Context) error {
 		publicLn = tls.NewListener(publicLn, s.tlsMgr.PublicTLSConfig())
 	}
 
+	if s.cfg.OpsAddr != "" {
+		opsLn, err = net.Listen("tcp", s.cfg.OpsAddr)
+		if err != nil {
+			closeAll()
+			return fmt.Errorf("edge: ops listen: %w", err)
+		}
+	}
+
+	limits := s.limitsOrDefault()
 	publicSrv := &http.Server{
-		Handler: http.HandlerFunc(s.handlePublic),
+		Handler:           http.HandlerFunc(s.handlePublic),
+		ReadHeaderTimeout: limits.ReadHeaderTimeout,
+		IdleTimeout:       limits.IdleTimeout,
+		MaxHeaderBytes:    limits.MaxHeaderBytes,
 	}
 
 	var httpSrv *http.Server
 	if httpLn != nil {
 		httpSrv = &http.Server{
-			Handler: http.HandlerFunc(s.redirectToHTTPS),
+			Handler:           http.HandlerFunc(s.redirectToHTTPS),
+			ReadHeaderTimeout: limits.ReadHeaderTimeout,
+			IdleTimeout:       limits.IdleTimeout,
+			MaxHeaderBytes:    limits.MaxHeaderBytes,
+		}
+	}
+
+	var opsSrv *http.Server
+	if opsLn != nil {
+		opsSrv = &http.Server{
+			Handler:           s.opsMux(),
+			ReadHeaderTimeout: limits.ReadHeaderTimeout,
+			IdleTimeout:       limits.IdleTimeout,
+			MaxHeaderBytes:    limits.MaxHeaderBytes,
 		}
 	}
 
@@ -137,6 +191,9 @@ func (s *Server) Run(ctx context.Context) error {
 		publicSrv.Shutdown(shutdownCtx)
 		if httpSrv != nil {
 			httpSrv.Shutdown(shutdownCtx)
+		}
+		if opsSrv != nil {
+			opsSrv.Shutdown(shutdownCtx)
 		}
 		return nil
 	})
@@ -160,6 +217,16 @@ func (s *Server) Run(ctx context.Context) error {
 	if httpSrv != nil {
 		g.Go(func() error {
 			err := httpSrv.Serve(httpLn)
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
+		})
+	}
+
+	if opsSrv != nil {
+		g.Go(func() error {
+			err := opsSrv.Serve(opsLn)
 			if errors.Is(err, http.ErrServerClosed) {
 				return nil
 			}
