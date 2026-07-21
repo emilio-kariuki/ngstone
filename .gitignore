@@ -22,3 +22,9 @@ token.md
 *.token
 .env
 .env.*
+
+# agent/tooling config — local only, never publish
+CLAUDE.md
+**/CLAUDE.md
+AGENTS.md
+.claude/
