@@ -24,6 +24,8 @@ func main() {
 	domain := flag.String("domain", "ngstone.site", "base domain used to build tunnel hostnames and the two managed certificates")
 	publicScheme := flag.String("public-scheme", "https", "scheme advertised in BindOK.URL (http or https)")
 
+	proxyProtocol := flag.Bool("proxy-protocol", false, "require a PROXY protocol v1/v2 header on every connection to the public listener, and use the address it carries as the client address; enable this only when the public port is reachable solely from a trusted TCP proxy (see deploy/README.md), and enable it on both sides at once")
+
 	insecure := flag.Bool("insecure", false, "run with no TLS anywhere and no certificate management (dev/test only)")
 	acmeCA := flag.String("acme-ca", edge.ACMECAStaging, "ACME CA to use: \"staging\" (default) or \"production\"; a config mistake against production can rate-limit the domain for a week")
 	certEmail := flag.String("cert-email", "", "ACME account email (required unless -insecure)")
@@ -101,6 +103,7 @@ func main() {
 		PublicScheme: *publicScheme,
 
 		Insecure:           *insecure,
+		ProxyProtocol:      *proxyProtocol,
 		ACMECA:             *acmeCA,
 		ACMEEmail:          *certEmail,
 		CertStoragePath:    *certStorage,
@@ -126,7 +129,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA)
+	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA, "proxy-protocol", *proxyProtocol)
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("ngstoned: exited with error", "err", err)
 		os.Exit(1)

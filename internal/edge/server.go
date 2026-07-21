@@ -24,6 +24,8 @@ type Config struct {
 
 	Insecure bool
 
+	ProxyProtocol bool
+
 	HTTPAddr string
 	OpsAddr  string
 
@@ -116,6 +118,10 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		controlLn.Close()
 		return fmt.Errorf("edge: public listen: %w", err)
+	}
+
+	if s.cfg.ProxyProtocol {
+		publicLn = newProxyProtoListener(publicLn, proxyProtoTimeout)
 	}
 
 	var httpLn net.Listener
@@ -234,7 +240,7 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	}
 
-	slog.Info("ngstoned: listeners up", "control", s.cfg.ControlAddr, "public", s.cfg.PublicAddr, "insecure", s.cfg.Insecure)
+	slog.Info("ngstoned: listeners up", "control", s.cfg.ControlAddr, "public", s.cfg.PublicAddr, "insecure", s.cfg.Insecure, "proxy_protocol", s.cfg.ProxyProtocol)
 
 	return g.Wait()
 }
