@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2"
+
 	"ngstone/internal/proto"
 	"ngstone/internal/tunnel"
 )
@@ -23,11 +25,14 @@ var (
 	drainTimeout      = 15 * time.Second
 )
 
+const authLimiterMaxIPs = 10000
+
 type AgentSession struct {
 	ID         string
 	InstanceID string
 	Sess       tunnel.Session
 	Remote     netip.AddrPort
+	IDGen      *proto.IDGen
 
 	inflight sync.WaitGroup
 }
@@ -47,32 +52,59 @@ func negotiateVersion(offered []int) (int, bool) {
 
 type authRateLimiter struct {
 	mu       sync.Mutex
-	attempts map[string][]time.Time
+	attempts *lru.Cache[string, []time.Time]
 }
 
 func newAuthRateLimiter() *authRateLimiter {
-	return &authRateLimiter{attempts: make(map[string][]time.Time)}
+	c, err := lru.New[string, []time.Time](authLimiterMaxIPs)
+	if err != nil {
+		panic(err)
+	}
+	return &authRateLimiter{attempts: c}
 }
 
 const maxAuthFailuresPerMinute = 5
 
+func rateLimitKey(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	if addr.Is4() || addr.Is4In6() {
+		return addr.String()
+	}
+	prefix, err := addr.Prefix(48)
+	if err != nil {
+		return addr.String()
+	}
+	return prefix.Masked().String()
+}
+
 func (l *authRateLimiter) allowed(ip string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.prune(ip)
-	return len(l.attempts[ip]) < maxAuthFailuresPerMinute
+	key := rateLimitKey(ip)
+	l.prune(key)
+	times, _ := l.attempts.Get(key)
+	return len(times) < maxAuthFailuresPerMinute
 }
 
 func (l *authRateLimiter) recordFailure(ip string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.prune(ip)
-	l.attempts[ip] = append(l.attempts[ip], time.Now())
+	key := rateLimitKey(ip)
+	l.prune(key)
+	times, _ := l.attempts.Get(key)
+	times = append(times, time.Now())
+	l.attempts.Add(key, times)
 }
 
-func (l *authRateLimiter) prune(ip string) {
+func (l *authRateLimiter) prune(key string) {
+	times, ok := l.attempts.Get(key)
+	if !ok {
+		return
+	}
 	cutoff := time.Now().Add(-time.Minute)
-	times := l.attempts[ip]
 	kept := times[:0]
 	for _, t := range times {
 		if t.After(cutoff) {
@@ -80,10 +112,10 @@ func (l *authRateLimiter) prune(ip string) {
 		}
 	}
 	if len(kept) == 0 {
-		delete(l.attempts, ip)
+		l.attempts.Remove(key)
 		return
 	}
-	l.attempts[ip] = kept
+	l.attempts.Add(key, kept)
 }
 
 func (s *Server) acceptControl(ctx context.Context, ln net.Listener) error {
@@ -107,6 +139,10 @@ func (s *Server) handleControlConn(ctx context.Context, conn net.Conn) {
 		conn.Close()
 		return
 	}
+	if err := conn.SetWriteDeadline(deadline); err != nil {
+		conn.Close()
+		return
+	}
 
 	sess, err := tunnel.Server(conn)
 	if err != nil {
@@ -120,6 +156,15 @@ func (s *Server) handleControlConn(ctx context.Context, conn net.Conn) {
 	as, err := s.authenticate(sess, ip, remote, deadline)
 	if err != nil {
 		sess.Close("auth failed")
+		return
+	}
+
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		sess.Close("clear read deadline failed")
+		return
+	}
+	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+		sess.Close("clear write deadline failed")
 		return
 	}
 
@@ -182,6 +227,7 @@ func (s *Server) authenticate(sess tunnel.Session, ip string, remote netip.AddrP
 		InstanceID: auth.InstanceID,
 		Sess:       sess,
 		Remote:     remote,
+		IDGen:      proto.NewEdgeIDGen(),
 	}
 
 	if err := ctrl.Write(proto.TypeAuthOK, msg.ID, proto.AuthOK{
@@ -207,17 +253,23 @@ func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 	}()
 
 	ctrl := as.Sess.Control()
-	idgen := proto.NewEdgeIDGen()
+	idgen := as.IDGen
 
 	type readResult struct {
 		msg proto.Msg
 		err error
 	}
 	msgCh := make(chan readResult)
+	stop := make(chan struct{})
+	defer close(stop)
 	go func() {
 		for {
 			m, err := ctrl.Read()
-			msgCh <- readResult{m, err}
+			select {
+			case msgCh <- readResult{m, err}:
+			case <-stop:
+				return
+			}
 			if err != nil {
 				return
 			}
@@ -233,6 +285,7 @@ func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 	for {
 		select {
 		case <-ctx.Done():
+			s.drainOnShutdown(as, ctrl)
 			return
 		case rr := <-msgCh:
 			if rr.err != nil {
@@ -293,7 +346,20 @@ func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 func (s *Server) handleGoodbye(as *AgentSession, gb proto.Goodbye) {
 	slog.Info("edge: agent goodbye", "session_id", as.ID, "reason", gb.Reason)
 	s.registry.ReleaseSession(as)
+	s.waitInflight(as)
+}
 
+func (s *Server) drainOnShutdown(as *AgentSession, ctrl *proto.Conn) {
+	slog.Info("edge: shutting down, draining session", "session_id", as.ID)
+	ctrl.Write(proto.TypeGoodbye, as.IDGen.Next(), proto.Goodbye{
+		Reason:  "edge shutting down",
+		DrainMS: int(drainTimeout / time.Millisecond),
+	})
+	s.registry.ReleaseSession(as)
+	s.waitInflight(as)
+}
+
+func (s *Server) waitInflight(as *AgentSession) {
 	done := make(chan struct{})
 	go func() {
 		as.inflight.Wait()
@@ -315,7 +381,7 @@ func (s *Server) handleBind(as *AgentSession, ctrl *proto.Conn, id uint64, bind 
 	subdomain := normalizeHost(bind.Subdomain)
 
 	if subdomain == "" {
-		hostname, evicted, err := assignRandomHostname(s.registry, as, bind.Takeover, s.cfg.Domain, randomSubdomain)
+		hostname, evicted, err := assignRandomHostname(s.registry, as, false, s.cfg.Domain, s.randomName)
 		if err != nil {
 			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInternal, Message: err.Error()})
 			return
@@ -344,7 +410,7 @@ func (s *Server) handleBind(as *AgentSession, ctrl *proto.Conn, id uint64, bind 
 
 func (s *Server) finishBind(id uint64, ctrl *proto.Conn, hostname string, evicted *AgentSession) {
 	if evicted != nil {
-		evicted.Sess.Control().Write(proto.TypeEvicted, proto.NewEdgeIDGen().Next(), proto.Evicted{
+		evicted.Sess.Control().Write(proto.TypeEvicted, evicted.IDGen.Next(), proto.Evicted{
 			Hostname: hostname,
 			Reason:   "takeover",
 		})

@@ -16,6 +16,7 @@ func main() {
 	token := flag.String("token", "", "shared auth token (defaults to NGSTONE_TOKEN env var)")
 	target := flag.String("target", "http://127.0.0.1:3000", "local target URL to forward requests to")
 	subdomain := flag.String("subdomain", "", "requested subdomain (empty = server-assigned)")
+	instanceID := flag.String("instance-id", "", "internal/undocumented: force a specific instance id (testing only)")
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -38,6 +39,7 @@ func main() {
 		Token:       tok,
 		Subdomain:   *subdomain,
 		TargetURL:   *target,
+		InstanceID:  *instanceID,
 	})
 
 	logger.Info("ngstone: starting", "control", *controlAddr, "target", *target)

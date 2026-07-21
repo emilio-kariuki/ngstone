@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ type Binding struct {
 	InstanceID string
 	BoundAt    time.Time
 	transport  *http.Transport
+	proxy      *httputil.ReverseProxy
 }
 
 type Registry struct {
@@ -72,12 +74,14 @@ func (r *Registry) Bind(host string, s *AgentSession, takeover bool) (*Binding, 
 		delete(r.byHost, host)
 	}
 
+	transport := newBindingTransport(host, s)
 	b := &Binding{
 		Hostname:   host,
 		Sess:       s,
 		InstanceID: s.InstanceID,
 		BoundAt:    time.Now(),
-		transport:  newBindingTransport(host, s),
+		transport:  transport,
+		proxy:      newBindingProxy(transport),
 	}
 	r.byHost[host] = b
 	if r.bySession[s] == nil {

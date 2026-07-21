@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func (a *Agent) buildProxy(target *url.URL) http.Handler {
+func (a *Agent) buildProxy(target *url.URL) (http.Handler, *http.Transport) {
 	transport := &http.Transport{
 		MaxIdleConnsPerHost: 8,
 		IdleConnTimeout:     90 * time.Second,
@@ -27,5 +27,5 @@ func (a *Agent) buildProxy(target *url.URL) http.Handler {
 		Rewrite:       rewrite,
 		Transport:     transport,
 		FlushInterval: -1,
-	}
+	}, transport
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -23,6 +24,7 @@ type Server struct {
 
 	registry    *Registry
 	authLimiter *authRateLimiter
+	randomName  func() string
 }
 
 func New(cfg Config) *Server {
@@ -30,6 +32,7 @@ func New(cfg Config) *Server {
 		cfg:         cfg,
 		registry:    NewRegistry(),
 		authLimiter: newAuthRateLimiter(),
+		randomName:  randomSubdomain,
 	}
 }
 
@@ -61,7 +64,10 @@ func (s *Server) Run(ctx context.Context) error {
 	g.Go(func() error {
 		<-gctx.Done()
 		controlLn.Close()
-		return publicSrv.Shutdown(context.Background())
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout+5*time.Second)
+		defer cancel()
+		publicSrv.Shutdown(shutdownCtx)
+		return nil
 	})
 
 	g.Go(func() error {
