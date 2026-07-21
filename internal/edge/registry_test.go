@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"ngstone/internal/proto"
 	"ngstone/internal/tunnel"
 )
 
@@ -38,7 +39,7 @@ func newTestAgentSession(t *testing.T, instanceID string) (*AgentSession, func()
 		t.Fatalf("server session: %v", sr.err)
 	}
 
-	as := &AgentSession{ID: randomHex(4), InstanceID: instanceID, Sess: sr.sess}
+	as := &AgentSession{ID: randomHex(4), InstanceID: instanceID, Sess: sr.sess, IDGen: proto.NewEdgeIDGen()}
 	cleanup := func() {
 		cr.sess.Close("test done")
 		sr.sess.Close("test done")
@@ -308,4 +309,64 @@ func TestRegistryConcurrentBindRouteRelease(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestReleaseSessionCompareAndDeleteAgainstDirectlyConstructedStaleState(t *testing.T) {
+	r := NewRegistry()
+
+	victim, victimCleanup := newTestAgentSession(t, "instance-a")
+	defer victimCleanup()
+	winner, winnerCleanup := newTestAgentSession(t, "instance-a")
+	defer winnerCleanup()
+
+	r.byHost["foo.example.com"] = &Binding{
+		Hostname:   "foo.example.com",
+		Sess:       winner,
+		InstanceID: winner.InstanceID,
+		BoundAt:    time.Now(),
+	}
+	r.bySession[victim] = map[string]struct{}{"foo.example.com": {}}
+
+	r.ReleaseSession(victim)
+
+	got, ok := r.Route("foo.example.com")
+	if !ok {
+		t.Fatalf("ReleaseSession(victim) deleted the winner's binding even though byHost still pointed at winner — the compare-and-delete guard in ReleaseSession is not doing its job")
+	}
+	if got.Sess != winner {
+		t.Fatalf("winner's binding was replaced: got %+v", got)
+	}
+}
+
+func TestBindRuleA_SameInstanceSucceedsAgainstLiveHolderEvenWithTakeoverFalse(t *testing.T) {
+	r := NewRegistry()
+
+	holder, holderCleanup := newTestAgentSession(t, "instance-a")
+	defer holderCleanup()
+	if _, _, err := r.Bind("foo.example.com", holder, true); err != nil {
+		t.Fatalf("initial bind: %v", err)
+	}
+
+	if isSessionDead(holder) {
+		t.Fatalf("holder must still be live for this test")
+	}
+
+	reconnected, reconnectedCleanup := newTestAgentSession(t, "instance-a")
+	defer reconnectedCleanup()
+
+	b, evicted, err := r.Bind("foo.example.com", reconnected, false)
+	if err != nil {
+		t.Fatalf("same-instance rebind against a live holder must succeed even with takeover=false, got err: %v", err)
+	}
+	if evicted != holder {
+		t.Fatalf("expected holder to be evicted, got %v", evicted)
+	}
+	if b.Sess != reconnected {
+		t.Fatalf("binding did not transfer to reconnected session")
+	}
+
+	got, ok := r.Route("foo.example.com")
+	if !ok || got.Sess != reconnected {
+		t.Fatalf("route does not reflect takeover: %+v ok=%v", got, ok)
+	}
 }
