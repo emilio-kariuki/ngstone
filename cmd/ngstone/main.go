@@ -38,11 +38,43 @@ func verbFunc(arg string) (func([]string) int, bool) {
 	return fn, ok
 }
 
+const usageText = `ngstone exposes a local port to the internet through the ngstone relay.
+
+Usage:
+  ngstone <command> [arguments]
+
+Commands:
+  auth <token>       verify and save an auth token
+  port <port|url>    expose a local port or URL through the tunnel
+  config             view or set local configuration
+  logout             remove the saved auth token
+  version            print the ngstone version
+
+Examples:
+  ngstone auth <token>
+  ngstone port 3000
+  ngstone port 3000 --subdomain demo
+`
+
+func printUsage(w *os.File) {
+	fmt.Fprint(w, usageText)
+}
+
+func isHelpFlag(arg string) bool {
+	return arg == "-h" || arg == "--help" || arg == "-help"
+}
+
 func main() {
-	if len(os.Args) > 1 {
-		if fn, ok := verbFunc(os.Args[1]); ok {
-			os.Exit(fn(os.Args[2:]))
-		}
+	if len(os.Args) <= 1 {
+		printUsage(os.Stderr)
+		os.Exit(1)
+	}
+	if isHelpFlag(os.Args[1]) {
+		printUsage(os.Stdout)
+		os.Exit(0)
+	}
+	if fn, ok := verbFunc(os.Args[1]); ok {
+		os.Exit(fn(os.Args[2:]))
 	}
 	legacyMain()
 }

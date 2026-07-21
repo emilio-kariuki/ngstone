@@ -1,11 +1,137 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"flag"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"ngstone/internal/config"
 )
+
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func buildNgstoneBinary(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	out := filepath.Join(dir, "ngstone-under-test")
+	build := exec.Command("go", "build", "-o", out, ".")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("building ngstone binary: %v\n%s", err, out)
+	}
+	return out
+}
+
+func runNgstone(t *testing.T, bin string, timeout time.Duration, args ...string) (stdout, stderr string, exitCode int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("ngstone %v did not exit within %s; stdout=%q stderr=%q", args, timeout, outBuf.String(), errBuf.String())
+	}
+	if err == nil {
+		return outBuf.String(), errBuf.String(), 0
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		return outBuf.String(), errBuf.String(), exitErr.ExitCode()
+	}
+	t.Fatalf("running ngstone %v: %v", args, err)
+	return "", "", -1
+}
+
+func TestBareInvocationPrintsUsageAndExitsNonZero(t *testing.T) {
+	bin := buildNgstoneBinary(t)
+	start := time.Now()
+	stdout, stderr, code := runNgstone(t, bin, 5*time.Second)
+	elapsed := time.Since(start)
+
+	if code == 0 {
+		t.Fatalf("bare invocation exit code = 0, want non-zero")
+	}
+	combined := stdout + stderr
+	if !strings.Contains(combined, "Usage:") || !strings.Contains(combined, "ngstone port 3000") {
+		t.Fatalf("bare invocation output = %q, want it to contain usage text", combined)
+	}
+	if strings.Contains(combined, "starting") || strings.Contains(combined, "daring") {
+		t.Fatalf("bare invocation output = %q, looks like it attempted to start a tunnel", combined)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("bare invocation took %s, want it to return immediately without attempting a connection", elapsed)
+	}
+}
+
+func TestHelpFlagPrintsUsageAndExitsZero(t *testing.T) {
+	bin := buildNgstoneBinary(t)
+	for _, flag := range []string{"-h", "--help"} {
+		stdout, stderr, code := runNgstone(t, bin, 5*time.Second, flag)
+		if code != 0 {
+			t.Fatalf("ngstone %s exit code = %d, want 0; stdout=%q stderr=%q", flag, code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, "Usage:") {
+			t.Fatalf("ngstone %s stdout = %q, want it to contain usage text", flag, stdout)
+		}
+	}
+}
+
+func TestLegacyFlagInvocationRoutesToLegacyPathNotUsage(t *testing.T) {
+	bin := buildNgstoneBinary(t)
+
+	cmd := exec.Command(bin,
+		"-insecure", "-control", "127.0.0.1:1", "-target", "http://127.0.0.1:9",
+		"-subdomain", "demo", "-token", "abc")
+	var outBuf, errBuf syncBuffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting ngstone: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(errBuf.String(), "starting") {
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	combined := outBuf.String() + errBuf.String()
+	if !strings.Contains(combined, "starting") {
+		_ = cmd.Process.Kill()
+		t.Fatalf("legacy flag invocation output = %q, want it to log that it started attempting to connect", combined)
+	}
+	if strings.Contains(combined, "Usage:") {
+		_ = cmd.Process.Kill()
+		t.Fatalf("legacy flag invocation output = %q, should not print the new usage text", combined)
+	}
+
+	_ = cmd.Process.Kill()
+	_ = cmd.Wait()
+}
 
 func TestVerbFuncDispatch(t *testing.T) {
 	cases := []struct {
