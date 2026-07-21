@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
 	"time"
 
+	"ngstone/internal/inspect"
 	"ngstone/internal/proto"
 	"ngstone/internal/tunnel"
 	"ngstone/internal/version"
@@ -55,6 +57,9 @@ type Config struct {
 	ServerName string
 	Pin        string
 	RootCAs    *x509.CertPool
+
+	Store  *inspect.Store
+	Events chan<- StatusEvent
 }
 
 type Status struct {
@@ -63,9 +68,29 @@ type Status struct {
 	Evicted  bool
 }
 
+const (
+	StateConnecting   = "connecting"
+	StateOnline       = "online"
+	StateReconnecting = "reconnecting"
+	StateEvicted      = "evicted"
+	StateOffline      = "offline"
+)
+
+type StatusEvent struct {
+	State    string
+	Hostname string
+	URL      string
+	Err      string
+}
+
 type Agent struct {
 	cfg        Config
 	instanceID string
+
+	transport *http.Transport
+	store     *inspect.Store
+	target    *url.URL
+	targetErr error
 
 	mu     sync.Mutex
 	status Status
@@ -76,7 +101,22 @@ func New(cfg Config) *Agent {
 	if id == "" {
 		id = randomHex(16)
 	}
-	return &Agent{cfg: cfg, instanceID: id}
+	a := &Agent{
+		cfg:        cfg,
+		instanceID: id,
+		store:      cfg.Store,
+		transport: &http.Transport{
+			MaxIdleConnsPerHost: 8,
+			IdleConnTimeout:     90 * time.Second,
+			ForceAttemptHTTP2:   false,
+		},
+	}
+	if u, err := url.Parse(cfg.TargetURL); err == nil {
+		a.target = u
+	} else {
+		a.targetErr = err
+	}
+	return a
 }
 
 func (a *Agent) Status() Status {
@@ -85,26 +125,66 @@ func (a *Agent) Status() Status {
 	return a.status
 }
 
+func (a *Agent) Store() *inspect.Store { return a.store }
+
+func (a *Agent) Transport() http.RoundTripper { return a.transport }
+
+func (a *Agent) Target() *url.URL {
+	if a.target == nil {
+		return nil
+	}
+	u := *a.target
+	return &u
+}
+
+func (a *Agent) emit(ev StatusEvent) {
+	if a.cfg.Events == nil {
+		return
+	}
+	select {
+	case a.cfg.Events <- ev:
+	default:
+	}
+}
+
+func (a *Agent) emitState(state, errText string) {
+	st := a.Status()
+	a.emit(StatusEvent{State: state, Hostname: st.Hostname, URL: st.URL, Err: errText})
+}
+
 func (a *Agent) setBound(hostname, url string) {
 	a.mu.Lock()
 	a.status = Status{Hostname: hostname, URL: url}
 	a.mu.Unlock()
 	slog.Info("agent: bound", "hostname", hostname, "url", url)
+	a.emit(StatusEvent{State: StateOnline, Hostname: hostname, URL: url})
 }
 
 func (a *Agent) setEvicted(hostname string) {
 	a.mu.Lock()
 	a.status.Evicted = true
+	url := a.status.URL
 	a.mu.Unlock()
 	slog.Warn("agent: tunnel evicted, no longer advertising", "hostname", hostname)
+	a.emit(StatusEvent{State: StateEvicted, Hostname: hostname, URL: url})
 }
 
 func (a *Agent) Run(ctx context.Context) error {
 	bo := newBackoff(reconnectBase, reconnectCap)
+	defer a.transport.CloseIdleConnections()
+
+	first := true
 
 	for {
 		if ctx.Err() != nil {
 			return nil
+		}
+
+		if first {
+			a.emitState(StateConnecting, "")
+			first = false
+		} else {
+			a.emitState(StateReconnecting, "")
 		}
 
 		err := a.runOnce(ctx, bo)
@@ -113,10 +193,14 @@ func (a *Agent) Run(ctx context.Context) error {
 			return nil
 		}
 		if errors.Is(err, errFatalHandshake) {
+			a.emitState(StateOffline, err.Error())
 			return err
 		}
 		if err != nil {
 			slog.Warn("agent: connection lost, will reconnect", "err", err)
+			a.emitState(StateOffline, err.Error())
+		} else {
+			a.emitState(StateOffline, "")
 		}
 
 		wait := bo.next()
@@ -157,14 +241,15 @@ func (a *Agent) runOnce(ctx context.Context, bo *backoff) error {
 	}
 	defer ln.Close()
 
-	target, err := url.Parse(a.cfg.TargetURL)
-	if err != nil {
-		return fmt.Errorf("agent: parse target: %w", err)
+	target := a.Target()
+	if target == nil {
+		return fmt.Errorf("agent: parse target: %w", a.targetErr)
 	}
 
-	handler, transport := a.buildProxy(target)
-	defer transport.CloseIdleConnections()
-	srv := &http.Server{Handler: handler}
+	srv := &http.Server{
+		Handler:     a.buildProxy(target),
+		ConnContext: streamConnContext,
+	}
 
 	serveErrCh := make(chan error, 1)
 	go func() { serveErrCh <- srv.Serve(ln) }()
@@ -197,6 +282,23 @@ func (a *Agent) runOnce(ctx context.Context, bo *backoff) error {
 		srv.Close()
 		return errors.New("agent: session closed")
 	}
+}
+
+type preambleConn interface {
+	Preamble() proto.StreamOpen
+}
+
+func streamConnContext(ctx context.Context, c net.Conn) context.Context {
+	pc, ok := c.(preambleConn)
+	if !ok {
+		return ctx
+	}
+	pre := pc.Preamble()
+	return inspect.WithStreamInfo(ctx, inspect.StreamInfo{
+		ReqID:      pre.ReqID,
+		Host:       pre.Host,
+		ClientAddr: pre.ClientAddr,
+	})
 }
 
 func (a *Agent) authenticate(sess tunnel.Session, idgen *proto.IDGen) error {
