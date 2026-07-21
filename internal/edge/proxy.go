@@ -27,8 +27,12 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), ctxKeyClientAddr, r.RemoteAddr)
 	ctx = context.WithValue(ctx, ctxKeyReqID, reqID)
 
-	proxy := &httputil.ReverseProxy{
-		Transport:     b.transport,
+	b.proxy.ServeHTTP(w, r.WithContext(ctx))
+}
+
+func newBindingProxy(transport *http.Transport) *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
+		Transport:     transport,
 		FlushInterval: -1,
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(&url.URL{Scheme: "http", Host: "tunnel-agent"})
@@ -37,7 +41,6 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 			pr.Out.Header.Del("X-Real-IP")
 		},
 	}
-	proxy.ServeHTTP(w, r.WithContext(ctx))
 }
 
 func stripPort(host string) string {

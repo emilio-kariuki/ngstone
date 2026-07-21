@@ -26,12 +26,15 @@ const (
 )
 
 var errFatalHandshake = errors.New("agent: fatal handshake error")
+var errEdgeGoodbye = errors.New("agent: edge said goodbye")
 
 type Config struct {
 	ControlAddr string
 	Token       string
 	Subdomain   string
 	TargetURL   string
+
+	InstanceID string
 }
 
 type Status struct {
@@ -49,7 +52,11 @@ type Agent struct {
 }
 
 func New(cfg Config) *Agent {
-	return &Agent{cfg: cfg, instanceID: randomHex(16)}
+	id := cfg.InstanceID
+	if id == "" {
+		id = randomHex(16)
+	}
+	return &Agent{cfg: cfg, instanceID: id}
 }
 
 func (a *Agent) Status() Status {
@@ -116,7 +123,9 @@ func (a *Agent) runOnce(ctx context.Context, bo *backoff) error {
 	}
 	defer sess.Close("agent session ended")
 
-	bindOK, err := a.handshake(sess)
+	idgen := proto.NewAgentIDGen()
+
+	bindOK, err := a.handshake(sess, idgen)
 	if err != nil {
 		return err
 	}
@@ -134,17 +143,19 @@ func (a *Agent) runOnce(ctx context.Context, bo *backoff) error {
 		return fmt.Errorf("agent: parse target: %w", err)
 	}
 
-	srv := &http.Server{Handler: a.buildProxy(target)}
+	handler, transport := a.buildProxy(target)
+	defer transport.CloseIdleConnections()
+	srv := &http.Server{Handler: handler}
 
 	serveErrCh := make(chan error, 1)
 	go func() { serveErrCh <- srv.Serve(ln) }()
 
 	ctrlErrCh := make(chan error, 1)
-	go func() { ctrlErrCh <- a.controlLoop(sess) }()
+	go func() { ctrlErrCh <- a.controlLoop(sess, idgen) }()
 
 	select {
 	case <-ctx.Done():
-		a.sendGoodbye(sess, "shutdown")
+		a.sendGoodbye(sess, idgen, "shutdown")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 		defer cancel()
 		srv.Shutdown(shutdownCtx)
@@ -154,6 +165,13 @@ func (a *Agent) runOnce(ctx context.Context, bo *backoff) error {
 		srv.Close()
 		return fmt.Errorf("agent: local server: %w", err)
 	case err := <-ctrlErrCh:
+		if errors.Is(err, errEdgeGoodbye) {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+			defer cancel()
+			srv.Shutdown(shutdownCtx)
+			<-serveErrCh
+			return err
+		}
 		srv.Close()
 		return fmt.Errorf("agent: control loop: %w", err)
 	case <-sess.Done():
@@ -162,9 +180,8 @@ func (a *Agent) runOnce(ctx context.Context, bo *backoff) error {
 	}
 }
 
-func (a *Agent) handshake(sess tunnel.Session) (proto.BindOK, error) {
+func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK, error) {
 	ctrl := sess.Control()
-	idgen := proto.NewAgentIDGen()
 
 	authID := idgen.Next()
 	if err := ctrl.Write(proto.TypeAuth, authID, proto.Auth{
@@ -221,27 +238,31 @@ func (a *Agent) handshake(sess tunnel.Session) (proto.BindOK, error) {
 	}
 }
 
-func (a *Agent) sendGoodbye(sess tunnel.Session, reason string) {
-	idgen := proto.NewAgentIDGen()
+func (a *Agent) sendGoodbye(sess tunnel.Session, idgen *proto.IDGen, reason string) {
 	_ = sess.Control().Write(proto.TypeGoodbye, idgen.Next(), proto.Goodbye{
 		Reason:  reason,
 		DrainMS: int(drainTimeout / time.Millisecond),
 	})
 }
 
-func (a *Agent) controlLoop(sess tunnel.Session) error {
+func (a *Agent) controlLoop(sess tunnel.Session, idgen *proto.IDGen) error {
 	ctrl := sess.Control()
-	idgen := proto.NewAgentIDGen()
 
 	type readResult struct {
 		msg proto.Msg
 		err error
 	}
 	msgCh := make(chan readResult)
+	stop := make(chan struct{})
+	defer close(stop)
 	go func() {
 		for {
 			m, err := ctrl.Read()
-			msgCh <- readResult{m, err}
+			select {
+			case msgCh <- readResult{m, err}:
+			case <-stop:
+				return
+			}
 			if err != nil {
 				return
 			}
@@ -282,7 +303,7 @@ func (a *Agent) controlLoop(sess tunnel.Session) error {
 				a.setEvicted(ev.Hostname)
 				return fmt.Errorf("agent: evicted: %s (%s)", ev.Hostname, ev.Reason)
 			case proto.TypeGoodbye:
-				return errors.New("agent: edge said goodbye")
+				return errEdgeGoodbye
 			case proto.TypeError:
 				e, _ := proto.Decode[proto.Error](m)
 				return fmt.Errorf("agent: edge protocol error: %s: %s", e.Code, e.Message)
