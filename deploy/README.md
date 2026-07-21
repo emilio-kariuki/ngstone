@@ -4,9 +4,9 @@
 
 Two records in the `ngstone.site` zone, both proxy status "DNS only" (grey cloud) since Cloudflare's proxy would break the TLS termination and the agent's persistent yamux connection:
 
-| Type | Name | Value |
-|---|---|---|
-| A (or AAAA) | `ngstone.site` | the VPS's public IP |
+| Type        | Name             | Value               |
+| ----------- | ---------------- | ------------------- |
+| A (or AAAA) | `ngstone.site`   | the VPS's public IP |
 | A (or AAAA) | `*.ngstone.site` | the VPS's public IP |
 
 ## Cloudflare API token
@@ -52,6 +52,49 @@ sudo systemctl enable --now ngstoned
 ```
 
 `StateDirectory=ngstoned` makes systemd create `/var/lib/private/ngstoned` (with a `/var/lib/ngstoned` symlink) and `chown` it to whichever dynamic UID/GID the service gets on that start, every start — the numeric UID itself is not guaranteed to stay the same across restarts, but the directory ownership is fixed up automatically each time so the service can always read and write it. This only works because `StateDirectory=` is used instead of a manual `ReadWritePaths=`; the latter gets no such ownership handling from systemd and would leave the cert cache unreadable by a freshly assigned dynamic user, silently losing it — and therefore burning a Let's Encrypt issuance — on every single restart. `AmbientCapabilities=CAP_NET_BIND_SERVICE` lets the otherwise-unprivileged dynamic user bind `:80`/`:443`.
+
+## Behind a TCP proxy (PROXY protocol)
+
+Skip this section if `ngstoned` owns `:443` directly. It applies only when something else terminates the inbound TCP connection first — typically Traefik doing TLS passthrough (`HostSNIRegexp` + `tls.passthrough`) so `ngstoned` can still terminate TLS itself.
+
+Passthrough is not transparent at the TCP layer: Traefik accepts the browser's connection and opens a **new** one to `ngstoned`. Without extra configuration `conn.RemoteAddr()` on the public listener is Traefik's own address (on Docker, a private address such as `10.0.1.69`), which means every `X-Forwarded-For` the edge stamps is wrong, the local app cannot trust the forwarding headers, and the per-IP rate limiter buckets the entire internet into a single key — one abusive client either escapes limiting or locks everybody out.
+
+The fix is the PROXY protocol: the proxy prefixes each connection with the original endpoints, and `ngstoned` uses them as the client address.
+
+**Both sides must be changed together.** The edge rejects any connection to the public listener that does not begin with a valid PROXY header, and a proxy that sends one to a listener that is not expecting it produces a TLS handshake failure. Enabling one side alone breaks every public request.
+
+On the edge, add `-proxy-protocol` to the unit's `ExecStart`:
+
+```
+ExecStart=/usr/local/bin/ngstoned -proxy-protocol ...
+```
+
+On Traefik, set `proxyProtocol.version = 2` on the **TCP service** that points at `ngstoned` (dynamic configuration, not the static file):
+
+```yaml
+tcp:
+  routers:
+    ngstoned:
+      entryPoints:
+        - websecure
+      rule: "HostSNIRegexp(`^.+\\.ngstone\\.site$`)"
+      tls:
+        passthrough: true
+      service: ngstoned
+  services:
+    ngstoned:
+      loadBalancer:
+        proxyProtocol:
+          version: 2
+        servers:
+          - address: "ngstoned:443"
+```
+
+The equivalent Docker label is `traefik.tcp.services.ngstoned.loadbalancer.proxyprotocol.version=2`. Version 2 is Traefik's default when `proxyProtocol` is present at all; `ngstoned` also accepts the text-based version 1 for other proxies, and accepts the `LOCAL` command (used by health checks) by falling back to the real socket address.
+
+**The public port must be reachable only from the proxy.** With `-proxy-protocol` on, whoever can open a TCP connection to that port chooses the client IP that the edge logs, stamps into `X-Forwarded-For`, and rate-limits on. Bind `ngstoned` to the proxy-facing interface only (`-public 127.0.0.1:443`, or a Docker network address) and make sure no firewall rule exposes it to the internet. Leaving the flag off — the default — preserves the previous behaviour exactly.
+
+The flag applies to the public listener only. Do **not** put the control listener (`:4443`, where agents connect) behind a PROXY-protocol proxy; it does not parse the header and every agent connection would fail.
 
 ## Deploying a new build
 
