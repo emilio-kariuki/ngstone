@@ -15,7 +15,7 @@ const TOC: TocItem[] = [
   { id: "anonymous-attacker", title: "Anonymous attacker" },
   { id: "leaked-token", title: "Leaked token" },
   { id: "header-spoofing", title: "Header spoofing" },
-  { id: "inspector-csrf", title: "Inspector CSRF & DNS rebinding" },
+  { id: "inspector-surface", title: "The inspector's attack surface" },
   { id: "resource-exhaustion", title: "Resource exhaustion" },
   { id: "out-of-scope", title: "Out of scope" },
 ]
@@ -44,15 +44,16 @@ export default function SecurityModelPage() {
       <p>
         An anonymous attacker who has the public URL is exactly an anonymous
         HTTP client of the exposed local app — nothing more. They cannot
-        reach the inspector (loopback-only), any other localhost port (only
-        the configured target is ever dialed), or the control plane
-        (token-gated). Whatever residual risk remains here is inherent to
-        tunneling itself: if the local app is a debug server with a remote
-        code execution bug, the tunnel exposes exactly that. Mitigations are
-        a fast, byte-identical 404 for unknown or offline hosts (no
-        enumeration oracle), per-IP rate limiting, and making this risk
-        explicit in the docs rather than implying a false sense of
-        isolation.
+        reach the inspector (it&apos;s a terminal UI attached to your own
+        process, not a network service — there&apos;s no port to reach),
+        any other localhost port (only the configured target is ever
+        dialed), or the control plane (token-gated). Whatever residual risk
+        remains here is inherent to tunneling itself: if the local app is a
+        debug server with a remote code execution bug, the tunnel exposes
+        exactly that. Mitigations are a fast, byte-identical 404 for unknown
+        or offline hosts (no enumeration oracle), per-IP rate limiting, and
+        making this risk explicit in the docs rather than implying a false
+        sense of isolation.
       </p>
 
       <Anchor id="leaked-token">Leaked token</Anchor>
@@ -78,14 +79,17 @@ export default function SecurityModelPage() {
         ones on the agent if it used the same code path unmodified.
       </p>
 
-      <Anchor id="inspector-csrf">Inspector CSRF & DNS rebinding</Anchor>
+      <Anchor id="inspector-surface">The inspector&apos;s attack surface</Anchor>
       <p>
-        A malicious web page can&apos;t drive the inspector, even though it
-        binds loopback and loopback is reachable from a browser on the same
-        machine: mutating endpoints require the custom{" "}
-        <code>X-Ngstone</code> header, which cannot be sent cross-origin
-        without CORS approval, plus <code>Origin</code>/<code>Host</code>{" "}
-        validation on every inspector route.
+        There&apos;s no CSRF or DNS-rebinding story to tell here, because
+        there&apos;s no HTTP endpoint to attack: the request inspector is a
+        terminal UI (see{" "}
+        <a href="/docs/guides/request-inspector">Using the request
+        inspector</a>
+        ) that renders directly to your own process&apos;s stdout. It
+        doesn&apos;t bind a port, doesn&apos;t serve an API, and isn&apos;t
+        reachable from a browser tab — a malicious web page has nothing to
+        drive.
       </p>
 
       <Anchor id="resource-exhaustion">Resource exhaustion</Anchor>

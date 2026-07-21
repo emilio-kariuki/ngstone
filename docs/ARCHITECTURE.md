@@ -17,8 +17,8 @@ Guiding principles, in priority order: **stdlib-first, boring over clever, one p
               │ :80   → 301 https    │   one TLS TCP conn  │   ├─ tunnel session     │
               │ :4443 control TLS ◄──┼─────────────────────┼───┤  (yamux client)      │
               │                      │   yamux session     │   ├─ local proxy        │──► localhost:3000
-              │  ngstoned            │   (agent dials out) │   └─ inspector :4040    │
-              │   ├─ certmagic       │                     │       (127.0.0.1 only)  │
+              │  ngstoned            │   (agent dials out) │   └─ terminal inspector │
+              │   ├─ certmagic       │                     │       (Bubble Tea TUI)  │
               │   ├─ registry        │                     └─────────────────────────┘
               │   └─ reverse proxy   │
               └──────────────────────┘
@@ -38,7 +38,7 @@ The agent **always dials out** (VPS never connects into the laptop — NAT-frien
 6. **Agent accepts the stream**, reads the preamble, then hands the stream to a per-session `http.Server` (via a `net.Listener` adapter that yields yamux streams). Its handler is the **capture middleware** wrapping a second `httputil.ReverseProxy`.
 7. **Agent → localhost:3000** over a pooled keep-alive `http.Transport` (§6). Capture middleware tees up to 256 KiB of each body into the inspector ring buffer without blocking the stream (§6).
 8. **Response path** is the same pipe in reverse: app → agent proxy → yamux stream → edge proxy → browser. Both proxies are `io.Copy` loops over flow-controlled streams, so a slow browser backpressures all the way to the app's socket writes. `FlushInterval: -1` on the edge proxy means bytes are flushed as they arrive (SSE/streaming just works).
-9. **Teardown.** Response completes → yamux stream closed → transport slot freed. The inspector entry (status, timing, capped bodies) is pushed to any open `localhost:4040` SSE subscribers.
+9. **Teardown.** Response completes → yamux stream closed → transport slot freed. The finalized `*Exchange` (status, timing, capped bodies) is pushed onto the `Store`'s fan-out channels, which the terminal inspector is subscribed to directly in-process — no HTTP hop, no SSE.
 
 Added latency budget: one extra TCP/TLS-encrypted hop + yamux framing ≈ RTT(laptop↔VPS) + ~1 ms. No per-request handshakes anywhere: public keep-alive to edge, persistent yamux session, keep-alive pool to the local app.
 
@@ -298,7 +298,7 @@ Unknown-host requests short-circuit to a static `404` before any limiter/proxy w
 
 ## 6. Agent internals (`ngstone`)
 
-One process = one tunnel + one inspector (`ngstone http 3000 --subdomain api`). Multiple tunnels → multiple processes (`--inspect-port` to avoid the 4040 collision). Rejected multi-tunnel-per-process for v1: complicates CLI, config, and inspector UX for a need met by a second terminal tab.
+One process = one tunnel + one inspector (`ngstone port 3000 --subdomain api`). Multiple tunnels → multiple processes; there is no port to collide over because the inspector isn't a listener at all — it's a terminal UI attached to the process's own stdout. Rejected multi-tunnel-per-process for v1: complicates CLI, config, and inspector UX for a need met by a second terminal tab.
 
 ### Pipeline
 
@@ -308,8 +308,8 @@ yamux stream ─► streamListener (net.Listener adapter)
                         │
       capture: tee req/resp into Store    proxy: ReverseProxy → http://localhost:3000
                         │                        Transport{MaxIdleConnsPerHost: 8,
-             inspector 127.0.0.1:4040             IdleConnTimeout: 90s,
-              (embed.FS UI + SSE + replay)        ForceAttemptHTTP2: false}
+             tui.Run(Store, Target, RT)            IdleConnTimeout: 90s,
+              (Bubble Tea, in-process)              ForceAttemptHTTP2: false}
 ```
 
 - **Local forwarding:** `httputil.ReverseProxy` with a single pooled `http.Transport` to the local app. `FlushInterval: -1` here too. Local dial failure → agent synthesizes a `502` *with a helpful body* ("ngstone: nothing listening on localhost:3000").
@@ -323,7 +323,9 @@ Design rule: **capture observes, never gates.**
 
 - Request body: wrapped in a `cappedTee` — an `io.Reader` that copies bytes into `buf` until the 256 KiB cap, then sets `Truncated=true` and passes bytes through untouched. Streaming throughput unaffected (a memcpy on the same goroutine, not a pipe). **The buffer grows geometrically up to the cap; it is not preallocated.** `make([]byte, 0, 256<<10)` per body would be 256 KiB eagerly allocated to capture a 200-byte JSON response, ×2 per exchange, ×64 concurrent — 32 MiB of garbage to hold a few kilobytes of actual data.
 - Response: `http.ResponseWriter` wrapper recording status + headers + the same capped tee on writes; it forwards `Flush()` and `Unwrap()` (for `ResponseController`) so SSE flushing and hijack still work. *(Verified against Go 1.25 source: `ReverseProxy` reaches `Hijack` via `http.NewResponseController(rw)`, which walks `Unwrap()` — so this genuinely works, and `flushInterval()` already forces `-1` for `text/event-stream` and `ContentLength == -1` even if you forget to set it.)*
-- **WebSockets bypass the capture wrapper entirely — handle them explicitly or they record blank.** `handleUpgradeResponse` hijacks (via `Unwrap`, reaching the raw yamux stream) and then writes the 101 *and every subsequent byte* directly to the hijacked conn. The wrapper never sees `WriteHeader`, never sees a single `Write`. Left alone, every WS entry in the inspector shows status `0`, no response headers, an empty body, and a `Duration` equal to the socket's lifetime — with **nothing emitted to SSE until the socket closes, possibly hours later**. This is the nastiest defect in the design because every interface assertion passes: §11's "exercised by `httptest` interface-assertions" would not catch it. Fix: the capture wrapper records the hijack in its `Hijack`/`Unwrap` path and **finalizes an `Exchange{Kind:"upgrade"}` immediately at 101 time** with the request and response headers, so the entry appears the instant the socket opens; byte counts are updated afterwards via a counting `net.Conn` wrapper. WS frame payloads are **never** teed into the 256 KiB body buffer — a long-lived socket would otherwise pin one indefinitely.
+- **WebSockets bypass the capture wrapper entirely — handle them explicitly or they record blank.** `handleUpgradeResponse` hijacks (via `Unwrap`, reaching the raw yamux stream) and then writes the 101 *and every subsequent byte* directly to the hijacked conn. The wrapper never sees `WriteHeader`, never sees a single `Write`. Left alone, every WS entry in the inspector shows status `0`, no response headers, an empty body, and a `Duration` equal to the socket's lifetime — with **nothing appearing until the socket closes, possibly hours later**. This is the nastiest defect in the design because every interface assertion passes: §11's "exercised by `httptest` interface-assertions" would not catch it.
+
+  Fix, as shipped: **not** the wrapper's `Hijack`/`Unwrap` path — status and headers aren't knowable there, because the hijack happens *before* `res.Write(brw)`, i.e. before the reverse proxy has written the 101 status line and headers to the hijacked connection. Instead, `Capturer.ModifyResponse` (installed via `Capturer.Install(p)` on the agent's `httputil.ReverseProxy`) checks `resp.StatusCode == http.StatusSwitchingProtocols` and, if so, calls `exchangeState.finalizeUpgrade(resp)`, which finalizes an `Exchange{Kind: KindUpgrade}` with the request and response headers **immediately, at 101 time** — `ModifyResponse` runs after the upstream response is received but before the proxy relays it onward, which is exactly when status and headers first become knowable. The wrapper's `Hijack` method still runs afterward (when the proxy's `handleUpgradeResponse` takes over the connection); it now only marks the exchange as hijacked and installs a counting `net.Conn`/`io.ReadWriteCloser` wrapper (`wrapConn`/`wrapRWC`) so `BytesClientToApp`/`BytesAppToClient` update live as the socket carries traffic. Same observable outcome as the original design — the entry appears at 101, not at close — reached through a different stdlib hook because of *when* that hook actually runs relative to the response. WS frame payloads are **never** teed into the 256 KiB body buffer — a long-lived socket would otherwise pin one indefinitely.
 - **Decode `Content-Encoding` for display, keep raw bytes for replay.** Captured bodies are whatever the app sent — for most real apps, `gzip`. With only a content-type/UTF-8 sniff, every gzipped JSON response renders as a hex dump, which makes the inspector useless on precisely the apps you care about. Decompress for the UI; store the raw bytes; and on replay send the *original* request without re-applying an encoding the client didn't ask for.
 - On completion, an immutable `*Exchange` is finalized into the store:
 
@@ -344,18 +346,24 @@ type Store struct {
     mu   sync.Mutex
     ring []*Exchange                  // fixed cap 200, overwrite-oldest
     head int
-    subs map[chan *Exchange]struct{}  // SSE fan-out; slow subs get dropped, never block
+    subs map[chan *Exchange]struct{}  // in-process fan-out (the TUI subscribes directly); slow subs get dropped, never block
 }
 ```
 
 Hard memory ceiling for the store: 200 × (2 × 256 KiB) ≈ 100 MiB *worst case*, and far less in practice now that buffers grow on demand rather than being preallocated. Note this is the **inspector's** ceiling only — the system-level ceiling is dominated by the yamux window budget in §5. Binary bodies (after `Content-Encoding` decoding) are detected by content-type/UTF-8 sniff and rendered as hex preview.
 
-### Inspector UI & replay (`127.0.0.1:4040`)
+### Terminal inspector & replay (`internal/tui`)
 
-- **One embedded HTML file** (`embed.FS`), vanilla JS + `EventSource`. No framework, no build step, no npm — a request table and a detail pane don't justify a toolchain in a Go repo.
-- API: `GET /api/exchanges`, `GET /api/exchanges/{id}`, `POST /api/exchanges/{id}/replay`, `GET /api/events` (SSE), `GET /api/status`.
-- **Replay:** reconstructs the request from the capture (method, URL path+query, headers minus hop-by-hop, body) and sends it **directly to the local app** through the same pooled transport — not through the edge (deterministic, works offline, tests the app rather than the tunnel). Result enters the store flagged `Replayed: true`. Truncated bodies → replay disabled with an explanatory tooltip. "Edit & replay" lets you tweak method/headers/body first.
-- **Local security:** binds `127.0.0.1` only; mutating endpoints require header `X-Ngstone: 1` and an `Origin` check — kills cross-site `POST` replay and DNS rebinding.
+The original design called for a `127.0.0.1:4040` web UI: an embedded HTML file, vanilla JS + `EventSource`, a small JSON API, and CSRF-style protections around the mutating endpoints. **That was never built, and it's cancelled — not deferred.** What shipped instead is a full-screen terminal UI (Bubble Tea), because it needs no browser, no listening port, and no cross-origin surface at all: it's a Go process rendering to its own stdout.
+
+- **`ngstone port` runs the TUI in-process**, not as a separate server. `runPortTUI` (`cmd/ngstone/main.go`) constructs an `inspect.Store`, passes it into `agent.Config`, and hands the same store plus the local transport and target URL to `tui.Run(ctx, tui.Options{Store, Target, RT, Status, Logs})`. The agent and the TUI run as two goroutines supervised together (`supervise`): if the agent's session dies, the TUI is torn down; if the user quits the TUI (`q`/`ctrl+c`), the agent is cancelled and given a grace period to drain.
+- **Live updates via the same in-process channel fan-out described above** — `Model.Init` calls `store.Subscribe()` and reads `*Exchange` values off that channel in a Bubble Tea `tea.Cmd` loop (`waitForExchange`). No HTTP, no SSE, no polling: a finalized exchange is a Go value sent on a channel, picked up by the next `Update()` call.
+- **Layout:** a header (connection state, latency, the forwarding URL mapped to the local target, total/in-flight counts), a scrollable request list, a detail pane (headers + decoded bodies for the selected exchange), an optional log pane, and a footer of key hints. `tab` moves focus between the list and the detail pane; when the detail pane has focus, the navigation keys scroll it (`viewport.Model`) instead of moving the list selection.
+- **Request list rows** show method (or `WS` for a WebSocket upgrade), path, status, and duration; an open upgrade shows live byte counts in both directions (`BytesClientToApp`/`BytesAppToClient`) instead of a duration, since there's no single duration for a socket that's still open. A replayed entry is marked `↺`; a replay still in flight shows `~` (`internal/tui/list.go`).
+- **Filtering** (`/`) classifies the query as a method, a status class (`2xx`…`5xx`), or a path substring (`internal/tui/filter.go`) and re-derives the visible rows without touching the underlying `Store`.
+- **Replay** (`r`) calls `inspect.Store.Replay`, which reconstructs the request from the capture (method, URL, headers minus hop-by-hop, body) and sends it **directly to the local app** through the same pooled transport passed in at startup — not through the edge, so it's deterministic, works with the tunnel offline, and exercises the app rather than the tunnel. The result is stored as a new `Exchange` flagged `Replayed: true`. A request whose body was truncated at capture returns `ErrTruncatedBody` and cannot be replayed — the bytes genuinely weren't kept — and the TUI reflects that rather than silently sending a partial body. WebSocket upgrades return `ErrNotReplayable`: there's no single request/response pair to resend. **Edit & replay** (`e`) opens a form over method/URL/headers/body (`internal/tui/editform.go`; `tab`/`shift+tab` cycles fields, `ctrl+s` sends, `esc` discards) before calling the same replay path with overrides.
+- **No listening port, no API, no CSRF surface.** Because the inspector isn't a network service, the entire "local security" section from the original design — loopback binding, `X-Ngstone` header, `Origin` checks — doesn't apply; there's nothing for another process or a browser tab to reach.
+- **`--no-tui`** on `ngstone port` disables the dashboard and logs plain text to stderr instead; the TUI is also skipped automatically whenever stdout isn't a terminal (piping, CI, backgrounding with `&`), via a `stdoutIsTerminal` check (`cmd/ngstone/main.go`).
 
 ---
 
@@ -366,7 +374,7 @@ ngstone/
 ├── go.mod                          # module github.com/owner/ngstone; go 1.25
 ├── cmd/
 │   ├── ngstoned/main.go            # edge: flags/env → edge.Server → run
-│   └── ngstone/main.go             # CLI: subcommands http|token|version (stdlib flag; no cobra — 3 verbs)
+│   └── ngstone/main.go             # CLI: subcommands auth|port|config|logout|version (stdlib flag; no cobra)
 ├── internal/
 │   ├── proto/
 │   │   ├── proto.go                # Msg envelope + all message structs (§3)
@@ -386,11 +394,20 @@ ngstone/
 │   │   ├── proxy.go                # local ReverseProxy + pooled transport + capture hook
 │   │   └── status.go               # session state events → CLI output
 │   ├── inspect/
-│   │   ├── store.go                # Exchange ring buffer + SSE fan-out
-│   │   ├── capture.go              # cappedTee reader, ResponseWriter recorder middleware
-│   │   ├── replay.go               # rebuild & resend captured requests
-│   │   ├── server.go               # 127.0.0.1:4040 HTTP API
-│   │   └── ui/index.html           # embedded single-file UI
+│   │   ├── store.go                # Exchange ring buffer + in-process channel fan-out
+│   │   ├── capture.go              # cappedTee reader, ResponseWriter recorder middleware, upgrade finalization
+│   │   ├── decode.go               # Content-Encoding decode (gzip/deflate) + binary sniffing, for display only
+│   │   └── replay.go               # rebuild & resend captured requests
+│   ├── tui/
+│   │   ├── tui.go                  # tui.Run(ctx, Options) entry point
+│   │   ├── model.go                # Bubble Tea Model: layout, key routing, Store subscription
+│   │   ├── list.go                 # request list rows (method/path/status/duration, ↺/~ markers)
+│   │   ├── detail.go               # headers + decoded-body rendering for the selected exchange
+│   │   ├── filter.go               # method / status-class / substring filter parsing
+│   │   ├── editform.go             # edit-and-replay form
+│   │   ├── replaycmd.go            # tea.Cmd wrapper around inspect.Store.Replay
+│   │   ├── logring.go              # bounded slog ring, shown in the optional log pane
+│   │   └── keys.go / styles.go     # key bindings + lipgloss styles
 │   ├── config/config.go            # flags+env for both binaries (no config-file dep in v1)
 │   └── version/version.go          # ldflags-injected version string
 └── Makefile                        # build, test, cross-compile linux/amd64, deploy scp target
@@ -463,12 +480,12 @@ func (s *Store) Subscribe(ctx context.Context) <-chan *Exchange
 
 **Assets:** the laptop's local app + LAN foothold, the auth token, the wildcard domain's reputation, tunneled request/response data.
 
-1. **Anonymous attacker with the public URL** — is exactly an anonymous HTTP client of the exposed local app, nothing more. They cannot reach the inspector (loopback-only), other localhost ports (only the configured target is dialed), or the control plane (token-gated). Residual risk is *inherent to tunneling*: if the local app is a debug server with RCE, the tunnel exposes it. Mitigations: fast-404 non-enumeration, per-IP rate limiting, and loud docs.
+1. **Anonymous attacker with the public URL** — is exactly an anonymous HTTP client of the exposed local app, nothing more. They cannot reach the inspector (it's a terminal UI attached to the operator's own process, not a network service — there's no port to reach at all), other localhost ports (only the configured target is dialed), or the control plane (token-gated). Residual risk is *inherent to tunneling*: if the local app is a debug server with RCE, the tunnel exposes it. Mitigations: fast-404 non-enumeration, per-IP rate limiting, and loud docs.
 2. **Subdomain enumeration** — unknown and offline hosts return byte-identical 404s. The wildcard cert means individual tunnel names never appear in CT logs (a real advantage of DNS-01 wildcard over per-name issuance).
 3. **Leaked token** — grants: bind any non-denylisted subdomain, receive that traffic, serve phishing under your domain. Does **not** grant: reading other tunnels' traffic in flight, edge shell access, cert/DNS control. Rotation is a config change + restart. Tokens never appear in logs (redacted at the slog layer); only the hash lives on the VPS.
 4. **MITM agent↔edge** — TLS 1.3 with WebPKI validation (+ optional SPKI pin); token only ever sent inside the tunnel TLS.
 5. **Header spoofing** — inbound `Forwarded`/`X-Forwarded-*` are stripped by `Rewrite` and replaced by `SetXForwarded` at the edge; `X-Real-IP` is stripped explicitly (it is not in the stdlib delete set). The local app can trust them **only if the agent-side proxy preserves them** — see §6, where the same stdlib behavior silently deletes them if you use `Rewrite` on the agent.
-6. **Malicious web page attacking the inspector (CSRF / DNS rebinding)** — mutating endpoints require the `X-Ngstone` custom header (unsendable cross-origin without CORS approval) + Origin/Host validation on all inspector routes.
+6. **Malicious web page attacking the inspector (CSRF / DNS rebinding)** — not applicable as shipped. The original design's `127.0.0.1:4040` API would have needed the `X-Ngstone` header + Origin/Host checks described in earlier drafts of this document, but the inspector shipped as a terminal UI instead (§6): there is no listening port, no HTTP API, and therefore nothing for a browser tab to reach or rebind to.
 7. **Resource exhaustion** — every buffer has a stated cap, *including the yamux receive windows* (§5 table) that an earlier draft omitted while claiming completeness; no code path buffers an entire body. The unauthenticated surface on :4443 is separately capped (concurrent handshakes, unauthenticated sessions) so a stranger cannot hoard control-plane resources for the cost of a TCP connect.
 
 Out of scope, accepted for a single-user v1:
@@ -491,7 +508,7 @@ Out of scope, accepted for a single-user v1:
   - Reference `${STATE_DIRECTORY}/certs` (or `/var/lib/ngstoned/certs`, which systemd bind-mounts inside the unit's namespace) rather than hard-coding `/var/lib/private/...` — the literal private path silently becomes a different, unmanaged directory if `DynamicUser` is ever removed.
   - **Never pass secrets as `ExecStart` flags.** `/proc/<pid>/cmdline` is world-readable on stock Linux, so a token on the command line is readable by any local user via `ps auxww`. Use `EnvironmentFile=` and read from the environment. **Done:** `https://anything.ngstone.site` loads from a phone on LTE with a valid padlock; `systemctl restart` three times in a row serves the cached certs with zero ACME traffic (assert this — it is the check that catches the systemd bug); a synthetic flood gets `429`; a slowloris client is evicted at 10 s.
 - **M4 — Real-web robustness.** WebSocket passthrough, SSE/chunked flushing, streaming correctness end to end, branded 404/502/504 pages, `413` on both the declared and chunked paths, expvar ops endpoint. **Done:** e2e suite passes a WS echo session, a 60 s SSE stream, a 1 GiB download at constant memory, a 300 MiB upload rejected with a real `413`, **and an assertion that the local app sees the browser's real IP in `X-Forwarded-For`** (the agent-side `Rewrite` footgun from §6).
-- **M5 — Inspector + replay.** Capture middleware, ring store, 4040 API + embedded UI, SSE live view, replay + edit-and-replay, `Content-Encoding` decoding, CSRF protections. **Done:** localhost:4040 shows live entries with bodies while browsing the public URL; **a WebSocket appears in the list the moment it connects, not when it closes**; a gzipped JSON response renders as readable JSON, not hex; replaying a captured POST hits the local app identically (asserted by a recording test server); a streamed 50 MB response shows "truncated" and streams at full speed. Re-run the entire M4 suite through the inspector-wrapped path — this is the milestone most likely to silently break streaming.
+- **M5 — Inspector + replay.** Capture middleware, ring store, terminal UI (Bubble Tea) with a live request list and detail pane, replay + edit-and-replay, `Content-Encoding` decoding (`gzip`/`deflate`; `br`/`zstd` render as binary, not in the Go stdlib). Shipped as a terminal dashboard, not the originally planned `127.0.0.1:4040` web UI — no HTTP API, no SSE, no CSRF surface, because there's no listener to attack. **Done:** `ngstone port` shows live entries with decoded bodies while browsing the public URL; **a WebSocket appears in the list the moment it connects, not when it closes** (via `ModifyResponse` at 101 time, not the wrapper's `Hijack` path — see §6); a gzipped JSON response renders as readable JSON, not hex; replaying a captured POST hits the local app identically (asserted by a recording test server); a truncated request body refuses to replay; a streamed 50 MB response shows "truncated" and streams at full speed. Re-run the entire M4 suite through the inspector-wrapped path — this is the milestone most likely to silently break streaming.
 - **M6 — Polish & cut v1.0.** CLI UX (`ngstone http 3000`, live status line, `token new`), `--host-header`, `--allow-cidr`, slog levels, `-ldflags` versioning, cross-compile matrix, README with threat-model notes. **Done:** a fresh VPS + fresh laptop go zero-to-shared-URL following only the README, in under 15 minutes.
 
 ---
@@ -500,4 +517,4 @@ Out of scope, accepted for a single-user v1:
 
 1. **The parts of `net/http` that do the right thing *around* your code instead of *through* it.** This is the theme behind the majority of the review's findings, and interface assertions do not catch any of them. `handleUpgradeResponse` hijacks and writes past your `ResponseWriter` wrapper, so WebSockets record blank (§6). `Rewrite` deletes `X-Forwarded-*` *before* your callback runs — correct on the edge, destructive on the agent (§5, §6). `MaxBytesReader` tripping inside `RoundTrip` becomes a `502`, not the `413` you wrote in the table (§5). **Avoidance:** for every stdlib hook, write down *when* it runs relative to your code, not just what it does; assert on observable behavior (does the local app see the real client IP? does the WS entry appear at connect time?) rather than on interfaces being present; run the whole M4 suite again through the M5 inspector path.
 2. **The reconnect / zombie-binding state machine.** Half-open TCP means the edge can believe a dead agent is alive for tens of seconds while the real agent is trying to rebind its own name. Naive code either double-binds, locks the owner out of their own subdomain (the original liveness-gated takeover did exactly this), or lets a dying session's cleanup delete the *new* owner's binding. **Avoidance:** takeover authorized by `InstanceID`, not by liveness and not by token (§3); ownership state inside `Registry` under one mutex; `ReleaseSession` compare-and-deletes and is idempotent (§5); the partition matrix (`kill -9`, `SIGSTOP`, `pfctl`/iptables DROP, edge restart) scripted as e2e tests in **M2**.
-3. **Unbounded memory hiding in "just a proxy" — including in the parts you didn't write.** Every tunnel OOM traces to a buffer someone didn't know they had. The original draft caught its own tees and fan-outs but declared "every buffer has a cap" while the **yamux receive windows** quietly allowed 512 MiB per session (§5) — the biggest buffer in the system, in a dependency, invisible in application code. **Avoidance:** the §5 limits table states the *product* (concurrency × window), not just per-item caps, and is a checklist enforced by tests; the M1 constant-memory assertion runs in CI forever; capture buffers grow geometrically and cannot exceed their cap by construction; SSE fan-out drops slow subscribers instead of blocking; `io.ReadAll` banned outside the inspector's capped paths via `forbidigo`.
+3. **Unbounded memory hiding in "just a proxy" — including in the parts you didn't write.** Every tunnel OOM traces to a buffer someone didn't know they had. The original draft caught its own tees and fan-outs but declared "every buffer has a cap" while the **yamux receive windows** quietly allowed 512 MiB per session (§5) — the biggest buffer in the system, in a dependency, invisible in application code. **Avoidance:** the §5 limits table states the *product* (concurrency × window), not just per-item caps, and is a checklist enforced by tests; the M1 constant-memory assertion runs in CI forever; capture buffers grow geometrically and cannot exceed their cap by construction; the store's channel fan-out drops slow subscribers instead of blocking; `io.ReadAll` banned outside the inspector's capped paths via `forbidigo`.

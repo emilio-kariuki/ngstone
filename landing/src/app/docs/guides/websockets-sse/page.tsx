@@ -66,16 +66,17 @@ export default function WebsocketsSsePage() {
         grouped under the same M4 milestone.
       </p>
 
-      <Anchor id="in-the-inspector">How they&apos;d appear in the inspector</Anchor>
+      <Anchor id="in-the-inspector">How they appear in the inspector</Anchor>
       <p>
-        There is no inspector today (see{" "}
-        <a href="/docs/guides/request-inspector">Using the request
-        inspector</a>
-        , also planned for a later milestone). Once both exist, the design
-        intent is for WebSockets to finalize in the inspector at{" "}
-        <strong>101 time</strong>, not at close, so a long-lived connection
-        would show up in the request list instantly instead of staying
-        invisible until the socket eventually closes.
+        The <a href="/docs/guides/request-inspector">request inspector</a>{" "}
+        already understands WebSockets: an upgrade is finalized in the
+        inspector at <strong>101 time</strong>, not at close, so a
+        long-lived connection shows up in the request list the instant it
+        connects instead of staying invisible until the socket eventually
+        closes. Rows for an open socket show <code>WS</code> in the method
+        column and live byte counts in both directions in place of a
+        duration. This inspector behavior is solid; it&apos;s the broader
+        WebSocket/SSE hardening above (M4) that&apos;s still outstanding.
       </p>
     </DocsArticle>
   )

@@ -51,12 +51,12 @@ export const NAV: NavGroup[] = [
       {
         title: "Using the request inspector",
         href: "/docs/guides/request-inspector",
-        description: "Planned design, not yet implemented (M5).",
+        description: "The terminal dashboard that shows every request live.",
       },
       {
         title: "Replaying requests",
         href: "/docs/guides/replaying-requests",
-        description: "Planned design, not yet implemented (M5).",
+        description: "Re-send a captured request straight to your local app.",
       },
       {
         title: "WebSockets & SSE",
@@ -97,11 +97,6 @@ export const NAV: NavGroup[] = [
         title: "Limits & timeouts",
         href: "/docs/reference/limits-timeouts",
         description: "Every cap the edge enforces.",
-      },
-      {
-        title: "The inspector API",
-        href: "/docs/reference/inspector-api",
-        description: "Planned design, not yet implemented (M5).",
       },
     ],
   },
