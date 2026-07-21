@@ -10,6 +10,7 @@ require (
 	github.com/caddyserver/certmagic v0.25.4
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/libdns/cloudflare v0.2.2
+	golang.org/x/time v0.14.0
 )
 
 require (

@@ -35,11 +35,25 @@ type AgentSession struct {
 	Remote     netip.AddrPort
 	IDGen      *proto.IDGen
 
-	inflight sync.WaitGroup
+	inflight  sync.WaitGroup
+	streamSem *globalSemaphore
 }
 
 func (a *AgentSession) Done() <-chan struct{} {
 	return a.Sess.Done()
+}
+
+func (a *AgentSession) tryAcquireStream() bool {
+	if a.streamSem == nil {
+		return true
+	}
+	return a.streamSem.tryAcquire()
+}
+
+func (a *AgentSession) releaseStream() {
+	if a.streamSem != nil {
+		a.streamSem.release()
+	}
 }
 
 func negotiateVersion(offered []int) (int, bool) {
@@ -120,19 +134,49 @@ func (l *authRateLimiter) prune(key string) {
 }
 
 func (s *Server) acceptControl(ctx context.Context, ln net.Listener) error {
+	var backoff time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
+			if ne, ok := err.(net.Error); ok && ne.Temporary() {
+				if backoff == 0 {
+					backoff = 5 * time.Millisecond
+				} else {
+					backoff *= 2
+				}
+				if backoff > time.Second {
+					backoff = time.Second
+				}
+				slog.Warn("edge: control accept error, retrying", "err", err, "backoff", backoff)
+				timer := time.NewTimer(backoff)
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					timer.Stop()
+					return nil
+				}
+				continue
+			}
 			return err
 		}
-		go s.handleControlConn(ctx, conn)
+		backoff = 0
+		if !s.unauthSem.tryAcquire() {
+			conn.Close()
+			continue
+		}
+		go func() {
+			var once sync.Once
+			release := func() { once.Do(s.unauthSem.release) }
+			defer release()
+			s.handleControlConn(ctx, conn, release)
+		}()
 	}
 }
 
-func (s *Server) handleControlConn(ctx context.Context, conn net.Conn) {
+func (s *Server) handleControlConn(ctx context.Context, conn net.Conn, releaseUnauth func()) {
 	ip := remoteIP(conn)
 
 	deadline := time.Now().Add(authDeadline)
@@ -146,10 +190,15 @@ func (s *Server) handleControlConn(ctx context.Context, conn net.Conn) {
 	}
 
 	if s.tlsMgr != nil {
+		if !s.handshakeSem.tryAcquire() {
+			conn.Close()
+			return
+		}
 		tlsConn := tls.Server(conn, s.tlsMgr.ApexTLSConfig())
 		hctx, cancel := context.WithDeadline(ctx, deadline)
 		err := tlsConn.HandshakeContext(hctx)
 		cancel()
+		s.handshakeSem.release()
 		if err != nil {
 			slog.Warn("edge: control TLS handshake failed", "ip", ip, "err", err)
 			conn.Close()
@@ -172,6 +221,7 @@ func (s *Server) handleControlConn(ctx context.Context, conn net.Conn) {
 		sess.Close("auth failed")
 		return
 	}
+	releaseUnauth()
 
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		sess.Close("clear read deadline failed")
@@ -182,6 +232,7 @@ func (s *Server) handleControlConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 
+	metricActiveSessions.Add(1)
 	s.controlLoop(ctx, as)
 }
 
@@ -242,6 +293,7 @@ func (s *Server) authenticate(sess tunnel.Session, ip string, remote netip.AddrP
 		Sess:       sess,
 		Remote:     remote,
 		IDGen:      proto.NewEdgeIDGen(),
+		streamSem:  newGlobalSemaphore(s.limitsOrDefault().PerSessionInFlight),
 	}
 
 	if err := ctrl.Write(proto.TypeAuthOK, msg.ID, proto.AuthOK{
@@ -264,6 +316,7 @@ func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 	defer func() {
 		s.registry.ReleaseSession(as)
 		as.Sess.Close("control loop exited")
+		metricActiveSessions.Add(-1)
 	}()
 
 	ctrl := as.Sess.Control()

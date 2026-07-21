@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -17,6 +18,11 @@ const dialBudget = 5 * time.Second
 
 var ErrSubdomainTaken = errors.New("edge: subdomain_taken")
 
+type dialError struct{ err error }
+
+func (e *dialError) Error() string { return fmt.Sprintf("edge: dial to agent failed: %v", e.err) }
+func (e *dialError) Unwrap() error { return e.err }
+
 type Binding struct {
 	Hostname   string
 	Sess       *AgentSession
@@ -30,13 +36,26 @@ type Registry struct {
 	mu        sync.RWMutex
 	byHost    map[string]*Binding
 	bySession map[*AgentSession]map[string]struct{}
+	limits    LimitsConfig
 }
 
 func NewRegistry() *Registry {
+	limits, _ := LimitsConfig{}.withDefaults()
 	return &Registry{
 		byHost:    make(map[string]*Binding),
 		bySession: make(map[*AgentSession]map[string]struct{}),
+		limits:    limits,
 	}
+}
+
+func (r *Registry) SetLimits(limits LimitsConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	resolved, err := limits.withDefaults()
+	if err != nil {
+		return
+	}
+	r.limits = resolved
 }
 
 func (r *Registry) Route(host string) (*Binding, bool) {
@@ -74,7 +93,7 @@ func (r *Registry) Bind(host string, s *AgentSession, takeover bool) (*Binding, 
 		delete(r.byHost, host)
 	}
 
-	transport := newBindingTransport(host, s)
+	transport := newBindingTransport(host, s, r.limits)
 	b := &Binding{
 		Hostname:   host,
 		Sess:       s,
@@ -134,9 +153,10 @@ func isSessionDead(s *AgentSession) bool {
 	}
 }
 
-func newBindingTransport(host string, s *AgentSession) *http.Transport {
+func newBindingTransport(host string, s *AgentSession, limits LimitsConfig) *http.Transport {
 	return &http.Transport{
-		DisableKeepAlives: true,
+		DisableKeepAlives:     true,
+		ResponseHeaderTimeout: limits.ResponseHeaderTimeout,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			clientAddr, _ := ctx.Value(ctxKeyClientAddr).(string)
 			reqID, _ := ctx.Value(ctxKeyReqID).(string)
@@ -153,7 +173,7 @@ func newBindingTransport(host string, s *AgentSession) *http.Transport {
 			})
 			if err != nil {
 				s.inflight.Done()
-				return nil, err
+				return nil, &dialError{err: err}
 			}
 			return &inflightConn{Conn: conn, wg: &s.inflight}, nil
 		},

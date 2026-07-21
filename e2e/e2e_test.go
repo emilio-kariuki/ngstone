@@ -39,6 +39,9 @@ func TestEndToEndSubprocesses(t *testing.T) {
 		"-control", controlAddr,
 		"-token-sha256", sha256Hex(token),
 		"-domain", domain,
+		"-public-scheme", "http",
+		"-insecure",
+		"-ops", "",
 	)
 	edgeCmd.Stdout = os.Stderr
 	edgeCmd.Stderr = os.Stderr
@@ -57,6 +60,7 @@ func TestEndToEndSubprocesses(t *testing.T) {
 		"-token", token,
 		"-target", origin.URL,
 		"-subdomain", "demo",
+		"-insecure",
 	)
 	agentCmd.Stdout = os.Stderr
 	agentCmd.Stderr = os.Stderr
