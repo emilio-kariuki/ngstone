@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -152,6 +154,90 @@ func startEdge(t *testing.T, edgeBin, controlAddr, publicAddr, token, domain str
 	t.Cleanup(p.killAndWait)
 	waitForPort(t, controlAddr)
 	return p, sb
+}
+
+func freeTCPRange(t *testing.T, span int) (lo, hi int) {
+	t.Helper()
+	addr := freeAddr(t)
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("freeTCPRange: split %q: %v", addr, err)
+	}
+	lo, err = strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("freeTCPRange: parse port %q: %v", portStr, err)
+	}
+	hi = lo + span
+	if hi > 65535 {
+		hi = 65535
+	}
+	return lo, hi
+}
+
+func startEdgeTCP(t *testing.T, edgeBin, controlAddr, publicAddr, token, domain string, tcpLo, tcpHi int) (*managedProc, *syncBuf) {
+	t.Helper()
+	cmd := exec.Command(edgeBin,
+		"-public", publicAddr,
+		"-control", controlAddr,
+		"-token-sha256", sha256Hex(token),
+		"-domain", domain,
+		"-public-scheme", "http",
+		"-insecure",
+		"-ops", "",
+		"-tcp-ports", strconv.Itoa(tcpLo)+"-"+strconv.Itoa(tcpHi),
+		"-tcp-bind", "127.0.0.1",
+	)
+	sb := &syncBuf{}
+	cmd.Stdout = io.MultiWriter(os.Stderr, sb)
+	cmd.Stderr = io.MultiWriter(os.Stderr, sb)
+	p := newManagedProc(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start ngstoned: %v", err)
+	}
+	t.Cleanup(p.killAndWait)
+	waitForPort(t, controlAddr)
+	return p, sb
+}
+
+func startAgentTCP(t *testing.T, agentBin, controlAddr, token, localTarget string, remotePort int) (*managedProc, *syncBuf) {
+	t.Helper()
+	args := []string{
+		"tcp", localTarget,
+		"-server", controlAddr,
+		"-token", token,
+		"-insecure",
+	}
+	if remotePort != 0 {
+		args = append(args, "-r", strconv.Itoa(remotePort))
+	}
+	cmd := exec.Command(agentBin, args...)
+	sb := &syncBuf{}
+	cmd.Stdout = io.MultiWriter(os.Stderr, sb)
+	cmd.Stderr = io.MultiWriter(os.Stderr, sb)
+	p := newManagedProc(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start ngstone tcp: %v", err)
+	}
+	t.Cleanup(p.killAndWait)
+	return p, sb
+}
+
+var tcpAdvertRe = regexp.MustCompile(`tcp://[^:\s]+:(\d+)\s+->`)
+
+func waitTCPAssignedPort(t *testing.T, sb *syncBuf, max time.Duration) int {
+	t.Helper()
+	deadline := time.Now().Add(max)
+	for time.Now().Before(deadline) {
+		if m := tcpAdvertRe.FindStringSubmatch(sb.String()); m != nil {
+			port, err := strconv.Atoi(m[1])
+			if err == nil {
+				return port
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %s waiting for the agent to advertise a tcp:// URL; got:\n%s", max, sb.String())
+	return 0
 }
 
 func startAgent(t *testing.T, agentBin, controlAddr, token, target, subdomain, instanceID string) (*managedProc, *syncBuf) {
