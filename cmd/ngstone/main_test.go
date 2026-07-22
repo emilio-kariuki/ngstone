@@ -211,6 +211,88 @@ func TestResolveTargetURL(t *testing.T) {
 	}
 }
 
+func TestVerbFuncDispatchIncludesTCP(t *testing.T) {
+	fn, ok := verbFunc("tcp")
+	if !ok || fn == nil {
+		t.Fatalf("verbFunc(%q) ok=%v (nil func=%v), want a dispatchable tcp verb", "tcp", ok, fn == nil)
+	}
+}
+
+func TestResolveTCPTarget(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"22", "127.0.0.1:22", false},
+		{"5432", "127.0.0.1:5432", false},
+		{"1", "127.0.0.1:1", false},
+		{"65535", "127.0.0.1:65535", false},
+		{"127.0.0.1:22", "127.0.0.1:22", false},
+		{"db.local:5432", "db.local:5432", false},
+		{"0", "", true},
+		{"70000", "", true},
+		{"abc", "", true},
+		{"", "", true},
+		{"host:0", "", true},
+		{"host:70000", "", true},
+		{"host:abc", "", true},
+		{":22", "", true},
+	}
+
+	for _, tc := range cases {
+		got, err := resolveTCPTarget(tc.in)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("resolveTCPTarget(%q) = %q, nil; want an error", tc.in, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("resolveTCPTarget(%q) unexpected error: %v", tc.in, err)
+		}
+		if got != tc.want {
+			t.Fatalf("resolveTCPTarget(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestTCPFlagSetParsesRemotePort(t *testing.T) {
+	fs, tf := newTCPFlagSet()
+	positionals, err := parsePermissive(fs, []string{"5432", "--remote-port", "15432"})
+	if err != nil {
+		t.Fatalf("parsePermissive: %v", err)
+	}
+	if len(positionals) != 1 || positionals[0] != "5432" {
+		t.Fatalf("positionals = %v, want [5432]", positionals)
+	}
+	if tf.remotePort != 15432 {
+		t.Fatalf("remotePort = %d, want 15432", tf.remotePort)
+	}
+
+	fs, tf = newTCPFlagSet()
+	if _, err := parsePermissive(fs, []string{"-r", "2222", "db.local:22"}); err != nil {
+		t.Fatalf("parsePermissive short flag: %v", err)
+	}
+	if tf.remotePort != 2222 {
+		t.Fatalf("remotePort via -r = %d, want 2222", tf.remotePort)
+	}
+
+	fs, tf = newTCPFlagSet()
+	if _, err := parsePermissive(fs, []string{"5432"}); err != nil {
+		t.Fatalf("parsePermissive without flag: %v", err)
+	}
+	if tf.remotePort != 0 {
+		t.Fatalf("remotePort default = %d, want 0 (server-assigned)", tf.remotePort)
+	}
+}
+
+func TestTCPLeadingFlagFallsThroughToLegacy(t *testing.T) {
+	if _, ok := verbFunc("-remote-port"); ok {
+		t.Fatalf("verbFunc(%q) = ok, want a leading -flag to fall through to the legacy path", "-remote-port")
+	}
+}
+
 func TestResolveTokenPrecedenceFlagBeatsEnvBeatsConfig(t *testing.T) {
 	cfg := config.Config{Token: "config-token"}
 
