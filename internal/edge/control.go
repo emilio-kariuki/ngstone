@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"strconv"
 	"sync"
 	"time"
 
@@ -315,6 +316,7 @@ func (s *Server) authenticate(sess tunnel.Session, ip string, remote netip.AddrP
 func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 	defer func() {
 		s.registry.ReleaseSession(as)
+		s.releaseTCP(as)
 		as.Sess.Close("control loop exited")
 		metricActiveSessions.Add(-1)
 	}()
@@ -413,7 +415,14 @@ func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 func (s *Server) handleGoodbye(as *AgentSession, gb proto.Goodbye) {
 	slog.Info("edge: agent goodbye", "session_id", as.ID, "reason", gb.Reason)
 	s.registry.ReleaseSession(as)
+	s.releaseTCP(as)
 	s.waitInflight(as)
+}
+
+func (s *Server) releaseTCP(as *AgentSession) {
+	if s.tcpMgr != nil {
+		s.tcpMgr.releaseSession(as)
+	}
 }
 
 func (s *Server) drainOnShutdown(as *AgentSession, ctrl *proto.Conn) {
@@ -423,6 +432,7 @@ func (s *Server) drainOnShutdown(as *AgentSession, ctrl *proto.Conn) {
 		DrainMS: int(drainTimeout / time.Millisecond),
 	})
 	s.registry.ReleaseSession(as)
+	s.releaseTCP(as)
 	s.waitInflight(as)
 }
 
@@ -440,6 +450,10 @@ func (s *Server) waitInflight(as *AgentSession) {
 }
 
 func (s *Server) handleBind(as *AgentSession, ctrl *proto.Conn, id uint64, bind proto.Bind) {
+	if bind.Kind == proto.KindTCP {
+		s.handleBindTCP(as, ctrl, id, bind)
+		return
+	}
 	if bind.Kind != proto.KindHTTP {
 		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeKindUnsupported, Message: "kind not supported"})
 		return
@@ -473,6 +487,27 @@ func (s *Server) handleBind(as *AgentSession, ctrl *proto.Conn, id uint64, bind 
 		return
 	}
 	s.finishBind(id, ctrl, hostname, evicted)
+}
+
+func (s *Server) handleBindTCP(as *AgentSession, ctrl *proto.Conn, id uint64, bind proto.Bind) {
+	if s.tcpMgr == nil {
+		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeKindUnsupported, Message: "tcp tunnels not enabled"})
+		return
+	}
+	port, err := s.tcpMgr.bind(as, bind.RemotePort, s.cfg.Domain)
+	if err != nil {
+		if errors.Is(err, errPortUnavailable) {
+			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodePortUnavailable, Message: "requested port unavailable"})
+			return
+		}
+		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInternal, Message: err.Error()})
+		return
+	}
+	ctrl.Write(proto.TypeBindOK, id, proto.BindOK{
+		Hostname: s.cfg.Domain,
+		URL:      "tcp://" + s.cfg.Domain + ":" + strconv.Itoa(port),
+		Port:     port,
+	})
 }
 
 func (s *Server) finishBind(id uint64, ctrl *proto.Conn, hostname string, evicted *AgentSession) {
