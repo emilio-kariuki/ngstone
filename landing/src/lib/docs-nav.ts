@@ -44,6 +44,11 @@ export const NAV: NavGroup[] = [
         description: "Forward a public URL to a port on your machine.",
       },
       {
+        title: "TCP tunnels",
+        href: "/docs/guides/tcp-tunnels",
+        description: "Raw TCP tunnels for SSH, databases, and anything else that isn't HTTP.",
+      },
+      {
         title: "Custom subdomains",
         href: "/docs/guides/custom-subdomains",
         description: "Pick your own name instead of a random one.",
