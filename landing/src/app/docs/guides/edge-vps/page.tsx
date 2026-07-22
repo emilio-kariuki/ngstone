@@ -23,6 +23,7 @@ const TOC: TocItem[] = [
   { id: "install-the-binary", title: "Installing the binary" },
   { id: "systemd-unit", title: "Running it under systemd" },
   { id: "firewall", title: "Firewall" },
+  { id: "tcp-tunnels", title: "TCP tunnels" },
   { id: "behind-a-proxy", title: "Behind an existing reverse proxy" },
   { id: "connect-an-agent", title: "Connecting an agent" },
   { id: "troubleshooting", title: "Troubleshooting" },
@@ -354,6 +355,34 @@ $ systemctl status ngstoned`}
 $ sudo ufw allow 4443/tcp
 $ sudo ufw allow 80/tcp
 $ sudo ufw enable`}
+      />
+
+      <Anchor id="tcp-tunnels">TCP tunnels</Anchor>
+      <p>
+        Off by default. An operator opts in with <code>-tcp-ports</code>,
+        which lets agents run <code>ngstone tcp</code> — see{" "}
+        <a href="/docs/guides/tcp-tunnels">TCP tunnels</a> for the
+        client-side guide.
+      </p>
+      <ParamTable>
+        <Property name="-tcp-ports" type="string">
+          Port range for raw TCP tunnels, e.g. <code>10000-10999</code>.
+          Empty disables TCP tunnels.
+        </Property>
+        <Property name="-tcp-bind" type="string" defaultValue="0.0.0.0">
+          Interface address the TCP tunnel port range binds on.
+        </Property>
+      </ParamTable>
+      <Callout variant="danger" title="This range bypasses Traefik entirely">
+        Ports in <code>-tcp-ports</code> are bound directly by{" "}
+        <code>ngstoned</code> — real listeners, not routed through the{" "}
+        <code>:443</code> reverse proxy or any front proxy sitting in front
+        of it. The range needs its own firewall opening, the same way{" "}
+        <code>443/tcp</code> does above:
+      </Callout>
+      <CodeBlock
+        language="bash"
+        code={`$ sudo ufw allow 10000:10999/tcp`}
       />
 
       <Anchor id="behind-a-proxy">Behind an existing reverse proxy</Anchor>

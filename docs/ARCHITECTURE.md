@@ -2,7 +2,7 @@
 
 **Status:** revised-post-review · **Owner:** single operator · **Repo:** `/Users/mac/projects/ngstone` (greenfield) · **Go:** 1.25
 
-A personal, self-hosted ngrok replacement. Two binaries — `ngstoned` (edge, Linux VPS) and `ngstone` (agent + CLI + local inspector, macOS dev machine) — one shared module. HTTP/HTTPS tunnels only in v1; the wire protocol is deliberately shaped so raw TCP can be added later without a protocol bump.
+A personal, self-hosted ngrok replacement. Two binaries — `ngstoned` (edge, Linux VPS) and `ngstone` (agent + CLI + local inspector, macOS dev machine) — one shared module. HTTP/HTTPS tunnels, plus raw TCP tunnels for non-HTTP services (SSH, Postgres, Redis, and similar) allocated from an operator-configured port range.
 
 Guiding principles, in priority order: **stdlib-first, boring over clever, one path per feature, everything flow-controlled, nothing unbounded in memory.**
 
@@ -119,7 +119,7 @@ type AuthErr struct {
 
 // ---- tunnel lifecycle ----
 type Bind struct {
-    Kind      string `json:"kind"`                // "http" (v1). "tcp" reserved.
+    Kind      string `json:"kind"`                // "http" or "tcp".
     Subdomain string `json:"subdomain,omitempty"` // "" → server assigns random (e.g. "amber-fox-42")
     Takeover  bool   `json:"takeover,omitempty"`  // reclaim a binding; authorized by identity, not
                                                   // liveness — see conflict rules below
@@ -162,15 +162,15 @@ type Goodbye struct {
 
 // ---- data-stream preamble (first & only frame before raw bytes) ----
 type StreamOpen struct {
-    Kind       string `json:"kind"`        // "http" v1; "tcp" later — raw bytes follow either way
+    Kind       string `json:"kind"`        // "http" or "tcp" — raw bytes follow either way
     Host       string `json:"host"`        // which binding this request targets
     ReqID      string `json:"req_id"`      // edge-minted ULID; correlates edge logs ↔ inspector entries
-    ClientAddr string `json:"client_addr"` // public client ip:port — carried now because Kind:"tcp"
-                                           // will have no X-Forwarded-For to smuggle it in
+    ClientAddr string `json:"client_addr"` // public client ip:port — Kind:"tcp" has no
+                                           // X-Forwarded-For to smuggle it in
 }
 ```
 
-**Raw-TCP future-proofing:** the corner we refuse to paint into is `Bind.Kind` and `StreamOpen.Kind`. A future `Bind{Kind:"tcp", …}` returns a port in `BindOK`, and `StreamOpen{Kind:"tcp"}` is followed by raw bytes instead of HTTP/1.1 bytes; `ClientAddr` already carries what XFF cannot. No framing, versioning, or handshake changes required. Be honest about what this does **not** buy: the "raw HTTP/1.1 bytes inside the stream" choice permanently forecloses native gRPC (trailers + full-duplex h2) and h2c backends for `Kind:"http"` — that is a real v1 protocol limitation, catalogued in §9's out-of-scope list, not a two-field tweak away.
+**Raw TCP tunnels.** `Bind{Kind:"tcp", …}` returns an allocated port in `BindOK`, and `StreamOpen{Kind:"tcp"}` is followed by raw bytes instead of HTTP/1.1 bytes; `ClientAddr` carries what XFF cannot. Allocation is per-tunnel from the operator-configured `-tcp-ports` range (`internal/edge/tcpmanager.go`): a specific port can be requested, or the edge picks the first free one in range. The edge binds each allocated port directly on `-tcp-bind` — a real listener, not routed through the `:443` reverse proxy or any front proxy in front of it — so the range needs its own firewall opening. There is no TLS termination for `Kind:"tcp"`: it's raw pass-through end to end, so the tunneled protocol is only as encrypted as it makes itself. Each TCP connection reuses the same per-session stream-acquisition cap (`tryAcquireStream`) and `inflight` drain accounting that HTTP streams use (§5), so a TCP tunnel counts against the same per-session concurrency budget as HTTP requests. The feature is off entirely unless `-tcp-ports` is set. Be honest about what this does **not** buy: the "raw HTTP/1.1 bytes inside the stream" choice permanently forecloses native gRPC (trailers + full-duplex h2) and h2c backends for `Kind:"http"` — that is a real v1 protocol limitation, catalogued in §9's out-of-scope list, not a two-field tweak away.
 
 ### Protocol rules
 

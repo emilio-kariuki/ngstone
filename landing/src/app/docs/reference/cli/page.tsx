@@ -16,6 +16,7 @@ const TOC: TocItem[] = [
   { id: "overview", title: "Overview" },
   { id: "ngstone-auth", title: "ngstone auth" },
   { id: "ngstone-port", title: "ngstone port" },
+  { id: "ngstone-tcp", title: "ngstone tcp" },
   { id: "ngstone-config", title: "ngstone config" },
   { id: "ngstone-logout", title: "ngstone logout" },
   { id: "ngstone-version", title: "ngstone version" },
@@ -32,8 +33,9 @@ export default function CliPage() {
       <p>
         The <code>ngstone</code> command is built on the stdlib{" "}
         <code>flag</code> package — no cobra, no subcommand framework. There
-        are five verbs: <code>auth</code>, <code>port</code>,{" "}
-        <code>config</code>, <code>logout</code>, and <code>version</code>.
+        are six verbs: <code>auth</code>, <code>port</code>,{" "}
+        <code>tcp</code>, <code>config</code>, <code>logout</code>, and{" "}
+        <code>version</code>.
       </p>
 
       <Anchor id="overview">Overview</Anchor>
@@ -42,11 +44,12 @@ export default function CliPage() {
         code={`ngstone <command> [arguments]
 
 Commands:
-  auth <token>       verify and save an auth token
-  port <port|url>    expose a local port or URL through the tunnel
-  config             view or set local configuration
-  logout             remove the saved auth token
-  version            print the ngstone version`}
+  auth <token>            verify and save an auth token
+  port <port|url>         expose a local port or URL through the tunnel
+  tcp <port|host:port>    expose a raw TCP service through the tunnel
+  config                  view or set local configuration
+  logout                  remove the saved auth token
+  version                 print the ngstone version`}
       />
 
       <Anchor id="ngstone-auth">ngstone auth</Anchor>
@@ -137,6 +140,57 @@ $ ngstone port 3000 --subdomain demo`}
           <em>is</em> a terminal and you still want plain logs.
         </Property>
       </ParamTable>
+
+      <Anchor id="ngstone-tcp">ngstone tcp</Anchor>
+      <p>
+        Starts a raw TCP tunnel to a local port or <code>host:port</code>{" "}
+        target — for SSH, Postgres, Redis, or anything else that isn&apos;t
+        HTTP. See <a href="/docs/guides/tcp-tunnels">TCP tunnels</a> for the
+        full picture, including the encryption caveat.
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone tcp 22
+tcp://amber-fox-42.example.com:14201 -> 127.0.0.1:22
+
+$ ngstone tcp db.local:5432 --remote-port 15432`}
+      />
+      <p>
+        The positional argument is either a bare port number (forwarded to{" "}
+        <code>127.0.0.1:&lt;port&gt;</code>) or a <code>host:port</code>{" "}
+        target used as-is.
+      </p>
+      <ParamTable>
+        <Property name="--remote-port, -r" type="int" defaultValue="0">
+          Requested remote port. <code>0</code> means server-assigned.
+        </Property>
+        <Property name="--server" type="string">
+          Edge control-plane address override. Defaults to the config file
+          or <code>ngstone.site:4443</code>.
+        </Property>
+        <Property name="--token" type="string">
+          Auth token override. Defaults to <code>NGSTONE_TOKEN</code> or the
+          token saved by <code>ngstone auth</code>.
+        </Property>
+        <Property name="--insecure" type="bool" defaultValue="false">
+          Dial the control plane in plaintext (dev/test only, no
+          certificates involved).
+        </Property>
+        <Property name="--server-name" type="string">
+          TLS <code>ServerName</code>/SNI to verify against. Ignored with{" "}
+          <code>--insecure</code>.
+        </Property>
+        <Property name="--pin" type="string">
+          Optional SPKI pin, checked in addition to normal chain
+          validation. Off by default.
+        </Property>
+      </ParamTable>
+      <Callout variant="note">
+        TCP tunnels are opt-in per edge — the operator must set{" "}
+        <code>-tcp-ports</code>. See{" "}
+        <a href="/docs/guides/edge-vps#tcp-tunnels">Running the edge on a
+        VPS</a> for how to enable it.
+      </Callout>
 
       <Anchor id="ngstone-config">ngstone config</Anchor>
       <p>Read or change the local config file without hand-editing JSON.</p>
