@@ -17,6 +17,7 @@ var subdomainDenylist = map[string]bool{
 	"ns1":      true,
 	"ns2":      true,
 	"admin":    true,
+	"dev":      true,
 	"api-edge": true,
 }
 

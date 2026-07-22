@@ -267,7 +267,7 @@ func TestValidSubdomain(t *testing.T) {
 			t.Fatalf("validSubdomain(%q) = false, want true", v)
 		}
 	}
-	invalid := []string{"", "-foo", "foo-", "Foo", "foo_bar", "foo.bar", "www", "mail", "ns1", "ns2", "admin", "api-edge"}
+	invalid := []string{"", "-foo", "foo-", "Foo", "foo_bar", "foo.bar", "www", "mail", "ns1", "ns2", "admin", "dev", "api-edge"}
 	for _, v := range invalid {
 		if validSubdomain(v) {
 			t.Fatalf("validSubdomain(%q) = true, want false", v)
