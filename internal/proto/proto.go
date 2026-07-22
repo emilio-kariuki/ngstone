@@ -34,6 +34,7 @@ const (
 	CodeMalformed        = "malformed"
 	CodeNotBound         = "not_bound"
 	CodeInternal         = "internal"
+	CodePortUnavailable  = "port_unavailable"
 )
 
 const (
@@ -66,14 +67,16 @@ type AuthErr struct {
 }
 
 type Bind struct {
-	Kind      string `json:"kind"`
-	Subdomain string `json:"subdomain,omitempty"`
-	Takeover  bool   `json:"takeover,omitempty"`
+	Kind       string `json:"kind"`
+	Subdomain  string `json:"subdomain,omitempty"`
+	RemotePort int    `json:"remote_port,omitempty"`
+	Takeover   bool   `json:"takeover,omitempty"`
 }
 
 type BindOK struct {
 	Hostname string `json:"hostname"`
 	URL      string `json:"url"`
+	Port     int    `json:"port,omitempty"`
 }
 
 type BindErr struct {

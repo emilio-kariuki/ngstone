@@ -175,10 +175,14 @@ func TestGoldenWireFormat(t *testing.T) {
 			`{"reason":"shutdown","drain_ms":15000}`},
 		{"stream_open", StreamOpen{Kind: KindHTTP, Host: "foo.example.com", ReqID: "01ABC", ClientAddr: "1.2.3.4:5678"},
 			`{"kind":"http","host":"foo.example.com","req_id":"01ABC","client_addr":"1.2.3.4:5678"}`},
+		{"bind_remote_port", Bind{Kind: KindTCP, RemotePort: 5432},
+			`{"kind":"tcp","remote_port":5432}`},
+		{"bind_ok_port", BindOK{Hostname: "foo.example.com", URL: "https://foo.example.com", Port: 5432},
+			`{"hostname":"foo.example.com","url":"https://foo.example.com","port":5432}`},
 	}
 
-	if len(cases) != 14 {
-		t.Fatalf("got %d golden cases, want 14", len(cases))
+	if len(cases) != 16 {
+		t.Fatalf("got %d golden cases, want 16", len(cases))
 	}
 
 	for _, tc := range cases {
@@ -671,5 +675,67 @@ func FuzzReadMsg(f *testing.F) {
 			}
 		}()
 		_, _ = ReadMsg(bytes.NewReader(data))
+	})
+}
+
+func TestBindRemotePortOmitEmpty(t *testing.T) {
+	t.Run("zero_value_omitted", func(t *testing.T) {
+		got, err := json.Marshal(Bind{Kind: KindHTTP, Subdomain: "foo"})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if strings.Contains(string(got), "remote_port") {
+			t.Fatalf("got %s want no remote_port field", got)
+		}
+	})
+
+	t.Run("nonzero_round_trip", func(t *testing.T) {
+		in := Bind{Kind: KindTCP, RemotePort: 5432}
+		got, err := json.Marshal(in)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if !strings.Contains(string(got), `"remote_port":5432`) {
+			t.Fatalf("got %s want substring %s", got, `"remote_port":5432`)
+		}
+
+		var out Bind
+		if err := json.Unmarshal(got, &out); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if out != in {
+			t.Fatalf("got %+v want %+v", out, in)
+		}
+	})
+}
+
+func TestBindOKPortOmitEmpty(t *testing.T) {
+	t.Run("zero_value_omitted", func(t *testing.T) {
+		got, err := json.Marshal(BindOK{Hostname: "foo.example.com", URL: "https://foo.example.com"})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if strings.Contains(string(got), `"port":`) {
+			t.Fatalf("got %s want no port field", got)
+		}
+	})
+
+	t.Run("nonzero_round_trip", func(t *testing.T) {
+		in := BindOK{Hostname: "foo.example.com", URL: "https://foo.example.com", Port: 5432}
+		got, err := json.Marshal(in)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if !strings.Contains(string(got), `"port":5432`) {
+			t.Fatalf("got %s want substring %s", got, `"port":5432`)
+		}
+
+		var out BindOK
+		if err := json.Unmarshal(got, &out); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if out != in {
+			t.Fatalf("got %+v want %+v", out, in)
+		}
 	})
 }
