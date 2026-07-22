@@ -29,6 +29,9 @@ type Config struct {
 	HTTPAddr string
 	OpsAddr  string
 
+	TCPPortRange string
+	TCPBindAddr  string
+
 	CertStoragePath    string
 	ACMEEmail          string
 	ACMECA             string
@@ -50,6 +53,7 @@ type Server struct {
 	unauthSem    *globalSemaphore
 
 	tlsMgr *TLSManager
+	tcpMgr *tcpManager
 }
 
 func New(cfg Config) (*Server, error) {
@@ -65,6 +69,19 @@ func New(cfg Config) (*Server, error) {
 	registry := NewRegistry()
 	registry.SetLimits(limits)
 
+	var tcpMgr *tcpManager
+	if cfg.TCPPortRange != "" {
+		lo, hi, err := parseTCPPortRange(cfg.TCPPortRange)
+		if err != nil {
+			return nil, err
+		}
+		bindAddr := cfg.TCPBindAddr
+		if bindAddr == "" {
+			bindAddr = "0.0.0.0"
+		}
+		tcpMgr = newTCPManager(lo, hi, bindAddr, newPerIPLimiter(limits.PerIPRate, limits.PerIPBurst, limits.PerIPLRU))
+	}
+
 	return &Server{
 		cfg:          cfg,
 		registry:     registry,
@@ -74,6 +91,7 @@ func New(cfg Config) (*Server, error) {
 		globalSem:    newGlobalSemaphore(limits.GlobalInFlight),
 		handshakeSem: newGlobalSemaphore(int64(limits.HandshakeConcurrency)),
 		unauthSem:    newGlobalSemaphore(int64(limits.UnauthSessions)),
+		tcpMgr:       tcpMgr,
 	}, nil
 }
 
