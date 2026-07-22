@@ -23,6 +23,8 @@ func main() {
 	tokenSHA256Hex := flag.String("token-sha256", "", "hex-encoded SHA-256 of the shared auth token (defaults to $NGSTONE_TOKEN_SHA256; avoid passing this flag on a shared host, since ps auxww exposes flags but not the environment)")
 	domain := flag.String("domain", "ngstone.site", "base domain used to build tunnel hostnames and the two managed certificates")
 	publicScheme := flag.String("public-scheme", "https", "scheme advertised in BindOK.URL (http or https)")
+	tcpPortRange := flag.String("tcp-ports", "", "port range for raw TCP tunnels, e.g. \"10000-10999\"; empty disables TCP tunnels. These ports are exposed directly to the internet (not behind a reverse proxy) and must be opened in the firewall.")
+	tcpBindAddr := flag.String("tcp-bind", "0.0.0.0", "interface address the TCP tunnel port range binds on")
 
 	proxyProtocol := flag.Bool("proxy-protocol", false, "require a PROXY protocol v1/v2 header on every connection to the public listener, and use the address it carries as the client address; enable this only when the public port is reachable solely from a trusted TCP proxy (see deploy/README.md), and enable it on both sides at once")
 
@@ -101,6 +103,8 @@ func main() {
 		Domain:       *domain,
 		TokenSHA256:  sum,
 		PublicScheme: *publicScheme,
+		TCPPortRange: *tcpPortRange,
+		TCPBindAddr:  *tcpBindAddr,
 
 		Insecure:           *insecure,
 		ProxyProtocol:      *proxyProtocol,

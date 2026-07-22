@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"os/signal"
@@ -29,6 +30,7 @@ var errNoToken = errors.New("no token configured; run 'ngstone auth <token>' fir
 var verbs = map[string]func([]string) int{
 	"auth":    cmdAuth,
 	"port":    cmdPort,
+	"tcp":     cmdTCP,
 	"config":  cmdConfig,
 	"logout":  cmdLogout,
 	"version": cmdVersion,
@@ -48,16 +50,19 @@ Usage:
   ngstone <command> [arguments]
 
 Commands:
-  auth <token>       verify and save an auth token
-  port <port|url>    expose a local port or URL through the tunnel
-  config             view or set local configuration
-  logout             remove the saved auth token
-  version            print the ngstone version
+  auth <token>            verify and save an auth token
+  port <port|url>         expose a local port or URL through the tunnel
+  tcp <port|host:port>    expose a raw TCP service through the tunnel
+  config                  view or set local configuration
+  logout                  remove the saved auth token
+  version                 print the ngstone version
 
 Examples:
   ngstone auth <token>
   ngstone port 3000
   ngstone port 3000 --subdomain demo
+  ngstone tcp 5432
+  ngstone tcp db.local:5432 --remote-port 15432
 `
 
 func printUsage(w *os.File) {
@@ -334,6 +339,143 @@ func runPortPlain(ctx context.Context, acfg agent.Config) int {
 	a := agent.New(acfg)
 
 	logger.Info("ngstone: starting", "control", acfg.ControlAddr, "target", acfg.TargetURL, "insecure", acfg.Insecure)
+	if err := a.Run(ctx); err != nil {
+		logger.Error("ngstone: exited with error", "err", err)
+		return 1
+	}
+	return 0
+}
+
+func validatePort(s string) error {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return fmt.Errorf("must be a port number")
+	}
+	if n < 1 || n > 65535 {
+		return fmt.Errorf("must be between 1 and 65535")
+	}
+	return nil
+}
+
+func resolveTCPTarget(arg string) (string, error) {
+	if strings.Contains(arg, ":") {
+		host, port, err := net.SplitHostPort(arg)
+		if err != nil {
+			return "", fmt.Errorf("invalid target %q: %v", arg, err)
+		}
+		if host == "" {
+			return "", fmt.Errorf("invalid target %q: missing host", arg)
+		}
+		if err := validatePort(port); err != nil {
+			return "", fmt.Errorf("invalid target %q: port %v", arg, err)
+		}
+		return net.JoinHostPort(host, port), nil
+	}
+	if err := validatePort(arg); err != nil {
+		return "", fmt.Errorf("invalid port %q: %v", arg, err)
+	}
+	return net.JoinHostPort("127.0.0.1", arg), nil
+}
+
+type tcpFlags struct {
+	remotePort int
+	server     string
+	token      string
+	instanceID string
+	insecure   bool
+	serverName string
+	pin        string
+}
+
+func newTCPFlagSet() (*flag.FlagSet, *tcpFlags) {
+	fs := flag.NewFlagSet("tcp", flag.ContinueOnError)
+	tf := &tcpFlags{}
+	fs.IntVar(&tf.remotePort, "remote-port", 0, "requested remote port (0 = server-assigned)")
+	fs.IntVar(&tf.remotePort, "r", 0, "shorthand for -remote-port")
+	fs.StringVar(&tf.server, "server", "", "edge control plane address override (defaults to config or "+defaultServer+")")
+	fs.StringVar(&tf.token, "token", "", "auth token override (defaults to NGSTONE_TOKEN or the saved config)")
+	fs.StringVar(&tf.instanceID, "instance-id", "", "internal/undocumented: force a specific instance id (testing only)")
+	fs.BoolVar(&tf.insecure, "insecure", false, "dial the control plane in plaintext (dev/test only, no certificates involved)")
+	fs.StringVar(&tf.serverName, "server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
+	fs.StringVar(&tf.pin, "pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation")
+	return fs, tf
+}
+
+func cmdTCP(args []string) int {
+	fs, tf := newTCPFlagSet()
+	positionals, err := parsePermissive(fs, args)
+	if err != nil {
+		return 2
+	}
+	if len(positionals) != 1 {
+		fmt.Fprintln(os.Stderr, "usage: ngstone tcp <port|host:port> [--remote-port N]")
+		return 2
+	}
+
+	target, err := resolveTCPTarget(positionals[0])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
+		return 2
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ngstone: loading config: %v\n", err)
+		return 1
+	}
+
+	token, err := resolveToken(tf.token, os.Getenv("NGSTONE_TOKEN"), cfg)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ngstone: "+err.Error())
+		return 1
+	}
+	server := resolveServer(tf.server, cfg)
+
+	acfg := agent.Config{
+		ControlAddr: server,
+		Token:       token,
+		Kind:        "tcp",
+		TargetURL:   target,
+		RemotePort:  tf.remotePort,
+		InstanceID:  tf.instanceID,
+
+		Insecure:   tf.insecure,
+		ServerName: tf.serverName,
+		Pin:        tf.pin,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	return runTCPPlain(ctx, acfg)
+}
+
+func runTCPPlain(ctx context.Context, acfg agent.Config) int {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	slog.SetDefault(logger)
+
+	events := make(chan agent.StatusEvent, 16)
+	acfg.Events = events
+
+	a := agent.New(acfg)
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, ok := <-events:
+				if !ok {
+					return
+				}
+				if ev.State == agent.StateOnline && ev.URL != "" {
+					fmt.Printf("%s -> %s\n", ev.URL, acfg.TargetURL)
+				}
+			}
+		}
+	}()
+
+	logger.Info("ngstone: starting", "control", acfg.ControlAddr, "target", acfg.TargetURL, "kind", "tcp", "insecure", acfg.Insecure)
 	if err := a.Run(ctx); err != nil {
 		logger.Error("ngstone: exited with error", "err", err)
 		return 1
