@@ -51,6 +51,9 @@ type Config struct {
 	Subdomain   string
 	TargetURL   string
 
+	Kind       string
+	RemotePort int
+
 	InstanceID string
 
 	Insecure   bool
@@ -232,7 +235,7 @@ func (a *Agent) runOnce(ctx context.Context, bo *backoff) error {
 	if err != nil {
 		return err
 	}
-	a.setBound(bindOK.Hostname, bindOK.URL)
+	a.setBound(bindOK.Hostname, a.advertisedURL(bindOK))
 	bo.reset()
 
 	ln, err := tunnel.NewListener(sess)
@@ -241,14 +244,9 @@ func (a *Agent) runOnce(ctx context.Context, bo *backoff) error {
 	}
 	defer ln.Close()
 
-	target := a.Target()
-	if target == nil {
-		return fmt.Errorf("agent: parse target: %w", a.targetErr)
-	}
-
-	srv := &http.Server{
-		Handler:     a.buildProxy(target),
-		ConnContext: streamConnContext,
+	srv, err := a.newServer()
+	if err != nil {
+		return err
 	}
 
 	serveErrCh := make(chan error, 1)
@@ -282,6 +280,40 @@ func (a *Agent) runOnce(ctx context.Context, bo *backoff) error {
 		srv.Close()
 		return errors.New("agent: session closed")
 	}
+}
+
+type tunnelServer interface {
+	Serve(ln net.Listener) error
+	Shutdown(ctx context.Context) error
+	Close() error
+}
+
+func (a *Agent) bindKind() string {
+	if a.cfg.Kind == "" {
+		return proto.KindHTTP
+	}
+	return a.cfg.Kind
+}
+
+func (a *Agent) advertisedURL(b proto.BindOK) string {
+	if a.cfg.Kind == proto.KindTCP {
+		return fmt.Sprintf("tcp://%s:%d", b.Hostname, b.Port)
+	}
+	return b.URL
+}
+
+func (a *Agent) newServer() (tunnelServer, error) {
+	if a.cfg.Kind == proto.KindTCP {
+		return newTCPServer(a.cfg.TargetURL), nil
+	}
+	target := a.Target()
+	if target == nil {
+		return nil, fmt.Errorf("agent: parse target: %w", a.targetErr)
+	}
+	return &http.Server{
+		Handler:     a.buildProxy(target),
+		ConnContext: streamConnContext,
+	}, nil
 }
 
 type preambleConn interface {
@@ -337,9 +369,10 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 
 	bindID := idgen.Next()
 	if err := ctrl.Write(proto.TypeBind, bindID, proto.Bind{
-		Kind:      proto.KindHTTP,
-		Subdomain: a.cfg.Subdomain,
-		Takeover:  true,
+		Kind:       a.bindKind(),
+		Subdomain:  a.cfg.Subdomain,
+		RemotePort: a.cfg.RemotePort,
+		Takeover:   true,
 	}); err != nil {
 		return proto.BindOK{}, err
 	}
