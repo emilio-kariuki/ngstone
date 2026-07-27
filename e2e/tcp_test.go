@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -32,13 +33,14 @@ func startTCPEcho(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-func startTCPReplyThenClose(t *testing.T, reply string) string {
+func startTCPReplyThenClose(t *testing.T, reply string) (addr string, targetTermErr chan error) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("start reply-then-close listener: %v", err)
 	}
 	t.Cleanup(func() { ln.Close() })
+	targetTermErr = make(chan error, 1)
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -52,11 +54,17 @@ func startTCPReplyThenClose(t *testing.T, reply string) string {
 				if _, err := c.Read(buf); err != nil {
 					return
 				}
+				for {
+					if _, err := c.Read(buf); err != nil {
+						targetTermErr <- err
+						break
+					}
+				}
 				io.WriteString(c, reply)
 			}(c)
 		}
 	}()
-	return ln.Addr().String()
+	return ln.Addr().String(), targetTermErr
 }
 
 func dialTunnel(t *testing.T, port int) net.Conn {
@@ -198,7 +206,7 @@ func TestTCPTunnelHalfClose(t *testing.T) {
 	edgeBin, agentBin := buildBinaries(t)
 
 	const reply = "one-reply-then-close\n"
-	targetAddr := startTCPReplyThenClose(t, reply)
+	targetAddr, targetTermErr := startTCPReplyThenClose(t, reply)
 
 	token := "e2e-tcp-token"
 	domain := "tun.example.com"
@@ -213,10 +221,26 @@ func TestTCPTunnelHalfClose(t *testing.T) {
 	waitForPort(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
 
 	conn := dialTunnel(t, port)
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		t.Fatalf("tunnel client conn is not *net.TCPConn; cannot exercise a genuine half-close")
+	}
 
 	conn.SetDeadline(time.Now().Add(5 * time.Second))
 	if _, err := io.WriteString(conn, "trigger\n"); err != nil {
 		t.Fatalf("write trigger: %v", err)
+	}
+	if err := tcpConn.CloseWrite(); err != nil {
+		t.Fatalf("client CloseWrite: %v", err)
+	}
+
+	select {
+	case err := <-targetTermErr:
+		if !errors.Is(err, io.EOF) {
+			t.Fatalf("local target's terminating read error = %v, want io.EOF; the tunnel client's half-close did not propagate cleanly through agent+edge", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for the local target to observe EOF after the tunnel client's half-close")
 	}
 
 	got := make([]byte, len(reply))

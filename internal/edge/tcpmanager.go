@@ -3,8 +3,10 @@ package edge
 import (
 	"context"
 	"errors"
+	"expvar"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -14,13 +16,33 @@ import (
 	"ngstone/internal/proto"
 )
 
+const (
+	maxGlobalTCPConns  = 256
+	maxBindsPerSession = 8
+)
+
 var errPortUnavailable = errors.New("edge: port_unavailable")
+var errTooManyBinds = errors.New("edge: too_many_binds")
+
+var (
+	metricTCPRejectedGlobalCap   = expvar.NewInt("ngstoned_tcp_rejected_global_cap_total")
+	metricTCPRejectedBindCap     = expvar.NewInt("ngstoned_tcp_rejected_bind_cap_total")
+	metricTCPRejectedRateLimited = expvar.NewInt("ngstoned_tcp_rejected_rate_limited_total")
+)
+
+type tcpConn struct {
+	client net.Conn
+	stream net.Conn
+}
 
 type tcpTunnel struct {
 	port     int
 	hostname string
 	ln       net.Listener
 	session  *AgentSession
+
+	acceptDone chan struct{}
+	closed     chan struct{}
 }
 
 type tcpManager struct {
@@ -28,10 +50,15 @@ type tcpManager struct {
 	bindAddr string
 	limiter  *perIPLimiter
 
+	forceCloseGrace time.Duration
+	globalSem       *globalSemaphore
+
 	mu        sync.Mutex
 	allocated map[int]struct{}
 	byPort    map[int]*tcpTunnel
 	bySession map[*AgentSession]map[int]struct{}
+	conns     map[*AgentSession]map[*tcpConn]struct{}
+	releasing map[*AgentSession]struct{}
 }
 
 func parseTCPPortRange(s string) (int, int, error) {
@@ -55,14 +82,38 @@ func parseTCPPortRange(s string) (int, int, error) {
 
 func newTCPManager(lo, hi int, bindAddr string, limiter *perIPLimiter) *tcpManager {
 	return &tcpManager{
-		lo:        lo,
-		hi:        hi,
-		bindAddr:  bindAddr,
-		limiter:   limiter,
-		allocated: make(map[int]struct{}),
-		byPort:    make(map[int]*tcpTunnel),
-		bySession: make(map[*AgentSession]map[int]struct{}),
+		lo:              lo,
+		hi:              hi,
+		bindAddr:        bindAddr,
+		limiter:         limiter,
+		forceCloseGrace: 2 * time.Second,
+		globalSem:       newGlobalSemaphore(maxGlobalTCPConns),
+		allocated:       make(map[int]struct{}),
+		byPort:          make(map[int]*tcpTunnel),
+		bySession:       make(map[*AgentSession]map[int]struct{}),
+		conns:           make(map[*AgentSession]map[*tcpConn]struct{}),
+		releasing:       make(map[*AgentSession]struct{}),
 	}
+}
+
+func (tm *tcpManager) register(as *AgentSession, tc *tcpConn) {
+	tm.mu.Lock()
+	if tm.conns[as] == nil {
+		tm.conns[as] = make(map[*tcpConn]struct{})
+	}
+	tm.conns[as][tc] = struct{}{}
+	tm.mu.Unlock()
+}
+
+func (tm *tcpManager) deregister(as *AgentSession, tc *tcpConn) {
+	tm.mu.Lock()
+	if set, ok := tm.conns[as]; ok {
+		delete(set, tc)
+		if len(set) == 0 {
+			delete(tm.conns, as)
+		}
+	}
+	tm.mu.Unlock()
 }
 
 func (tm *tcpManager) reserveLocked(requested int) (int, error) {
@@ -85,58 +136,170 @@ func (tm *tcpManager) reserveLocked(requested int) (int, error) {
 	return 0, errPortUnavailable
 }
 
-func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string) (int, error) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-
-	port, err := tm.reserveLocked(requested)
-	if err != nil {
-		return 0, err
+func (tm *tcpManager) registerTunnelLocked(as *AgentSession, port int, hostname string, ln net.Listener) *tcpTunnel {
+	tt := &tcpTunnel{
+		port:       port,
+		hostname:   hostname,
+		ln:         ln,
+		session:    as,
+		acceptDone: make(chan struct{}),
+		closed:     make(chan struct{}),
 	}
-
-	ln, err := net.Listen("tcp", net.JoinHostPort(tm.bindAddr, strconv.Itoa(port)))
-	if err != nil {
-		delete(tm.allocated, port)
-		return 0, err
-	}
-
-	tt := &tcpTunnel{port: port, hostname: hostname, ln: ln, session: as}
 	tm.byPort[port] = tt
 	if tm.bySession[as] == nil {
 		tm.bySession[as] = make(map[int]struct{})
 	}
 	tm.bySession[as][port] = struct{}{}
+	return tt
+}
+
+func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string) (int, error) {
+	tm.mu.Lock()
+	if len(tm.bySession[as]) >= maxBindsPerSession {
+		tm.mu.Unlock()
+		metricTCPRejectedBindCap.Add(1)
+		return 0, errTooManyBinds
+	}
+
+	if requested != 0 {
+		port, err := tm.reserveLocked(requested)
+		if err != nil {
+			tm.mu.Unlock()
+			return 0, err
+		}
+
+		ln, err := net.Listen("tcp", net.JoinHostPort(tm.bindAddr, strconv.Itoa(port)))
+		if err != nil {
+			delete(tm.allocated, port)
+			tm.mu.Unlock()
+			return 0, err
+		}
+
+		tt := tm.registerTunnelLocked(as, port, hostname, ln)
+		tm.mu.Unlock()
+
+		go tm.acceptLoop(tt)
+		return port, nil
+	}
+	tm.mu.Unlock()
+
+	var tried []int
+	var port int
+	var ln net.Listener
+	found := false
+
+	p := tm.lo
+	for {
+		tm.mu.Lock()
+		candidate := 0
+		for ; p <= tm.hi; p++ {
+			if _, taken := tm.allocated[p]; !taken {
+				candidate = p
+				break
+			}
+		}
+		if candidate == 0 {
+			tm.mu.Unlock()
+			break
+		}
+		tm.allocated[candidate] = struct{}{}
+		tm.mu.Unlock()
+
+		l, err := net.Listen("tcp", net.JoinHostPort(tm.bindAddr, strconv.Itoa(candidate)))
+		if err != nil {
+			tried = append(tried, candidate)
+			p = candidate + 1
+			continue
+		}
+		port, ln = candidate, l
+		found = true
+		break
+	}
+
+	tm.mu.Lock()
+	for _, p := range tried {
+		delete(tm.allocated, p)
+	}
+	if !found {
+		tm.mu.Unlock()
+		return 0, errPortUnavailable
+	}
+	if len(tm.bySession[as]) >= maxBindsPerSession {
+		delete(tm.allocated, port)
+		tm.mu.Unlock()
+		ln.Close()
+		metricTCPRejectedBindCap.Add(1)
+		return 0, errTooManyBinds
+	}
+	tt := tm.registerTunnelLocked(as, port, hostname, ln)
+	tm.mu.Unlock()
 
 	go tm.acceptLoop(tt)
 	return port, nil
 }
 
 func (tm *tcpManager) acceptLoop(tt *tcpTunnel) {
+	defer close(tt.acceptDone)
+	backoff := 5 * time.Millisecond
 	for {
 		c, err := tt.ln.Accept()
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return
 			}
-			time.Sleep(5 * time.Millisecond)
+			slog.Warn("tcp accept error", "port", tt.port, "err", err, "backoff", backoff)
+			t := time.NewTimer(backoff)
+			select {
+			case <-t.C:
+			case <-tt.closed:
+				t.Stop()
+				return
+			}
+			if backoff < time.Second {
+				backoff *= 2
+				if backoff > time.Second {
+					backoff = time.Second
+				}
+			}
 			continue
 		}
-		go tm.handleConn(tt.session, tt.hostname, c)
+		backoff = 5 * time.Millisecond
+
+		tc := &tcpConn{client: c}
+		tt.session.inflight.Add(1)
+		tm.register(tt.session, tc)
+		go tm.handleConn(tt.session, tt.hostname, tc)
 	}
 }
 
-func (tm *tcpManager) handleConn(as *AgentSession, hostname string, client net.Conn) {
+func (tm *tcpManager) handleConn(as *AgentSession, hostname string, tc *tcpConn) {
+	client := tc.client
+
 	if tm.limiter != nil && !tm.limiter.allow(remoteIP(client)) {
+		metricTCPRejectedRateLimited.Add(1)
 		client.Close()
+		as.inflight.Done()
+		tm.deregister(as, tc)
+		return
+	}
+
+	if !tm.globalSem.tryAcquire() {
+		metricTCPRejectedGlobalCap.Add(1)
+		client.Close()
+		as.inflight.Done()
+		tm.deregister(as, tc)
 		return
 	}
 
 	if !as.tryAcquireStream() {
+		metricRejectedSessionCap.Add(1)
+		tm.globalSem.release()
 		client.Close()
+		as.inflight.Done()
+		tm.deregister(as, tc)
 		return
 	}
 
-	as.inflight.Add(1)
 	dialCtx, cancel := context.WithTimeout(context.Background(), dialBudget)
 	stream, err := as.Sess.OpenStream(dialCtx, proto.StreamOpen{
 		Kind:       proto.KindTCP,
@@ -146,9 +309,26 @@ func (tm *tcpManager) handleConn(as *AgentSession, hostname string, client net.C
 	})
 	cancel()
 	if err != nil {
+		tm.globalSem.release()
+		as.releaseStream()
+		as.inflight.Done()
+		client.Close()
+		tm.deregister(as, tc)
+		return
+	}
+
+	tm.mu.Lock()
+	tc.stream = stream
+	_, releasing := tm.releasing[as]
+	tm.mu.Unlock()
+	if releasing {
+		stream.SetDeadline(time.Now())
+		client.Close()
 		as.inflight.Done()
 		as.releaseStream()
-		client.Close()
+		tm.globalSem.release()
+		tm.deregister(as, tc)
+		stream.Close()
 		return
 	}
 
@@ -157,6 +337,8 @@ func (tm *tcpManager) handleConn(as *AgentSession, hostname string, client net.C
 		releaseOnce.Do(func() {
 			as.inflight.Done()
 			as.releaseStream()
+			tm.globalSem.release()
+			tm.deregister(as, tc)
 		})
 	}
 
@@ -164,21 +346,21 @@ func (tm *tcpManager) handleConn(as *AgentSession, hostname string, client net.C
 	wg.Add(2)
 
 	go func() {
-		defer wg.Done()
 		io.Copy(stream, client)
+		wg.Done()
 		closeWrite(stream)
 	}()
 
 	go func() {
-		defer wg.Done()
 		io.Copy(client, stream)
+		wg.Done()
 		closeWrite(client)
 	}()
 
 	wg.Wait()
+	release()
 	stream.Close()
 	client.Close()
-	release()
 }
 
 func closeWrite(c net.Conn) {
@@ -191,19 +373,80 @@ func closeWrite(c net.Conn) {
 
 func (tm *tcpManager) releaseSession(as *AgentSession) {
 	tm.mu.Lock()
+	tm.releasing[as] = struct{}{}
 	ports := tm.bySession[as]
-	listeners := make([]net.Listener, 0, len(ports))
+	tunnels := make([]*tcpTunnel, 0, len(ports))
 	for p := range ports {
 		if tt, ok := tm.byPort[p]; ok {
-			listeners = append(listeners, tt.ln)
+			tunnels = append(tunnels, tt)
 		}
-		delete(tm.allocated, p)
 		delete(tm.byPort, p)
 	}
 	delete(tm.bySession, as)
+	for _, tt := range tunnels {
+		select {
+		case <-tt.closed:
+		default:
+			close(tt.closed)
+		}
+	}
 	tm.mu.Unlock()
 
-	for _, ln := range listeners {
-		ln.Close()
+	for _, tt := range tunnels {
+		tt.ln.Close()
+		<-tt.acceptDone
 	}
+
+	tm.mu.Lock()
+	for _, tt := range tunnels {
+		delete(tm.allocated, tt.port)
+	}
+	tm.mu.Unlock()
+
+	deadline := time.Now().Add(tm.forceCloseGrace)
+	for {
+		tm.mu.Lock()
+		remaining := len(tm.conns[as])
+		tm.mu.Unlock()
+		if remaining == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	tm.mu.Lock()
+	survivors := make([]tcpConn, 0, len(tm.conns[as]))
+	for tc := range tm.conns[as] {
+		survivors = append(survivors, *tc)
+	}
+	tm.mu.Unlock()
+
+	for i := range survivors {
+		if survivors[i].stream != nil {
+			survivors[i].stream.SetDeadline(time.Now())
+		}
+		if survivors[i].client != nil {
+			survivors[i].client.Close()
+		}
+	}
+
+	start := time.Now()
+	for {
+		tm.mu.Lock()
+		remaining := len(tm.conns[as])
+		tm.mu.Unlock()
+		if remaining == 0 {
+			break
+		}
+		if time.Now().After(start.Add(dialBudget + tm.forceCloseGrace)) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	tm.mu.Lock()
+	delete(tm.releasing, as)
+	tm.mu.Unlock()
 }
