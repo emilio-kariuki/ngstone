@@ -17,7 +17,7 @@ const TOC: TocItem[] = [
   { id: "requesting-a-specific-port", title: "Requesting a specific port" },
   { id: "encryption", title: "Encryption" },
   { id: "public-exposure", title: "Public exposure" },
-  { id: "a-known-limitation", title: "A known limitation" },
+  { id: "stream-lifetime", title: "Stream lifetime" },
   { id: "opt-in-per-edge", title: "Opt-in per edge" },
 ]
 
@@ -106,19 +106,22 @@ tcp://amber-fox-42.example.com:14202 -> 127.0.0.1:5432`}
         wouldn&apos;t otherwise expose.
       </p>
 
-      <Anchor id="a-known-limitation">A known limitation</Anchor>
+      <Anchor id="stream-lifetime">Stream lifetime</Anchor>
       <p>
-        If one direction of a tunnel&apos;s stream half-closes — one side
-        signals it&apos;s done sending — and the other direction then sits
-        idle for around five minutes with nothing else happening, the
-        underlying stream multiplexer forcibly closes the whole stream.
+        A tunnel&apos;s stream normally lives as long as the tunnel session
+        does. There is one internal cutoff: if a stream is half-closed in
+        one direction (one side has finished sending) and the other
+        direction then stays idle or keeps streaming continuously for more
+        than 30 minutes without the remote side finishing its own half, the
+        stream is reset. Interactive and request/response protocols — SSH
+        sessions, database connections — keep both directions open and
+        exchanging data, so they&apos;re unaffected.
       </p>
       <Callout variant="note">
-        This does not affect normal interactive or bidirectional use — an
-        open SSH session, a live database connection — because those stay
-        active in both directions. It only bites an unusual pattern: one
-        side closes its write direction and the connection then sits
-        one-way-idle for minutes.
+        This also isn&apos;t a promise of an infinitely idle connection: the
+        agent&apos;s local target, the client, or the OS-level TCP stack on
+        either end can still time out or drop an idle connection on their
+        own, independent of the 30-minute half-closed cutoff above.
       </Callout>
 
       <Anchor id="opt-in-per-edge">Opt-in per edge</Anchor>
