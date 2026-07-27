@@ -372,7 +372,7 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		Kind:       a.bindKind(),
 		Subdomain:  a.cfg.Subdomain,
 		RemotePort: a.cfg.RemotePort,
-		Takeover:   true,
+		Takeover:   a.bindKind() == proto.KindHTTP,
 	}); err != nil {
 		return proto.BindOK{}, err
 	}

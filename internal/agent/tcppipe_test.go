@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"runtime"
+	"syscall"
 	"testing"
 	"time"
 
@@ -280,6 +281,117 @@ func TestTCPServerDialFailureClosesStream(t *testing.T) {
 	cc.Close()
 }
 
+func TestTCPServerDialFailureDeregistersConn(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve dead port: %v", err)
+	}
+	deadAddr := ln.Addr().String()
+	ln.Close()
+
+	streamAddr, srv, _ := startTCPServer(t, deadAddr)
+	defer shutdownServer(srv)
+
+	cc := dialStream(t, streamAddr)
+	io.ReadAll(cc)
+	cc.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		srv.mu.Lock()
+		n := len(srv.conns)
+		srv.mu.Unlock()
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("s.conns retained %d pair(s) after dial failure, want 0 (map leak)", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestTCPServerHandleAbortsWhenClosedWhileDialInFlight(t *testing.T) {
+	blockCh := make(chan struct{})
+	defer close(blockCh)
+
+	targetAccepted := make(chan net.Conn, 1)
+	targetAddr, stopTarget := startTarget(t, func(c net.Conn) {
+		select {
+		case targetAccepted <- c:
+		default:
+			c.Close()
+		}
+		<-blockCh
+	})
+	defer stopTarget()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen stream: %v", err)
+	}
+	srv := newTCPServer(targetAddr)
+
+	const dialDelay = 300 * time.Millisecond
+	srv.dialer.Control = func(_, _ string, _ syscall.RawConn) error {
+		time.Sleep(dialDelay)
+		return nil
+	}
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
+
+	cc := dialStream(t, ln.Addr().String())
+	defer cc.Close()
+
+	registerDeadline := time.Now().Add(2 * time.Second)
+	for {
+		srv.mu.Lock()
+		n := len(srv.conns)
+		srv.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		if time.Now().After(registerDeadline) {
+			t.Fatalf("dialed conn never registered in srv.conns before the delayed dial completed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	shutdownErr := srv.Shutdown(shutdownCtx)
+	cancel()
+	if shutdownErr == nil {
+		t.Fatalf("Shutdown should have timed out while the dial was still in flight")
+	}
+
+	select {
+	case tc := <-targetAccepted:
+		defer tc.Close()
+	case <-time.After(dialDelay + 2*time.Second):
+		t.Fatalf("target never accepted the delayed dial")
+	}
+
+	drainDeadline := time.Now().Add(2 * time.Second)
+	for {
+		srv.mu.Lock()
+		n := len(srv.conns)
+		srv.mu.Unlock()
+		if n == 0 {
+			break
+		}
+		if time.Now().After(drainDeadline) {
+			t.Fatalf("srv.conns retained the pair after the dial finished post-shutdown; handle() should have aborted instead of copying on an already-closed server (fix D.1 regression: it blocks forever reading from the still-open target conn)")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	select {
+	case <-serveErr:
+	default:
+	}
+}
+
 func TestTCPServerShutdownDrainsActiveConnsNoLeak(t *testing.T) {
 	runtime.GC()
 	before := runtime.NumGoroutine()
@@ -305,6 +417,16 @@ func TestTCPServerShutdownDrainsActiveConnsNoLeak(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("round %d: target never accepted the tunneled conn", i)
 		}
+
+		cc.SetDeadline(time.Now().Add(2 * time.Second))
+		if _, err := cc.Write([]byte("ping")); err != nil {
+			t.Fatalf("round %d: write to tunneled conn: %v", i, err)
+		}
+		echo := make([]byte, 4)
+		if _, err := io.ReadFull(cc, echo); err != nil {
+			t.Fatalf("round %d: conn not actively pumping before shutdown: %v", i, err)
+		}
+		cc.SetDeadline(time.Time{})
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 		err := srv.Shutdown(shutdownCtx)
@@ -335,6 +457,98 @@ func TestTCPServerShutdownDrainsActiveConnsNoLeak(t *testing.T) {
 	after := runtime.NumGoroutine()
 
 	t.Logf("goroutines before=%d after=%d (ran %d serve/traffic/shutdown cycles)", before, after, rounds)
+	if after > before+5 {
+		t.Fatalf("goroutine leak: before=%d after=%d", before, after)
+	}
+}
+
+func TestTCPServerCloseForceClosesActiveConnWithHoldingTarget(t *testing.T) {
+	runtime.GC()
+	before := runtime.NumGoroutine()
+
+	holdCh := make(chan struct{})
+	defer close(holdCh)
+
+	received := make(chan struct{}, 1)
+	targetAddr, stopTarget := startTarget(t, func(c net.Conn) {
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(c, buf); err != nil {
+			return
+		}
+		received <- struct{}{}
+		<-holdCh
+		c.Close()
+	})
+	defer stopTarget()
+
+	streamAddr, srv, serveErr := startTCPServer(t, targetAddr)
+
+	cc := dialStream(t, streamAddr)
+	cc.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := cc.Write([]byte("ping")); err != nil {
+		t.Fatalf("write to tunneled conn: %v", err)
+	}
+
+	select {
+	case <-received:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("target never received the tunneled bytes")
+	}
+
+	drainDeadline := time.Now().Add(2 * time.Second)
+	for {
+		srv.mu.Lock()
+		n := len(srv.conns)
+		srv.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		if time.Now().After(drainDeadline) {
+			t.Fatalf("dialed conn never registered in srv.conns before Close")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- srv.Close() }()
+
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Close did not return promptly")
+	}
+
+	cc.Close()
+
+	connsDeadline := time.Now().Add(3 * time.Second)
+	for {
+		srv.mu.Lock()
+		n := len(srv.conns)
+		srv.mu.Unlock()
+		if n == 0 {
+			break
+		}
+		if time.Now().After(connsDeadline) {
+			t.Fatalf("s.conns retained %d pair(s) after Close, want 0 (handler leaked because local conn was never force-closed)", n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	select {
+	case <-serveErr:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Serve did not return after Close")
+	}
+
+	runtime.GC()
+	time.Sleep(100 * time.Millisecond)
+	runtime.GC()
+	after := runtime.NumGoroutine()
+
+	t.Logf("goroutines before=%d after=%d", before, after)
 	if after > before+5 {
 		t.Fatalf("goroutine leak: before=%d after=%d", before, after)
 	}

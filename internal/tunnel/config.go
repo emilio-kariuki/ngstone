@@ -27,6 +27,7 @@ func (s *slogYamuxLogger) Println(v ...interface{}) {
 
 func newYamuxConfig() *yamux.Config {
 	cfg := yamux.DefaultConfig()
+	cfg.StreamCloseTimeout = 30 * time.Minute
 	cfg.AcceptBacklog = 512
 	cfg.EnableKeepAlive = true
 	cfg.KeepAliveInterval = 10 * time.Second

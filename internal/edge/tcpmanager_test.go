@@ -3,12 +3,14 @@ package edge
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -137,6 +139,27 @@ func echoHandler(conn net.Conn, _ proto.StreamOpen) {
 	conn.Close()
 }
 
+func waitTCPConnCount(t *testing.T, mgr *tcpManager, as *AgentSession, want int, max time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(max)
+	for {
+		mgr.mu.Lock()
+		n := len(mgr.conns[as])
+		mgr.mu.Unlock()
+		if n == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("tm.conns[as] count = %d, want %d within %s", n, want, max)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func (fx *tcpFixture) newOwner() *AgentSession {
+	return &AgentSession{ID: randomHex(4), streamSem: newGlobalSemaphore(64)}
+}
+
 func dialPort(t *testing.T, port int) net.Conn {
 	t.Helper()
 	c, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), 2*time.Second)
@@ -192,12 +215,24 @@ func TestTCPExhaustionReturnsError(t *testing.T) {
 	defer fx.cleanup()
 
 	total := fx.mgr.hi - fx.mgr.lo + 1
+	var owners []*AgentSession
+	defer func() {
+		for _, o := range owners {
+			fx.mgr.releaseSession(o)
+		}
+	}()
+
 	for i := 0; i < total; i++ {
-		if _, err := fx.mgr.bind(fx.as, 0, "example.com"); err != nil {
+		owner := fx.newOwner()
+		owners = append(owners, owner)
+		if _, err := fx.mgr.bind(owner, 0, "example.com"); err != nil {
 			t.Fatalf("bind %d/%d failed early: %v", i+1, total, err)
 		}
 	}
-	if _, err := fx.mgr.bind(fx.as, 0, "example.com"); err != errPortUnavailable {
+
+	lastOwner := fx.newOwner()
+	owners = append(owners, lastOwner)
+	if _, err := fx.mgr.bind(lastOwner, 0, "example.com"); err != errPortUnavailable {
 		t.Fatalf("expected errPortUnavailable at exhaustion, got %v", err)
 	}
 }
@@ -233,22 +268,31 @@ func TestTCPConcurrentBindsNeverDoubleAllocate(t *testing.T) {
 	var mu sync.Mutex
 	seen := make(map[int]int)
 	var okCount int
+	var succeededOwners []*AgentSession
 
 	for i := 0; i < total*2; i++ {
 		wg.Add(1)
+		owner := fx.newOwner()
 		go func() {
 			defer wg.Done()
-			p, err := fx.mgr.bind(fx.as, 0, "example.com")
+			p, err := fx.mgr.bind(owner, 0, "example.com")
 			if err != nil {
 				return
 			}
 			mu.Lock()
 			seen[p]++
 			okCount++
+			succeededOwners = append(succeededOwners, owner)
 			mu.Unlock()
 		}()
 	}
 	wg.Wait()
+
+	defer func() {
+		for _, o := range succeededOwners {
+			fx.mgr.releaseSession(o)
+		}
+	}()
 
 	if okCount != total {
 		t.Fatalf("expected exactly %d successful binds, got %d", total, okCount)
@@ -658,30 +702,24 @@ func TestTCPInflightDrainsAfterRelease(t *testing.T) {
 func TestTCPNoGoroutineLeak(t *testing.T) {
 	fx := newTCPFixture(t, echoHandler)
 	defer fx.cleanup()
+	fx.mgr.forceCloseGrace = 200 * time.Millisecond
+
+	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
 
 	runtime.GC()
 	before := runtime.NumGoroutine()
 
-	for round := 0; round < 5; round++ {
-		port, err := fx.mgr.bind(fx.as, 0, "example.com")
-		if err != nil {
-			t.Fatalf("bind: %v", err)
-		}
-		for i := 0; i < 4; i++ {
-			c := dialPort(t, port)
-			c.SetDeadline(time.Now().Add(3 * time.Second))
-			payload := []byte("leakcheck")
-			if _, err := c.Write(payload); err != nil {
-				t.Fatalf("write: %v", err)
-			}
-			buf := make([]byte, len(payload))
-			if _, err := io.ReadFull(c, buf); err != nil {
-				t.Fatalf("read: %v", err)
-			}
-			c.Close()
-		}
-		fx.mgr.releaseSession(fx.as)
-	}
+	c := dialPort(t, port)
+	defer c.Close()
+
+	waitTCPConnCount(t, fx.mgr, fx.as, 1, 2*time.Second)
+
+	fx.mgr.releaseSession(fx.as)
+
+	waitTCPConnCount(t, fx.mgr, fx.as, 0, 2*time.Second)
 
 	deadline := time.Now().Add(3 * time.Second)
 	var after int
@@ -689,12 +727,138 @@ func TestTCPNoGoroutineLeak(t *testing.T) {
 		runtime.GC()
 		time.Sleep(50 * time.Millisecond)
 		after = runtime.NumGoroutine()
-		if after <= before+5 || time.Now().After(deadline) {
+		if after <= before+3 || time.Now().After(deadline) {
 			break
 		}
 	}
-	if after > before+5 {
+	if after > before+3 {
 		t.Fatalf("goroutine leak: before=%d after=%d", before, after)
+	}
+}
+
+func TestTCPForceCloseTearsDownIdleConnWithinGrace(t *testing.T) {
+	handlerDone := make(chan struct{})
+	handler := func(conn net.Conn, _ proto.StreamOpen) {
+		io.Copy(io.Discard, conn)
+		conn.Close()
+		close(handlerDone)
+	}
+	fx := newTCPFixture(t, handler)
+	defer fx.cleanup()
+	fx.mgr.forceCloseGrace = 200 * time.Millisecond
+
+	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+
+	c := dialPort(t, port)
+	defer c.Close()
+
+	waitTCPConnCount(t, fx.mgr, fx.as, 1, 2*time.Second)
+
+	done := make(chan struct{})
+	go func() {
+		fx.mgr.releaseSession(fx.as)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(fx.mgr.forceCloseGrace + 2*time.Second):
+		t.Fatalf("releaseSession did not return within forceCloseGrace + slack")
+	}
+
+	select {
+	case <-handlerDone:
+	case <-time.After(fx.mgr.forceCloseGrace + time.Second):
+		t.Fatalf("agent-side handler was never torn down after releaseSession's force-close")
+	}
+
+	waitTCPConnCount(t, fx.mgr, fx.as, 0, 2*time.Second)
+}
+
+func TestTCPGlobalCapRejectsBeyondLimit(t *testing.T) {
+	fx := newTCPFixture(t, echoHandler)
+	defer fx.cleanup()
+	const capN = 2
+	fx.mgr.globalSem = newGlobalSemaphore(capN)
+
+	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+
+	before := metricTCPRejectedGlobalCap.Value()
+
+	var conns []net.Conn
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	for i := 0; i < capN; i++ {
+		conns = append(conns, dialPort(t, port))
+	}
+	waitTCPConnCount(t, fx.mgr, fx.as, capN, 2*time.Second)
+
+	extra := dialPort(t, port)
+	defer extra.Close()
+	extra.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := extra.Read(make([]byte, 1)); err == nil {
+		t.Fatalf("expected the (N+1)th connection to be refused under the global cap")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if delta := metricTCPRejectedGlobalCap.Value() - before; delta == 1 {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("metricTCPRejectedGlobalCap delta = %d, want 1", delta)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestTCPEphemeralBindSkipsExternallyOccupiedFirstCandidate(t *testing.T) {
+	fx := newTCPFixture(t, echoHandler)
+	defer fx.cleanup()
+
+	blocker, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(fx.mgr.lo)))
+	if err != nil {
+		t.Fatalf("occupy tm.lo: %v", err)
+	}
+	defer blocker.Close()
+
+	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	if err != nil {
+		t.Fatalf("ephemeral bind should skip the externally-occupied first candidate: %v", err)
+	}
+	if port == fx.mgr.lo {
+		t.Fatalf("bind returned the externally-occupied first candidate port %d", port)
+	}
+	if port < fx.mgr.lo || port > fx.mgr.hi {
+		t.Fatalf("bound port %d out of range [%d,%d]", port, fx.mgr.lo, fx.mgr.hi)
+	}
+}
+
+func TestTCPPerSessionBindCapRejectsBeyondLimit(t *testing.T) {
+	fx := newTCPFixture(t, echoHandler)
+	defer fx.cleanup()
+
+	before := metricTCPRejectedBindCap.Value()
+
+	for i := 0; i < maxBindsPerSession; i++ {
+		if _, err := fx.mgr.bind(fx.as, 0, "example.com"); err != nil {
+			t.Fatalf("bind %d/%d: %v", i+1, maxBindsPerSession, err)
+		}
+	}
+
+	if _, err := fx.mgr.bind(fx.as, 0, "example.com"); !errors.Is(err, errTooManyBinds) {
+		t.Fatalf("bind past maxBindsPerSession: got %v, want errTooManyBinds", err)
+	}
+
+	if delta := metricTCPRejectedBindCap.Value() - before; delta != 1 {
+		t.Fatalf("metricTCPRejectedBindCap delta = %d, want 1", delta)
 	}
 }
 
@@ -786,6 +950,283 @@ func TestNewInvalidTCPRangeIsStartupError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected startup error for invalid TCP port range")
+	}
+}
+
+func TestTCPForceCloseDrainsBlackholePeerWithoutFIN(t *testing.T) {
+	blackholeReady := make(chan struct{}, 1)
+	release := make(chan struct{})
+	handler := func(conn net.Conn, _ proto.StreamOpen) {
+		blackholeReady <- struct{}{}
+		<-release
+	}
+	fx := newTCPFixture(t, handler)
+	defer close(release)
+	defer fx.cleanup()
+	fx.mgr.forceCloseGrace = 200 * time.Millisecond
+
+	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+
+	c := dialPort(t, port)
+	defer c.Close()
+
+	select {
+	case <-blackholeReady:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("agent-side blackhole handler never received the stream")
+	}
+
+	waitTCPConnCount(t, fx.mgr, fx.as, 1, 2*time.Second)
+
+	fx.mgr.releaseSession(fx.as)
+
+	waitTCPConnCount(t, fx.mgr, fx.as, 0, fx.mgr.forceCloseGrace+2*time.Second)
+}
+
+func TestTCPHandleConnAbortsWhenReleasingSetBeforeDial(t *testing.T) {
+	fx := newTCPFixture(t, echoHandler)
+	defer fx.cleanup()
+
+	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+
+	fx.mgr.mu.Lock()
+	fx.mgr.releasing[fx.as] = struct{}{}
+	fx.mgr.mu.Unlock()
+	defer func() {
+		fx.mgr.mu.Lock()
+		delete(fx.mgr.releasing, fx.as)
+		fx.mgr.mu.Unlock()
+	}()
+
+	c := dialPort(t, port)
+	defer c.Close()
+
+	waitTCPConnCount(t, fx.mgr, fx.as, 0, 1*time.Second)
+
+	c.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	if _, err := c.Read(make([]byte, 1)); err == nil {
+		t.Fatalf("expected client conn to be closed by the pre-dial releasing self-abort")
+	}
+}
+
+func TestTCPEphemeralBindSkipsSeveralOccupiedCandidates(t *testing.T) {
+	fx := newTCPFixture(t, echoHandler)
+	defer fx.cleanup()
+
+	const occupyCount = 4
+	var blockers []net.Listener
+	defer func() {
+		for _, b := range blockers {
+			b.Close()
+		}
+	}()
+	for i := 0; i < occupyCount; i++ {
+		p := fx.mgr.lo + i
+		b, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(p)))
+		if err != nil {
+			t.Fatalf("occupy port %d: %v", p, err)
+		}
+		blockers = append(blockers, b)
+	}
+
+	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	if err != nil {
+		t.Fatalf("ephemeral bind should skip past %d occupied candidates: %v", occupyCount, err)
+	}
+	if port < fx.mgr.lo+occupyCount || port > fx.mgr.hi {
+		t.Fatalf("bound port %d should be beyond the %d occupied candidates [%d,%d]", port, occupyCount, fx.mgr.lo, fx.mgr.lo+occupyCount-1)
+	}
+}
+
+func TestTCPEphemeralBindSucceedsPastTwentyOccupiedCandidates(t *testing.T) {
+	baseLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve base port: %v", err)
+	}
+	lo := baseLn.Addr().(*net.TCPAddr).Port
+	baseLn.Close()
+	hi := lo + 40
+
+	mgr := newTCPManager(lo, hi, "127.0.0.1", nil)
+	as := &AgentSession{ID: randomHex(4), streamSem: newGlobalSemaphore(64)}
+	defer mgr.releaseSession(as)
+
+	const occupyCount = 20
+	var blockers []net.Listener
+	defer func() {
+		for _, b := range blockers {
+			b.Close()
+		}
+	}()
+	for i := 0; i < occupyCount; i++ {
+		p := lo + i
+		b, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(p)))
+		if err != nil {
+			t.Fatalf("occupy port %d: %v", p, err)
+		}
+		blockers = append(blockers, b)
+	}
+
+	port, err := mgr.bind(as, 0, "example.com")
+	if err != nil {
+		t.Fatalf("ephemeral bind should succeed past %d occupied candidates: %v", occupyCount, err)
+	}
+	if port < lo+occupyCount || port > hi {
+		t.Fatalf("bound port %d should be beyond the %d occupied candidates [%d,%d]", port, occupyCount, lo, lo+occupyCount-1)
+	}
+}
+
+type delayWriteConn struct {
+	net.Conn
+	delay   int32
+	release chan struct{}
+}
+
+func newDelayWriteConn(c net.Conn) *delayWriteConn {
+	return &delayWriteConn{Conn: c, release: make(chan struct{})}
+}
+
+func (c *delayWriteConn) armDelay() {
+	atomic.StoreInt32(&c.delay, 1)
+}
+
+func (c *delayWriteConn) Write(p []byte) (int, error) {
+	if atomic.LoadInt32(&c.delay) != 0 {
+		<-c.release
+	}
+	return c.Conn.Write(p)
+}
+
+func TestTCPHandleConnSelfAbortsOnLateOpenStreamAfterReleaseSnapshot(t *testing.T) {
+	agentCarrier, serverCarrier := realConnPair(t)
+	wrapped := newDelayWriteConn(serverCarrier)
+
+	type res struct {
+		sess tunnel.Session
+		err  error
+	}
+	agentCh := make(chan res, 1)
+	serverCh := make(chan res, 1)
+	go func() {
+		s, err := tunnel.Client(agentCarrier)
+		agentCh <- res{s, err}
+	}()
+	go func() {
+		s, err := tunnel.Server(wrapped)
+		serverCh <- res{s, err}
+	}()
+
+	ar := <-agentCh
+	if ar.err != nil {
+		t.Fatalf("agent session: %v", ar.err)
+	}
+	sr := <-serverCh
+	if sr.err != nil {
+		t.Fatalf("server session: %v", sr.err)
+	}
+
+	as := &AgentSession{
+		ID:         randomHex(4),
+		InstanceID: "tcp-inst",
+		Sess:       sr.sess,
+		IDGen:      proto.NewEdgeIDGen(),
+		streamSem:  newGlobalSemaphore(64),
+	}
+
+	blackholeReady := make(chan struct{}, 1)
+	release := make(chan struct{})
+	agentDone := make(chan struct{})
+	go func() {
+		defer close(agentDone)
+		for {
+			conn, err := ar.sess.AcceptRaw(context.Background())
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				if _, err := readAgentPreamble(c); err != nil {
+					c.Close()
+					return
+				}
+				select {
+				case blackholeReady <- struct{}{}:
+				default:
+				}
+				<-release
+				c.Close()
+			}(conn)
+		}
+	}()
+
+	cleanup := func() {
+		close(release)
+		ar.sess.Close("test done")
+		sr.sess.Close("test done")
+		<-agentDone
+	}
+	defer cleanup()
+
+	baseLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve base port: %v", err)
+	}
+	lo := baseLn.Addr().(*net.TCPAddr).Port
+	baseLn.Close()
+
+	mgr := newTCPManager(lo, lo+9, "127.0.0.1", nil)
+	mgr.forceCloseGrace = 150 * time.Millisecond
+
+	port, err := mgr.bind(as, 0, "example.com")
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+
+	wrapped.armDelay()
+
+	c := dialPort(t, port)
+	defer c.Close()
+
+	waitTCPConnCount(t, mgr, as, 1, 2*time.Second)
+
+	releaseSessionDone := make(chan struct{})
+	go func() {
+		mgr.releaseSession(as)
+		close(releaseSessionDone)
+	}()
+
+	time.Sleep(mgr.forceCloseGrace + 200*time.Millisecond)
+
+	close(wrapped.release)
+
+	select {
+	case <-blackholeReady:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("agent-side blackhole handler never received the late-arriving stream")
+	}
+
+	waitTCPConnCount(t, mgr, as, 0, 2*time.Second)
+
+	select {
+	case <-releaseSessionDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("releaseSession did not return promptly after the late OpenStream self-aborted (fix A regression: stream leaked past the survivor snapshot)")
+	}
+
+	inflightDone := make(chan struct{})
+	go func() {
+		as.inflight.Wait()
+		close(inflightDone)
+	}()
+	select {
+	case <-inflightDone:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("inflight never drained after the late self-abort")
 	}
 }
 

@@ -496,6 +496,10 @@ func (s *Server) handleBindTCP(as *AgentSession, ctrl *proto.Conn, id uint64, bi
 	}
 	port, err := s.tcpMgr.bind(as, bind.RemotePort, s.cfg.Domain)
 	if err != nil {
+		if errors.Is(err, errTooManyBinds) {
+			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeTooManyBinds, Message: "too many tcp binds for this session"})
+			return
+		}
 		if errors.Is(err, errPortUnavailable) {
 			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodePortUnavailable, Message: "requested port unavailable"})
 			return

@@ -35,6 +35,7 @@ const (
 	CodeNotBound         = "not_bound"
 	CodeInternal         = "internal"
 	CodePortUnavailable  = "port_unavailable"
+	CodeTooManyBinds     = "too_many_binds"
 )
 
 const (
