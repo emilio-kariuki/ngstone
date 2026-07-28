@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -24,7 +25,8 @@ type Config struct {
 
 	Insecure bool
 
-	ProxyProtocol bool
+	ProxyProtocol        bool
+	ProxyProtocolTrusted []string
 
 	HTTPAddr string
 	OpsAddr  string
@@ -54,6 +56,8 @@ type Server struct {
 
 	tlsMgr *TLSManager
 	tcpMgr *tcpManager
+
+	proxyProtoTrusted []netip.Prefix
 }
 
 func New(cfg Config) (*Server, error) {
@@ -82,16 +86,33 @@ func New(cfg Config) (*Server, error) {
 		tcpMgr = newTCPManager(lo, hi, bindAddr, newPerIPLimiter(limits.PerIPRate, limits.PerIPBurst, limits.PerIPLRU))
 	}
 
+	var trustedPrefixes []netip.Prefix
+	for _, raw := range cfg.ProxyProtocolTrusted {
+		p := strings.TrimSpace(raw)
+		if p == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(p)
+		if err != nil {
+			return nil, fmt.Errorf("edge: invalid -proxy-protocol-trusted entry %q: %w", p, err)
+		}
+		trustedPrefixes = append(trustedPrefixes, prefix)
+	}
+	if len(cfg.ProxyProtocolTrusted) > 0 && len(trustedPrefixes) == 0 {
+		return nil, fmt.Errorf("edge: -proxy-protocol-trusted contains no valid CIDRs")
+	}
+
 	return &Server{
-		cfg:          cfg,
-		registry:     registry,
-		authLimiter:  newAuthRateLimiter(),
-		randomName:   randomSubdomain,
-		perIPLimiter: newPerIPLimiter(limits.PerIPRate, limits.PerIPBurst, limits.PerIPLRU),
-		globalSem:    newGlobalSemaphore(limits.GlobalInFlight),
-		handshakeSem: newGlobalSemaphore(int64(limits.HandshakeConcurrency)),
-		unauthSem:    newGlobalSemaphore(int64(limits.UnauthSessions)),
-		tcpMgr:       tcpMgr,
+		cfg:               cfg,
+		registry:          registry,
+		authLimiter:       newAuthRateLimiter(),
+		randomName:        randomSubdomain,
+		perIPLimiter:      newPerIPLimiter(limits.PerIPRate, limits.PerIPBurst, limits.PerIPLRU),
+		globalSem:         newGlobalSemaphore(limits.GlobalInFlight),
+		handshakeSem:      newGlobalSemaphore(int64(limits.HandshakeConcurrency)),
+		unauthSem:         newGlobalSemaphore(int64(limits.UnauthSessions)),
+		tcpMgr:            tcpMgr,
+		proxyProtoTrusted: trustedPrefixes,
 	}, nil
 }
 
@@ -139,7 +160,10 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	if s.cfg.ProxyProtocol {
-		publicLn = newProxyProtoListener(publicLn, proxyProtoTimeout)
+		if len(s.proxyProtoTrusted) == 0 {
+			slog.Warn("edge: proxy-protocol is enabled but -proxy-protocol-trusted is empty; PROXY headers are accepted from any peer and --allow-cidr cannot be trusted unless the public port is firewalled to the proxy")
+		}
+		publicLn = newProxyProtoListener(publicLn, proxyProtoTimeout, s.proxyProtoTrusted)
 	}
 
 	var httpLn net.Listener

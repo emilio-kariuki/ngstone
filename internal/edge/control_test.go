@@ -224,11 +224,23 @@ func TestReplyIDsEcho(t *testing.T) {
 }
 
 func TestNegotiateVersion(t *testing.T) {
-	if v, ok := negotiateVersion([]int{1}); !ok || v != proto.ProtoVersion {
-		t.Fatalf("negotiateVersion([1]) = (%d,%v), want (%d,true)", v, ok, proto.ProtoVersion)
+	if v, ok := negotiateVersion([]int{1}); !ok || v != 1 {
+		t.Fatalf("negotiateVersion([1]) = (%d,%v), want (1,true)", v, ok)
 	}
-	if _, ok := negotiateVersion([]int{2, 3}); ok {
-		t.Fatalf("negotiateVersion([2,3]) should report no common version")
+	if v, ok := negotiateVersion([]int{2, 3}); !ok || v != 2 {
+		t.Fatalf("negotiateVersion([2,3]) = (%d,%v), want (2,true)", v, ok)
+	}
+	if v, ok := negotiateVersion([]int{2, 1}); !ok || v != 2 {
+		t.Fatalf("negotiateVersion([2,1]) = (%d,%v), want (2,true)", v, ok)
+	}
+	if v, ok := negotiateVersion([]int{1, 2}); !ok || v != 2 {
+		t.Fatalf("negotiateVersion([1,2]) = (%d,%v), want (2,true) (order-independent)", v, ok)
+	}
+	if _, ok := negotiateVersion([]int{3, 4}); ok {
+		t.Fatalf("negotiateVersion([3,4]) should report no common version")
+	}
+	if _, ok := negotiateVersion([]int{}); ok {
+		t.Fatalf("negotiateVersion([]) should report no common version")
 	}
 	if _, ok := negotiateVersion(nil); ok {
 		t.Fatalf("negotiateVersion(nil) should report no common version")
@@ -509,7 +521,7 @@ func TestHandleBindRandomNameNeverTakesOverLiveDifferentInstance(t *testing.T) {
 
 	liveHolder, liveHolderCleanup := newTestAgentSession(t, "holder-instance")
 	defer liveHolderCleanup()
-	if _, _, err := s.registry.Bind("collide.example.com", liveHolder, true); err != nil {
+	if _, _, err := s.registry.Bind("collide.example.com", liveHolder, true, nil); err != nil {
 		t.Fatalf("pre-bind: %v", err)
 	}
 

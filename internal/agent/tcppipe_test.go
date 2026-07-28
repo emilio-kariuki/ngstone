@@ -311,9 +311,19 @@ func TestTCPServerDialFailureDeregistersConn(t *testing.T) {
 	}
 }
 
-func TestTCPServerHandleAbortsWhenClosedWhileDialInFlight(t *testing.T) {
+func TestTCPServerShutdownDuringInFlightDialLeavesNoLeak(t *testing.T) {
+	runtime.GC()
+	before := runtime.NumGoroutine()
+
 	blockCh := make(chan struct{})
-	defer close(blockCh)
+	blockClosed := false
+	unblockTarget := func() {
+		if !blockClosed {
+			blockClosed = true
+			close(blockCh)
+		}
+	}
+	defer unblockTarget()
 
 	targetAccepted := make(chan net.Conn, 1)
 	targetAddr, stopTarget := startTarget(t, func(c net.Conn) {
@@ -359,18 +369,15 @@ func TestTCPServerHandleAbortsWhenClosedWhileDialInFlight(t *testing.T) {
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	shutdownErr := srv.Shutdown(shutdownCtx)
-	cancel()
-	if shutdownErr == nil {
-		t.Fatalf("Shutdown should have timed out while the dial was still in flight")
-	}
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- srv.Shutdown(shutdownCtx) }()
 
 	select {
-	case tc := <-targetAccepted:
-		defer tc.Close()
+	case <-shutdownDone:
 	case <-time.After(dialDelay + 2*time.Second):
-		t.Fatalf("target never accepted the delayed dial")
+		t.Fatalf("Shutdown did not return while the dial was in flight")
 	}
+	cancel()
 
 	drainDeadline := time.Now().Add(2 * time.Second)
 	for {
@@ -381,14 +388,32 @@ func TestTCPServerHandleAbortsWhenClosedWhileDialInFlight(t *testing.T) {
 			break
 		}
 		if time.Now().After(drainDeadline) {
-			t.Fatalf("srv.conns retained the pair after the dial finished post-shutdown; handle() should have aborted instead of copying on an already-closed server (fix D.1 regression: it blocks forever reading from the still-open target conn)")
+			t.Fatalf("srv.conns retained the pair after shutdown-during-in-flight-dial, want 0 (handler leak)")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
 	select {
-	case <-serveErr:
+	case tc := <-targetAccepted:
+		tc.Close()
 	default:
+	}
+	unblockTarget()
+
+	select {
+	case <-serveErr:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Serve did not return after Shutdown")
+	}
+
+	runtime.GC()
+	time.Sleep(100 * time.Millisecond)
+	runtime.GC()
+	after := runtime.NumGoroutine()
+
+	t.Logf("goroutines before=%d after=%d", before, after)
+	if after > before+5 {
+		t.Fatalf("goroutine leak: before=%d after=%d", before, after)
 	}
 }
 

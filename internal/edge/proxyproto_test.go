@@ -84,11 +84,16 @@ type acceptResult struct {
 
 func newProxyProtoTestListener(t *testing.T, timeout time.Duration) (net.Listener, chan acceptResult) {
 	t.Helper()
+	return newProxyProtoTestListenerTrusted(t, timeout, nil)
+}
+
+func newProxyProtoTestListenerTrusted(t *testing.T, timeout time.Duration, trusted []netip.Prefix) (net.Listener, chan acceptResult) {
+	t.Helper()
 	raw, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	ln := newProxyProtoListener(raw, timeout)
+	ln := newProxyProtoListener(raw, timeout, trusted)
 	accepted := make(chan acceptResult, 16)
 	go func() {
 		for {
@@ -402,7 +407,7 @@ func newProxyProtoEdge(t *testing.T, limits LimitsConfig, proxyProtocol bool, ha
 	}
 
 	as := newFakeAgentSession(t, "inst-pp", handler)
-	if _, _, err := s.registry.Bind("svc.example.com", as, true); err != nil {
+	if _, _, err := s.registry.Bind("svc.example.com", as, true, nil); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 
@@ -553,5 +558,81 @@ func TestProxyProtoDisabledDoesNotConsumeAProxyHeader(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
 		t.Fatalf("with -proxy-protocol off, a PROXY header was silently consumed and the request succeeded; the flag must be a no-op by default")
+	}
+}
+
+func TestProxyProtoUntrustedPeerConnectionIsClosedWithoutBeingServed(t *testing.T) {
+	untrusted := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+	ln, accepted := newProxyProtoTestListenerTrusted(t, 2*time.Second, untrusted)
+
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer client.Close()
+
+	select {
+	case ar := <-accepted:
+		t.Fatalf("Accept returned a connection (err=%v) for a peer outside the trusted set; it must be closed instead of served", ar.err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, err = client.Read(make([]byte, 1))
+	if err == nil {
+		t.Fatalf("expected the untrusted client's connection to be closed")
+	}
+	if ne, ok := err.(net.Error); ok && ne.Timeout() {
+		t.Fatalf("client read timed out instead of observing a close (%v); the untrusted connection was never rejected", err)
+	}
+	if !errors.Is(err, io.EOF) {
+		t.Logf("client observed close via error: %v", err)
+	}
+}
+
+func TestProxyProtoTrustedPeerConfigStillAcceptsAfterRejectingUntrusted(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+	ln, accepted := newProxyProtoTestListenerTrusted(t, 2*time.Second, trusted)
+
+	header := []byte("PROXY TCP4 196.96.9.105 10.0.1.7 62811 443\r\n")
+	client, server := dialAndSend(t, ln, accepted, header)
+
+	if got := server.RemoteAddr().String(); got != "196.96.9.105:62811" {
+		t.Fatalf("RemoteAddr() = %q, want %q", got, "196.96.9.105:62811")
+	}
+
+	if _, err := client.Write([]byte("hello")); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	buf := make([]byte, 5)
+	server.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(server, buf); err != nil {
+		t.Fatalf("read payload after header: %v", err)
+	}
+	if string(buf) != "hello" {
+		t.Fatalf("payload after header = %q, want %q", buf, "hello")
+	}
+}
+
+func TestProxyProtoEmptyTrustedListPreservesTodaysBehavior(t *testing.T) {
+	ln, accepted := newProxyProtoTestListenerTrusted(t, 2*time.Second, nil)
+
+	header := []byte("PROXY TCP4 196.96.9.105 10.0.1.7 62811 443\r\n")
+	client, server := dialAndSend(t, ln, accepted, header)
+
+	if got := server.RemoteAddr().String(); got != "196.96.9.105:62811" {
+		t.Fatalf("RemoteAddr() = %q, want %q (with no trusted list configured, the header is parsed from anyone)", got, "196.96.9.105:62811")
+	}
+
+	if _, err := client.Write([]byte("hello")); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	buf := make([]byte, 5)
+	server.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(server, buf); err != nil {
+		t.Fatalf("read payload after header: %v", err)
+	}
+	if string(buf) != "hello" {
+		t.Fatalf("payload after header = %q, want %q", buf, "hello")
 	}
 }

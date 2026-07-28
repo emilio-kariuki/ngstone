@@ -452,6 +452,26 @@ $ sudo ufw enable`}
         the flag off — the default — preserves the normal behaviour exactly.
       </Callout>
       <p>
+        If binding to a loopback/Docker-only address isn&apos;t possible,{" "}
+        <code>-proxy-protocol-trusted</code> restricts which peers the edge
+        accepts a PROXY header from — it closes the connection immediately
+        if the socket&apos;s real peer address isn&apos;t in the list,
+        before even trying to parse a header:
+      </p>
+      <CodeBlock
+        language="ini"
+        code={`ExecStart=/usr/local/bin/ngstoned -proxy-protocol -proxy-protocol-trusted 10.0.1.69/32 ...`}
+      />
+      <p>
+        This also matters for per-tunnel <code>--allow-cidr</code> (see{" "}
+        <a href="/docs/guides/access-control">Access control</a>): that
+        check trusts whatever the edge believes is the source IP, and behind
+        a proxy that&apos;s whatever the PROXY header says. Left empty, the
+        edge accepts a PROXY header from any peer, so a direct client could
+        forge one and spoof its way past an allowlist unless the public port
+        is firewalled to the proxy alone.
+      </p>
+      <p>
         The flag applies to the public listener only. Do <strong>not</strong>{" "}
         put the control listener on <code>:4443</code> behind a
         PROXY-protocol proxy: it does not parse the header and every agent

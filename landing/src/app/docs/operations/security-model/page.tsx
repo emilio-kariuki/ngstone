@@ -14,6 +14,7 @@ const TOC: TocItem[] = [
   { id: "assets", title: "Assets" },
   { id: "anonymous-attacker", title: "Anonymous attacker" },
   { id: "leaked-token", title: "Leaked token" },
+  { id: "per-tunnel-access-control", title: "Per-tunnel access control" },
   { id: "header-spoofing", title: "Header spoofing" },
   { id: "inspector-surface", title: "The inspector's attack surface" },
   { id: "resource-exhaustion", title: "Resource exhaustion" },
@@ -66,6 +67,34 @@ export default function SecurityModelPage() {
         set a new <code>token_sha256</code> and every existing session dies
         at its next reconnect-auth.
       </Callout>
+
+      <Anchor id="per-tunnel-access-control">Per-tunnel access control</Anchor>
+      <p>
+        <code>--basic-auth</code> and <code>--allow-cidr</code> (see{" "}
+        <a href="/docs/guides/access-control">Access control</a>) narrow the{" "}
+        <strong>public</strong> surface of one tunnel — they are not a
+        second layer of defense against someone who already holds the edge
+        token. A holder of the token can bind a fresh, unprotected
+        subdomain, or take over your binding outright, so access control
+        only matters against the anonymous internet, not against a
+        compromised token.
+      </p>
+      <p>
+        Basic auth credentials are stored on the edge as an unsalted
+        SHA-256 digest of <code>user:pass</code> — the agent hashes locally
+        and the plaintext never crosses the wire. Unsalted means identical
+        credentials always produce the same digest, so treat a leaked
+        digest as equivalent to a leaked password subject to offline
+        dictionary attack, not as a safe-to-expose value.
+      </p>
+      <p>
+        <code>--allow-cidr</code> trusts the edge&apos;s view of the
+        connection&apos;s source IP. That view is only trustworthy behind a
+        front proxy if the edge is also configured with{" "}
+        <code>-proxy-protocol-trusted</code> restricting which peers may
+        send a PROXY header — otherwise a direct client can forge one and
+        spoof its way past the allowlist.
+      </p>
 
       <Anchor id="header-spoofing">Header spoofing</Anchor>
       <p>

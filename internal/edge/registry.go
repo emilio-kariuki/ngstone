@@ -9,6 +9,7 @@ import (
 	"net/http/httputil"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ngstone/internal/proto"
@@ -30,6 +31,7 @@ type Binding struct {
 	BoundAt    time.Time
 	transport  *http.Transport
 	proxy      *httputil.ReverseProxy
+	access     atomic.Pointer[accessControl]
 }
 
 type Registry struct {
@@ -65,7 +67,7 @@ func (r *Registry) Route(host string) (*Binding, bool) {
 	return b, ok
 }
 
-func (r *Registry) Bind(host string, s *AgentSession, takeover bool) (*Binding, *AgentSession, error) {
+func (r *Registry) Bind(host string, s *AgentSession, takeover bool, ac *accessControl) (*Binding, *AgentSession, error) {
 	host = normalizeHost(host)
 
 	r.mu.Lock()
@@ -76,6 +78,7 @@ func (r *Registry) Bind(host string, s *AgentSession, takeover bool) (*Binding, 
 		switch {
 		case existing.Sess == s:
 			existing.BoundAt = time.Now()
+			existing.access.Store(ac)
 			return existing, nil, nil
 		case existing.InstanceID == s.InstanceID:
 			evicted = existing.Sess
@@ -102,6 +105,7 @@ func (r *Registry) Bind(host string, s *AgentSession, takeover bool) (*Binding, 
 		transport:  transport,
 		proxy:      newBindingProxy(transport),
 	}
+	b.access.Store(ac)
 	r.byHost[host] = b
 	if r.bySession[s] == nil {
 		r.bySession[s] = make(map[string]struct{})

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,9 +26,10 @@ var errPortUnavailable = errors.New("edge: port_unavailable")
 var errTooManyBinds = errors.New("edge: too_many_binds")
 
 var (
-	metricTCPRejectedGlobalCap   = expvar.NewInt("ngstoned_tcp_rejected_global_cap_total")
-	metricTCPRejectedBindCap     = expvar.NewInt("ngstoned_tcp_rejected_bind_cap_total")
-	metricTCPRejectedRateLimited = expvar.NewInt("ngstoned_tcp_rejected_rate_limited_total")
+	metricTCPRejectedGlobalCap     = expvar.NewInt("ngstoned_tcp_rejected_global_cap_total")
+	metricTCPRejectedBindCap       = expvar.NewInt("ngstoned_tcp_rejected_bind_cap_total")
+	metricTCPRejectedRateLimited   = expvar.NewInt("ngstoned_tcp_rejected_rate_limited_total")
+	metricTCPRejectedForbiddenCIDR = expvar.NewInt("ngstoned_tcp_rejected_forbidden_cidr_total")
 )
 
 type tcpConn struct {
@@ -40,6 +42,7 @@ type tcpTunnel struct {
 	hostname string
 	ln       net.Listener
 	session  *AgentSession
+	allow    []netip.Prefix
 
 	acceptDone chan struct{}
 	closed     chan struct{}
@@ -136,12 +139,13 @@ func (tm *tcpManager) reserveLocked(requested int) (int, error) {
 	return 0, errPortUnavailable
 }
 
-func (tm *tcpManager) registerTunnelLocked(as *AgentSession, port int, hostname string, ln net.Listener) *tcpTunnel {
+func (tm *tcpManager) registerTunnelLocked(as *AgentSession, port int, hostname string, ln net.Listener, allow []netip.Prefix) *tcpTunnel {
 	tt := &tcpTunnel{
 		port:       port,
 		hostname:   hostname,
 		ln:         ln,
 		session:    as,
+		allow:      allow,
 		acceptDone: make(chan struct{}),
 		closed:     make(chan struct{}),
 	}
@@ -153,7 +157,7 @@ func (tm *tcpManager) registerTunnelLocked(as *AgentSession, port int, hostname 
 	return tt
 }
 
-func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string) (int, error) {
+func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string, allow []netip.Prefix) (int, error) {
 	tm.mu.Lock()
 	if len(tm.bySession[as]) >= maxBindsPerSession {
 		tm.mu.Unlock()
@@ -175,7 +179,7 @@ func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string) (in
 			return 0, err
 		}
 
-		tt := tm.registerTunnelLocked(as, port, hostname, ln)
+		tt := tm.registerTunnelLocked(as, port, hostname, ln, allow)
 		tm.mu.Unlock()
 
 		go tm.acceptLoop(tt)
@@ -231,7 +235,7 @@ func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string) (in
 		metricTCPRejectedBindCap.Add(1)
 		return 0, errTooManyBinds
 	}
-	tt := tm.registerTunnelLocked(as, port, hostname, ln)
+	tt := tm.registerTunnelLocked(as, port, hostname, ln, allow)
 	tm.mu.Unlock()
 
 	go tm.acceptLoop(tt)
@@ -268,11 +272,11 @@ func (tm *tcpManager) acceptLoop(tt *tcpTunnel) {
 		tc := &tcpConn{client: c}
 		tt.session.inflight.Add(1)
 		tm.register(tt.session, tc)
-		go tm.handleConn(tt.session, tt.hostname, tc)
+		go tm.handleConn(tt.session, tt.hostname, tt.allow, tc)
 	}
 }
 
-func (tm *tcpManager) handleConn(as *AgentSession, hostname string, tc *tcpConn) {
+func (tm *tcpManager) handleConn(as *AgentSession, hostname string, allow []netip.Prefix, tc *tcpConn) {
 	client := tc.client
 
 	if tm.limiter != nil && !tm.limiter.allow(remoteIP(client)) {
@@ -281,6 +285,17 @@ func (tm *tcpManager) handleConn(as *AgentSession, hostname string, tc *tcpConn)
 		as.inflight.Done()
 		tm.deregister(as, tc)
 		return
+	}
+
+	if len(allow) > 0 {
+		addr, err := netip.ParseAddr(remoteIP(client))
+		if err != nil || !prefixesContain(allow, addr) {
+			metricTCPRejectedForbiddenCIDR.Add(1)
+			client.Close()
+			as.inflight.Done()
+			tm.deregister(as, tc)
+			return
+		}
 	}
 
 	if !tm.globalSem.tryAcquire() {

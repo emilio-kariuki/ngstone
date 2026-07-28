@@ -201,6 +201,11 @@ func startEdgeTCP(t *testing.T, edgeBin, controlAddr, publicAddr, token, domain 
 
 func startAgentTCP(t *testing.T, agentBin, controlAddr, token, localTarget string, remotePort int) (*managedProc, *syncBuf) {
 	t.Helper()
+	return startAgentTCPWithAllowCIDR(t, agentBin, controlAddr, token, localTarget, remotePort, "")
+}
+
+func startAgentTCPWithAllowCIDR(t *testing.T, agentBin, controlAddr, token, localTarget string, remotePort int, allowCIDR string) (*managedProc, *syncBuf) {
+	t.Helper()
 	args := []string{
 		"tcp", localTarget,
 		"-server", controlAddr,
@@ -209,6 +214,9 @@ func startAgentTCP(t *testing.T, agentBin, controlAddr, token, localTarget strin
 	}
 	if remotePort != 0 {
 		args = append(args, "-r", strconv.Itoa(remotePort))
+	}
+	if allowCIDR != "" {
+		args = append(args, "-allow-cidr", allowCIDR)
 	}
 	cmd := exec.Command(agentBin, args...)
 	sb := &syncBuf{}
@@ -283,6 +291,23 @@ func doGet(publicAddr, hostname, path string) (status int, body string, err erro
 		return resp.StatusCode, "", err
 	}
 	return resp.StatusCode, string(b), nil
+}
+
+func waitBoundAny(t *testing.T, publicAddr, hostname, path string, max time.Duration) int {
+	t.Helper()
+	deadline := time.Now().Add(max)
+	var lastStatus int
+	var lastErr error
+	for time.Now().Before(deadline) {
+		status, _, err := doGet(publicAddr, hostname, path)
+		lastStatus, lastErr = status, err
+		if err == nil && status != http.StatusNotFound {
+			return status
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for a bound (non-404) response on %s%s within %s; last status=%d err=%v", hostname, path, max, lastStatus, lastErr)
+	return 0
 }
 
 func waitBoundWithin(t *testing.T, publicAddr, hostname string, max time.Duration) time.Duration {

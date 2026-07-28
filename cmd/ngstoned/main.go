@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"ngstone/internal/edge"
@@ -27,6 +28,7 @@ func main() {
 	tcpBindAddr := flag.String("tcp-bind", "0.0.0.0", "interface address the TCP tunnel port range binds on")
 
 	proxyProtocol := flag.Bool("proxy-protocol", false, "require a PROXY protocol v1/v2 header on every connection to the public listener, and use the address it carries as the client address; enable this only when the public port is reachable solely from a trusted TCP proxy (see deploy/README.md), and enable it on both sides at once")
+	proxyProtocolTrusted := flag.String("proxy-protocol-trusted", "", "comma-separated CIDRs trusted to originate PROXY protocol headers on the public listener (only meaningful with -proxy-protocol); connections from any other peer are closed immediately. If empty, PROXY headers are accepted from any peer and --allow-cidr per-tunnel checks cannot be trusted unless the public port is firewalled to the proxy")
 
 	insecure := flag.Bool("insecure", false, "run with no TLS anywhere and no certificate management (dev/test only)")
 	acmeCA := flag.String("acme-ca", edge.ACMECAStaging, "ACME CA to use: \"staging\" (default) or \"production\"; a config mistake against production can rate-limit the domain for a week")
@@ -92,6 +94,11 @@ func main() {
 		}
 	}
 
+	var proxyProtocolTrustedList []string
+	if *proxyProtocolTrusted != "" {
+		proxyProtocolTrustedList = strings.Split(*proxyProtocolTrusted, ",")
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -106,12 +113,13 @@ func main() {
 		TCPPortRange: *tcpPortRange,
 		TCPBindAddr:  *tcpBindAddr,
 
-		Insecure:           *insecure,
-		ProxyProtocol:      *proxyProtocol,
-		ACMECA:             *acmeCA,
-		ACMEEmail:          *certEmail,
-		CertStoragePath:    *certStorage,
-		CloudflareAPIToken: cfToken,
+		Insecure:             *insecure,
+		ProxyProtocol:        *proxyProtocol,
+		ProxyProtocolTrusted: proxyProtocolTrustedList,
+		ACMECA:               *acmeCA,
+		ACMEEmail:            *certEmail,
+		CertStoragePath:      *certStorage,
+		CloudflareAPIToken:   cfToken,
 
 		Limits: edge.LimitsConfig{
 			ReadHeaderTimeout:     *readHeaderTimeout,
