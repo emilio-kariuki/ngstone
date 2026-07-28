@@ -3,6 +3,8 @@ package edge
 import (
 	"context"
 	"errors"
+	"fmt"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -15,6 +17,7 @@ type ctxKey int
 const (
 	ctxKeyClientAddr ctxKey = iota
 	ctxKeyReqID
+	ctxKeyReqSlot
 )
 
 type statusRecorder struct {
@@ -61,7 +64,7 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	host := stripPort(r.Host)
 	b, ok := s.registry.Route(host)
 	if !ok {
-		http.NotFound(rec, r)
+		writeError(rec, http.StatusNotFound)
 		return
 	}
 
@@ -101,14 +104,16 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		writeTooManyRequests(rec)
 		return
 	}
-	defer s.globalSem.release()
 
 	if !b.Sess.tryAcquireStream() {
+		s.globalSem.release()
 		metricRejectedSessionCap.Add(1)
 		writeTooManyRequests(rec)
 		return
 	}
-	defer b.Sess.releaseStream()
+
+	slot := newReqSlot(s, b.Sess)
+	defer slot.release()
 
 	limits := s.limitsOrDefault()
 	if r.ContentLength > limits.MaxBodyBytes {
@@ -121,6 +126,7 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	reqID := randomHex(8)
 	ctx := context.WithValue(r.Context(), ctxKeyClientAddr, r.RemoteAddr)
 	ctx = context.WithValue(ctx, ctxKeyReqID, reqID)
+	ctx = context.WithValue(ctx, ctxKeyReqSlot, slot)
 
 	b.proxy.ServeHTTP(rec, r.WithContext(ctx))
 }
@@ -135,11 +141,50 @@ func newBindingProxy(transport *http.Transport) *httputil.ReverseProxy {
 			pr.SetXForwarded()
 			pr.Out.Header.Del("X-Real-IP")
 		},
-		ErrorHandler: proxyErrorHandler,
+		ModifyResponse: modifyResponse,
+		ErrorHandler:   proxyErrorHandler,
 	}
 }
 
+var errUpgradeCapExceeded = errors.New("edge: upgrade capacity exceeded")
+
+func modifyResponse(resp *http.Response) error {
+	slot, ok := resp.Request.Context().Value(ctxKeyReqSlot).(*reqSlot)
+	if !ok || slot == nil {
+		return nil
+	}
+
+	if !isLongLivedResponse(resp) {
+		return nil
+	}
+
+	if !slot.reclassify() {
+		metricRejectedUpgradeCap.Add(1)
+		return errUpgradeCapExceeded
+	}
+	return nil
+}
+
+func isLongLivedResponse(resp *http.Response) bool {
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		return true
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		return false
+	}
+	return mediaType == "text/event-stream"
+}
+
 func proxyErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, errUpgradeCapExceeded) {
+		writeError(w, http.StatusServiceUnavailable)
+		return
+	}
+
 	var maxBytesErr *http.MaxBytesError
 	if errors.As(err, &maxBytesErr) {
 		metricRejected413.Add(1)
@@ -149,17 +194,24 @@ func proxyErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
 
 	var de *dialError
 	if errors.As(err, &de) {
-		w.WriteHeader(http.StatusBadGateway)
+		writeError(w, http.StatusBadGateway)
 		return
 	}
 
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
-		w.WriteHeader(http.StatusGatewayTimeout)
+		writeError(w, http.StatusGatewayTimeout)
 		return
 	}
 
-	w.WriteHeader(http.StatusBadGateway)
+	writeError(w, http.StatusBadGateway)
+}
+
+func writeError(w http.ResponseWriter, status int) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	fmt.Fprintf(w, "<!doctype html><html><head><title>%d %s</title></head><body><p>%d %s</p></body></html>",
+		status, http.StatusText(status), status, http.StatusText(status))
 }
 
 func stripPort(host string) string {

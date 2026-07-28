@@ -120,7 +120,8 @@ export default function ConfigurationPage() {
         <code>-max-body-bytes</code>, <code>-response-header-timeout</code>,{" "}
         <code>-per-ip-rate</code>, <code>-per-ip-burst</code>,{" "}
         <code>-per-ip-lru</code>, <code>-global-inflight</code>,{" "}
-        <code>-per-session-inflight</code>,{" "}
+        <code>-per-session-inflight</code>, <code>-upgrade-inflight</code>,{" "}
+        <code>-per-session-upgrade</code>,{" "}
         <code>-handshake-concurrency</code>, <code>-unauth-sessions</code>).
         See{" "}
         <a href="/docs/reference/limits-timeouts">Limits &amp; timeouts</a>{" "}

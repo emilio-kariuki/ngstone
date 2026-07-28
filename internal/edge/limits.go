@@ -24,6 +24,9 @@ const (
 	DefaultGlobalInFlight     = 64
 	DefaultPerSessionInFlight = 48
 
+	DefaultUpgradeInFlight           = 256
+	DefaultPerSessionUpgradeInFlight = 32
+
 	DefaultHandshakeConcurrency = 16
 	DefaultUnauthSessions       = 32
 )
@@ -41,6 +44,9 @@ type LimitsConfig struct {
 
 	GlobalInFlight     int64
 	PerSessionInFlight int64
+
+	UpgradeInFlight           int64
+	PerSessionUpgradeInFlight int64
 
 	HandshakeConcurrency int
 	UnauthSessions       int
@@ -106,6 +112,18 @@ func (l LimitsConfig) withDefaults() (LimitsConfig, error) {
 	}
 	if l.PerSessionInFlight == 0 {
 		l.PerSessionInFlight = DefaultPerSessionInFlight
+	}
+	if l.UpgradeInFlight < 0 {
+		return l, fmt.Errorf("edge: upgrade-inflight must not be negative, got %d", l.UpgradeInFlight)
+	}
+	if l.UpgradeInFlight == 0 {
+		l.UpgradeInFlight = DefaultUpgradeInFlight
+	}
+	if l.PerSessionUpgradeInFlight < 0 {
+		return l, fmt.Errorf("edge: per-session-upgrade-inflight must not be negative, got %d", l.PerSessionUpgradeInFlight)
+	}
+	if l.PerSessionUpgradeInFlight == 0 {
+		l.PerSessionUpgradeInFlight = DefaultPerSessionUpgradeInFlight
 	}
 	if l.HandshakeConcurrency < 0 {
 		return l, fmt.Errorf("edge: handshake-concurrency must not be negative, got %d", l.HandshakeConcurrency)

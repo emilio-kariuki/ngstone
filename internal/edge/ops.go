@@ -23,6 +23,9 @@ var (
 
 	metricRejectedForbiddenCIDR = expvar.NewInt("ngstoned_rejected_forbidden_cidr_total")
 	metricRejectedUnauthorized  = expvar.NewInt("ngstoned_rejected_unauthorized_total")
+
+	metricRejectedUpgradeCap = expvar.NewInt("ngstoned_rejected_upgrade_cap_total")
+	metricActiveUpgrades     = expvar.NewInt("ngstoned_active_upgrades")
 )
 
 type certStatusJSON struct {

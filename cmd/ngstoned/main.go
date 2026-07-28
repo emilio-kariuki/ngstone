@@ -46,6 +46,8 @@ func main() {
 	perIPLRU := flag.Int("per-ip-lru", edge.DefaultPerIPLRU, "max distinct IPs tracked by the per-IP limiter")
 	globalInFlight := flag.Int64("global-inflight", edge.DefaultGlobalInFlight, "global in-flight request semaphore (memory ceiling = this x yamux window size)")
 	perSessionInFlight := flag.Int64("per-session-inflight", edge.DefaultPerSessionInFlight, "per-session concurrent stream cap")
+	upgradeInFlight := flag.Int64("upgrade-inflight", 0, "global concurrent upgraded (websocket/SSE) stream cap; 0 uses the built-in default")
+	perSessionUpgrade := flag.Int64("per-session-upgrade", 0, "per-session concurrent upgraded (websocket/SSE) stream cap; 0 uses the built-in default")
 	handshakeConcurrency := flag.Int("handshake-concurrency", edge.DefaultHandshakeConcurrency, ":4443 concurrent TLS handshake cap")
 	unauthSessions := flag.Int("unauth-sessions", edge.DefaultUnauthSessions, ":4443 unauthenticated-session cap")
 
@@ -122,18 +124,20 @@ func main() {
 		CloudflareAPIToken:   cfToken,
 
 		Limits: edge.LimitsConfig{
-			ReadHeaderTimeout:     *readHeaderTimeout,
-			IdleTimeout:           *idleTimeout,
-			MaxHeaderBytes:        *maxHeaderBytes,
-			MaxBodyBytes:          *maxBodyBytes,
-			ResponseHeaderTimeout: *responseHeaderTimeout,
-			PerIPRate:             *perIPRate,
-			PerIPBurst:            *perIPBurst,
-			PerIPLRU:              *perIPLRU,
-			GlobalInFlight:        *globalInFlight,
-			PerSessionInFlight:    *perSessionInFlight,
-			HandshakeConcurrency:  *handshakeConcurrency,
-			UnauthSessions:        *unauthSessions,
+			ReadHeaderTimeout:         *readHeaderTimeout,
+			IdleTimeout:               *idleTimeout,
+			MaxHeaderBytes:            *maxHeaderBytes,
+			MaxBodyBytes:              *maxBodyBytes,
+			ResponseHeaderTimeout:     *responseHeaderTimeout,
+			PerIPRate:                 *perIPRate,
+			PerIPBurst:                *perIPBurst,
+			PerIPLRU:                  *perIPLRU,
+			GlobalInFlight:            *globalInFlight,
+			PerSessionInFlight:        *perSessionInFlight,
+			UpgradeInFlight:           *upgradeInFlight,
+			PerSessionUpgradeInFlight: *perSessionUpgrade,
+			HandshakeConcurrency:      *handshakeConcurrency,
+			UnauthSessions:            *unauthSessions,
 		},
 	})
 	if err != nil {

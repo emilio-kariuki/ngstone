@@ -127,6 +127,31 @@ func newServerForTest(limits LimitsConfig) *Server {
 	return s
 }
 
+func TestLimitsConfigWithDefaultsAppliesUpgradeDefaults(t *testing.T) {
+	l, err := LimitsConfig{}.withDefaults()
+	if err != nil {
+		t.Fatalf("withDefaults: %v", err)
+	}
+	if l.UpgradeInFlight != DefaultUpgradeInFlight {
+		t.Fatalf("UpgradeInFlight = %d, want default %d", l.UpgradeInFlight, DefaultUpgradeInFlight)
+	}
+	if l.PerSessionUpgradeInFlight != DefaultPerSessionUpgradeInFlight {
+		t.Fatalf("PerSessionUpgradeInFlight = %d, want default %d", l.PerSessionUpgradeInFlight, DefaultPerSessionUpgradeInFlight)
+	}
+}
+
+func TestLimitsConfigWithDefaultsRejectsNegativeUpgradeInFlight(t *testing.T) {
+	if _, err := (LimitsConfig{UpgradeInFlight: -1}).withDefaults(); err == nil {
+		t.Fatal("expected an error for a negative UpgradeInFlight, got nil")
+	}
+}
+
+func TestLimitsConfigWithDefaultsRejectsNegativePerSessionUpgradeInFlight(t *testing.T) {
+	if _, err := (LimitsConfig{PerSessionUpgradeInFlight: -1}).withDefaults(); err == nil {
+		t.Fatal("expected an error for a negative PerSessionUpgradeInFlight, got nil")
+	}
+}
+
 func TestPerIPLimiterTripsAtBurstAndIsPerIP(t *testing.T) {
 	l := newPerIPLimiter(1000, 3, 100)
 	ip := "1.2.3.4"
@@ -168,7 +193,7 @@ func TestPerIPLimiterMasksIPv6ToSlash48(t *testing.T) {
 func TestHandlePublicPerIPLimiterReturns429PastBurst(t *testing.T) {
 	s := newServerForTest(LimitsConfig{PerIPBurst: 2, PerIPRate: 1})
 	as := newEchoAgentSession(t, "inst-a")
-	if _, _, err := s.registry.Bind("svc.example.com", as, true); err != nil {
+	if _, _, err := s.registry.Bind("svc.example.com", as, true, nil); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 
@@ -223,7 +248,7 @@ func TestHandlePublicGlobalInFlightCapReturns429(t *testing.T) {
 		PerIPRate:          1000,
 	})
 	as := newSlowAgentSession(t, "inst-a", 400*time.Millisecond)
-	if _, _, err := s.registry.Bind("svc.example.com", as, true); err != nil {
+	if _, _, err := s.registry.Bind("svc.example.com", as, true, nil); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 
@@ -271,7 +296,7 @@ func TestHandlePublicGlobalInFlightCapReleasesBetweenSequentialRequests(t *testi
 		PerIPRate:          1e6,
 	})
 	as := newEchoAgentSession(t, "inst-a")
-	if _, _, err := s.registry.Bind("svc.example.com", as, true); err != nil {
+	if _, _, err := s.registry.Bind("svc.example.com", as, true, nil); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 
@@ -297,7 +322,7 @@ func TestHandlePublicPerSessionCapReleasesBetweenSequentialRequests(t *testing.T
 	})
 	as := newEchoAgentSession(t, "inst-a")
 	as.streamSem = newGlobalSemaphore(2)
-	if _, _, err := s.registry.Bind("svc.example.com", as, true); err != nil {
+	if _, _, err := s.registry.Bind("svc.example.com", as, true, nil); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 
@@ -323,7 +348,7 @@ func TestHandlePublicPerSessionCapReturns429(t *testing.T) {
 	})
 	as := newSlowAgentSession(t, "inst-a", 400*time.Millisecond)
 	as.streamSem = newGlobalSemaphore(1)
-	if _, _, err := s.registry.Bind("svc.example.com", as, true); err != nil {
+	if _, _, err := s.registry.Bind("svc.example.com", as, true, nil); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 
@@ -366,7 +391,7 @@ func TestHandlePublicPerSessionCapReturns429(t *testing.T) {
 func TestHandlePublicDeclaredOversizeBodyReturns413(t *testing.T) {
 	s := newServerForTest(LimitsConfig{MaxBodyBytes: 1024})
 	as := newEchoAgentSession(t, "inst-a")
-	if _, _, err := s.registry.Bind("svc.example.com", as, true); err != nil {
+	if _, _, err := s.registry.Bind("svc.example.com", as, true, nil); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 
@@ -403,7 +428,7 @@ func (r *repeatReader) Read(p []byte) (int, error) {
 func TestHandlePublicChunkedOversizeBodyReturns413ViaErrorHandler(t *testing.T) {
 	s := newServerForTest(LimitsConfig{MaxBodyBytes: 16})
 	as := newEchoAgentSession(t, "inst-a")
-	if _, _, err := s.registry.Bind("svc.example.com", as, true); err != nil {
+	if _, _, err := s.registry.Bind("svc.example.com", as, true, nil); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 
@@ -421,7 +446,7 @@ func TestHandlePublicChunkedOversizeBodyReturns413ViaErrorHandler(t *testing.T) 
 func TestHandlePublicChunkedOversizeBodyClosesConnection(t *testing.T) {
 	s := newServerForTest(LimitsConfig{MaxBodyBytes: 16})
 	as := newEchoAgentSession(t, "inst-a")
-	if _, _, err := s.registry.Bind("svc.example.com", as, true); err != nil {
+	if _, _, err := s.registry.Bind("svc.example.com", as, true, nil); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 
