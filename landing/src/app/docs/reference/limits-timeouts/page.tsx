@@ -16,6 +16,7 @@ const TOC: TocItem[] = [
   { id: "body-limits", title: "Body limits" },
   { id: "rate-limiting", title: "Rate limiting" },
   { id: "concurrency-window", title: "Concurrency & the window budget" },
+  { id: "upgrade-budget", title: "The upgrade budget" },
   { id: "control-plane-caps", title: "Control-plane caps" },
 ]
 
@@ -120,6 +121,39 @@ export default function LimitsTimeoutsPage() {
         up to its window of received-but-unread bytes on both machines, so
         concurrency × window is the number that matters, not either alone.
       </Callout>
+
+      <Anchor id="upgrade-budget">The upgrade budget</Anchor>
+      <p>
+        A WebSocket upgrade or an SSE stream would otherwise hold one of the
+        semaphores above for its entire life, starving ordinary HTTP requests
+        behind it. The edge detects a long-lived response —{" "}
+        <code>101 Switching Protocols</code>, or a <code>200</code> whose{" "}
+        <code>Content-Type</code> is <code>text/event-stream</code> — and
+        moves it onto this separate budget, releasing its global and
+        per-session in-flight slot back to the pool. See{" "}
+        <a href="/docs/guides/websockets-sse#the-upgrade-budget">
+          WebSockets &amp; SSE
+        </a>{" "}
+        for the full picture.
+      </p>
+      <ParamTable>
+        <Property name="-upgrade-inflight" type="int" defaultValue="256">
+          Global concurrent upgraded (WebSocket/SSE) connection cap, across
+          every tunnel on the edge.
+        </Property>
+        <Property name="-per-session-upgrade" type="int" defaultValue="32">
+          Per-session concurrent upgraded connection cap, beneath the global
+          one.
+        </Property>
+      </ParamTable>
+      <p>
+        A connection that can&apos;t be reclassified because either cap is
+        exhausted is rejected outright with <code>503 Service Unavailable</code>{" "}
+        — it is not silently downgraded or left occupying a request slot —
+        and <code>ngstoned_rejected_upgrade_cap_total</code> increments.{" "}
+        <code>ngstoned_active_upgrades</code> is a live gauge of currently
+        open upgraded connections.
+      </p>
 
       <Anchor id="control-plane-caps">Control-plane caps</Anchor>
       <ParamTable>

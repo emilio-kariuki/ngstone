@@ -51,6 +51,7 @@ type Server struct {
 
 	perIPLimiter *perIPLimiter
 	globalSem    *globalSemaphore
+	upgradeSem   *globalSemaphore
 	handshakeSem *globalSemaphore
 	unauthSem    *globalSemaphore
 
@@ -109,6 +110,7 @@ func New(cfg Config) (*Server, error) {
 		randomName:        randomSubdomain,
 		perIPLimiter:      newPerIPLimiter(limits.PerIPRate, limits.PerIPBurst, limits.PerIPLRU),
 		globalSem:         newGlobalSemaphore(limits.GlobalInFlight),
+		upgradeSem:        newGlobalSemaphore(limits.UpgradeInFlight),
 		handshakeSem:      newGlobalSemaphore(int64(limits.HandshakeConcurrency)),
 		unauthSem:         newGlobalSemaphore(int64(limits.UnauthSessions)),
 		tcpMgr:            tcpMgr,

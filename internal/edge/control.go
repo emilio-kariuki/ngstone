@@ -37,8 +37,9 @@ type AgentSession struct {
 	IDGen             *proto.IDGen
 	NegotiatedVersion int
 
-	inflight  sync.WaitGroup
-	streamSem *globalSemaphore
+	inflight         sync.WaitGroup
+	streamSem        *globalSemaphore
+	upgradeStreamSem *globalSemaphore
 }
 
 func (a *AgentSession) Done() <-chan struct{} {
@@ -55,6 +56,19 @@ func (a *AgentSession) tryAcquireStream() bool {
 func (a *AgentSession) releaseStream() {
 	if a.streamSem != nil {
 		a.streamSem.release()
+	}
+}
+
+func (a *AgentSession) tryAcquireUpgrade() bool {
+	if a.upgradeStreamSem == nil {
+		return true
+	}
+	return a.upgradeStreamSem.tryAcquire()
+}
+
+func (a *AgentSession) releaseUpgrade() {
+	if a.upgradeStreamSem != nil {
+		a.upgradeStreamSem.release()
 	}
 }
 
@@ -299,6 +313,7 @@ func (s *Server) authenticate(sess tunnel.Session, ip string, remote netip.AddrP
 		IDGen:             proto.NewEdgeIDGen(),
 		NegotiatedVersion: version,
 		streamSem:         newGlobalSemaphore(s.limitsOrDefault().PerSessionInFlight),
+		upgradeStreamSem:  newGlobalSemaphore(s.limitsOrDefault().PerSessionUpgradeInFlight),
 	}
 
 	if err := ctrl.Write(proto.TypeAuthOK, msg.ID, proto.AuthOK{

@@ -10,20 +10,17 @@ one operator running their own domain and their own VPS.
 
 ## Status
 
-v1 is **HTTP/HTTPS tunnels only**. It handles plain request/response traffic
-end to end, with real TLS (via certmagic + DNS-01), per-IP rate limiting,
-in-flight caps, and graceful reconnect/takeover semantics. `ngstone port`
-opens a terminal request inspector — a full-screen dashboard with a live
-request list, headers/body detail pane, and replay — with no web UI and no
-`localhost:4040` involved.
-
-Not built yet:
-
-- **WebSocket / SSE hardening (M4)** — long-lived and streamed connections are
-  not yet specifically tested or hardened. Don't rely on them in production.
-  (WebSocket upgrades do already show up in the inspector at connect time —
-  see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §6 — this note is about
-  the underlying tunnel hardening, not inspector support.)
+ngstone handles both **HTTP/HTTPS tunnels** and **raw TCP tunnels** end to
+end, with real TLS (via certmagic + DNS-01), per-IP rate limiting, in-flight
+caps, and graceful reconnect/takeover semantics. WebSocket upgrades and SSE
+streams are proxied end to end with immediate flushing — covered by the same
+e2e suite as plain HTTP/HTTPS traffic — and show up live in the terminal
+inspector at connect time. A long-lived connection is bounded by its own
+upgrade budget separate from the regular request-concurrency caps: once it's
+exhausted, a new upgrade is rejected outright with `503` instead of silently
+starving ordinary requests behind it. `ngstone port` opens a terminal request
+inspector — a full-screen dashboard with a live request list, headers/body
+detail pane, and replay — with no web UI and no `localhost:4040` involved.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design doc,
 including the milestone-by-milestone build order and what "done" means for
