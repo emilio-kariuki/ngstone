@@ -40,21 +40,32 @@ var errProxyProtoMalformed = errors.New("edge: malformed PROXY protocol header")
 type proxyProtoListener struct {
 	net.Listener
 	timeout time.Duration
+	trusted []netip.Prefix
 }
 
-func newProxyProtoListener(inner net.Listener, timeout time.Duration) net.Listener {
+func newProxyProtoListener(inner net.Listener, timeout time.Duration, trusted []netip.Prefix) net.Listener {
 	if timeout <= 0 {
 		timeout = proxyProtoTimeout
 	}
-	return &proxyProtoListener{Listener: inner, timeout: timeout}
+	return &proxyProtoListener{Listener: inner, timeout: timeout, trusted: trusted}
 }
 
 func (l *proxyProtoListener) Accept() (net.Conn, error) {
-	conn, err := l.Listener.Accept()
-	if err != nil {
-		return nil, err
+	for {
+		conn, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if len(l.trusted) > 0 {
+			ap, err := netip.ParseAddrPort(conn.RemoteAddr().String())
+			if err != nil || !prefixesContain(l.trusted, ap.Addr()) {
+				slog.Debug("edge: closing connection from untrusted peer on proxy-protocol listener", "peer", conn.RemoteAddr().String())
+				conn.Close()
+				continue
+			}
+		}
+		return &proxyProtoConn{Conn: conn, timeout: l.timeout}, nil
 	}
-	return &proxyProtoConn{Conn: conn, timeout: l.timeout}, nil
 }
 
 type proxyProtoConn struct {

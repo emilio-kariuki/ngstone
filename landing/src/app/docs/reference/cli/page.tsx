@@ -139,7 +139,31 @@ $ ngstone port 3000 --subdomain demo`}
           <code>&amp;</code>), so this flag mainly matters when stdout
           <em>is</em> a terminal and you still want plain logs.
         </Property>
+        <Property name="--basic-auth" type="string">
+          Require HTTP basic auth, <code>user:pass</code>. Repeatable for
+          multiple valid credentials. Visible to other local users via{" "}
+          <code>ps</code>/<code>/proc</code> for the process&apos;s
+          lifetime — prefer <code>--basic-auth-file</code> or{" "}
+          <code>NGSTONE_BASIC_AUTH</code>. See{" "}
+          <a href="/docs/guides/access-control">Access control</a>.
+        </Property>
+        <Property name="--basic-auth-file" type="string">
+          Path to a file with one <code>user:pass</code> credential per
+          line. Safer than <code>--basic-auth</code>.
+        </Property>
+        <Property name="--allow-cidr" type="string">
+          Comma-separated CIDRs allowed to reach the tunnel. Empty allows
+          any source.
+        </Property>
       </ParamTable>
+      <p>
+        <code>--basic-auth</code> takes precedence over{" "}
+        <code>--basic-auth-file</code>, which takes precedence over{" "}
+        <code>NGSTONE_BASIC_AUTH</code> — the first one present is used, and
+        they don&apos;t merge. <code>NGSTONE_BASIC_AUTH</code> uses the same
+        format as <code>--basic-auth-file</code>: one <code>user:pass</code>{" "}
+        credential per line.
+      </p>
 
       <Anchor id="ngstone-tcp">ngstone tcp</Anchor>
       <p>
@@ -184,12 +208,30 @@ $ ngstone tcp db.local:5432 --remote-port 15432`}
           Optional SPKI pin, checked in addition to normal chain
           validation. Off by default.
         </Property>
+        <Property name="--allow-cidr" type="string">
+          Comma-separated CIDRs allowed to reach the tunnel. Empty allows
+          any source. See{" "}
+          <a href="/docs/guides/access-control">Access control</a>. There is
+          no <code>--basic-auth</code> for <code>tcp</code> — the edge
+          rejects it, since there&apos;s no HTTP request to attach
+          credentials to inside a raw TCP stream.
+        </Property>
       </ParamTable>
       <Callout variant="note">
         TCP tunnels are opt-in per edge — the operator must set{" "}
         <code>-tcp-ports</code>. See{" "}
         <a href="/docs/guides/edge-vps#tcp-tunnels">Running the edge on a
         VPS</a> for how to enable it.
+      </Callout>
+      <Callout variant="warning" title="--allow-cidr behind a proxy needs an edge flag too">
+        If the edge sits behind a front proxy with <code>-proxy-protocol</code>,{" "}
+        <code>--allow-cidr</code> is only trustworthy when the edge is also
+        started with <code>-proxy-protocol-trusted &lt;proxy CIDRs&gt;</code>{" "}
+        — otherwise a direct client can forge a PROXY header and spoof an
+        allowed source IP. See{" "}
+        <a href="/docs/guides/edge-vps#behind-a-proxy">Behind an existing
+        reverse proxy</a> and{" "}
+        <a href="/docs/guides/access-control">Access control</a>.
       </Callout>
 
       <Anchor id="ngstone-config">ngstone config</Anchor>

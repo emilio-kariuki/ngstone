@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 )
 
@@ -64,11 +65,35 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ac := b.access.Load()
+
 	ip := stripPort(r.RemoteAddr)
+	if addr, err := netip.ParseAddr(ip); err == nil {
+		if !ac.allowIP(addr) {
+			metricRejectedForbiddenCIDR.Add(1)
+			http.Error(rec, "forbidden", http.StatusForbidden)
+			return
+		}
+	} else if len(ac.prefixes()) > 0 {
+		metricRejectedForbiddenCIDR.Add(1)
+		http.Error(rec, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	if !s.perIPLimiter.allow(ip) {
 		metricRejectedRateLimited.Add(1)
 		writeTooManyRequests(rec)
 		return
+	}
+
+	if !ac.checkBasicAuth(r) {
+		metricRejectedUnauthorized.Add(1)
+		rec.Header().Set("WWW-Authenticate", `Basic realm="`+ac.authRealm()+`", charset="UTF-8"`)
+		http.Error(rec, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if ac.hasBasicAuth() {
+		r.Header.Del("Authorization")
 	}
 
 	if !s.globalSem.tryAcquire() {

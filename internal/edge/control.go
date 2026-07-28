@@ -30,11 +30,12 @@ var (
 const authLimiterMaxIPs = 10000
 
 type AgentSession struct {
-	ID         string
-	InstanceID string
-	Sess       tunnel.Session
-	Remote     netip.AddrPort
-	IDGen      *proto.IDGen
+	ID                string
+	InstanceID        string
+	Sess              tunnel.Session
+	Remote            netip.AddrPort
+	IDGen             *proto.IDGen
+	NegotiatedVersion int
 
 	inflight  sync.WaitGroup
 	streamSem *globalSemaphore
@@ -58,9 +59,11 @@ func (a *AgentSession) releaseStream() {
 }
 
 func negotiateVersion(offered []int) (int, bool) {
-	for _, v := range offered {
-		if v == proto.ProtoVersion {
-			return v, true
+	for _, sv := range proto.SupportedVersions {
+		for _, ov := range offered {
+			if ov == sv {
+				return sv, true
+			}
 		}
 	}
 	return 0, false
@@ -289,12 +292,13 @@ func (s *Server) authenticate(sess tunnel.Session, ip string, remote netip.AddrP
 	}
 
 	as := &AgentSession{
-		ID:         randomHex(8),
-		InstanceID: auth.InstanceID,
-		Sess:       sess,
-		Remote:     remote,
-		IDGen:      proto.NewEdgeIDGen(),
-		streamSem:  newGlobalSemaphore(s.limitsOrDefault().PerSessionInFlight),
+		ID:                randomHex(8),
+		InstanceID:        auth.InstanceID,
+		Sess:              sess,
+		Remote:            remote,
+		IDGen:             proto.NewEdgeIDGen(),
+		NegotiatedVersion: version,
+		streamSem:         newGlobalSemaphore(s.limitsOrDefault().PerSessionInFlight),
 	}
 
 	if err := ctrl.Write(proto.TypeAuthOK, msg.ID, proto.AuthOK{
@@ -449,7 +453,15 @@ func (s *Server) waitInflight(as *AgentSession) {
 	}
 }
 
+func bindHasAccessFields(bind proto.Bind) bool {
+	return len(bind.BasicAuthSHA256) > 0 || bind.BasicAuthRealm != "" || len(bind.AllowCIDRs) > 0
+}
+
 func (s *Server) handleBind(as *AgentSession, ctrl *proto.Conn, id uint64, bind proto.Bind) {
+	if as.NegotiatedVersion < 2 && bindHasAccessFields(bind) {
+		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInvalidAccess, Message: "access control requires protocol v2"})
+		return
+	}
 	if bind.Kind == proto.KindTCP {
 		s.handleBindTCP(as, ctrl, id, bind)
 		return
@@ -459,10 +471,16 @@ func (s *Server) handleBind(as *AgentSession, ctrl *proto.Conn, id uint64, bind 
 		return
 	}
 
+	ac, err := buildAccessControl(bind)
+	if err != nil {
+		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInvalidAccess, Message: err.Error()})
+		return
+	}
+
 	subdomain := normalizeHost(bind.Subdomain)
 
 	if subdomain == "" {
-		hostname, evicted, err := assignRandomHostname(s.registry, as, false, s.cfg.Domain, s.randomName)
+		hostname, evicted, err := assignRandomHostname(s.registry, as, false, s.cfg.Domain, s.randomName, ac)
 		if err != nil {
 			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInternal, Message: err.Error()})
 			return
@@ -477,7 +495,7 @@ func (s *Server) handleBind(as *AgentSession, ctrl *proto.Conn, id uint64, bind 
 	}
 
 	hostname := subdomain + "." + s.cfg.Domain
-	_, evicted, err := s.registry.Bind(hostname, as, bind.Takeover)
+	_, evicted, err := s.registry.Bind(hostname, as, bind.Takeover, ac)
 	if err != nil {
 		if errors.Is(err, ErrSubdomainTaken) {
 			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeSubdomainTaken, Message: "subdomain already in use"})
@@ -494,7 +512,16 @@ func (s *Server) handleBindTCP(as *AgentSession, ctrl *proto.Conn, id uint64, bi
 		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeKindUnsupported, Message: "tcp tunnels not enabled"})
 		return
 	}
-	port, err := s.tcpMgr.bind(as, bind.RemotePort, s.cfg.Domain)
+	if len(bind.BasicAuthSHA256) > 0 {
+		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInvalidAccess, Message: "basic auth is not supported for tcp tunnels"})
+		return
+	}
+	ac, err := buildAccessControl(bind)
+	if err != nil {
+		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInvalidAccess, Message: err.Error()})
+		return
+	}
+	port, err := s.tcpMgr.bind(as, bind.RemotePort, s.cfg.Domain, ac.prefixes())
 	if err != nil {
 		if errors.Is(err, errTooManyBinds) {
 			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeTooManyBinds, Message: "too many tcp binds for this session"})

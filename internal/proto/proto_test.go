@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -63,7 +64,7 @@ func TestRoundTripMessages(t *testing.T) {
 				checkEqual(t, got, v, err)
 			case Bind:
 				got, err := Decode[Bind](out)
-				checkEqual(t, got, v, err)
+				checkDeepEqual(t, got, v, err)
 			case BindOK:
 				got, err := Decode[BindOK](out)
 				checkEqual(t, got, v, err)
@@ -105,6 +106,16 @@ func checkEqual[T comparable](t *testing.T, got, want T, err error) {
 		t.Fatalf("Decode: %v", err)
 	}
 	if got != want {
+		t.Fatalf("decoded mismatch: got %+v want %+v", got, want)
+	}
+}
+
+func checkDeepEqual[T any](t *testing.T, got, want T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("decoded mismatch: got %+v want %+v", got, want)
 	}
 }
@@ -703,7 +714,7 @@ func TestBindRemotePortOmitEmpty(t *testing.T) {
 		if err := json.Unmarshal(got, &out); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
-		if out != in {
+		if !reflect.DeepEqual(out, in) {
 			t.Fatalf("got %+v want %+v", out, in)
 		}
 	})

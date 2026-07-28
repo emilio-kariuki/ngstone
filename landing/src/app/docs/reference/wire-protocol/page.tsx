@@ -88,7 +88,7 @@ export default function WireProtocolPage() {
     Token         string \`json:"token"\`
     InstanceID    string \`json:"instance_id"\`     // stable per agent-process start
     ClientVersion string \`json:"client_version"\`  // e.g. "v0.1.0 (commit 3f1a9c2, built 2026-06-01T12:00:00Z)"
-    ProtoVersions []int  \`json:"proto_versions"\`  // [1] — supported protocol majors
+    ProtoVersions []int  \`json:"proto_versions"\`  // [2, 1] — supported protocol majors
 }
 type AuthOK struct {
     ProtoVersion  int    \`json:"proto_version"\`   // server picks highest mutual
@@ -117,15 +117,37 @@ type AuthErr struct {
       </p>
       <ParamTable>
         <Property name="kind" type="string">
-          <code>&quot;http&quot;</code> in v1. <code>&quot;tcp&quot;</code>{" "}
-          is reserved for later.
+          <code>&quot;http&quot;</code> or <code>&quot;tcp&quot;</code>. A{" "}
+          <code>&quot;tcp&quot;</code> bind skips the subdomain/hostname
+          machinery entirely and gets back an allocated port instead — see{" "}
+          <a href="/docs/guides/tcp-tunnels">TCP tunnels</a>.
         </Property>
         <Property name="subdomain" type="string">
           Empty string requests a random name, e.g.{" "}
-          <code>amber-fox-42</code>.
+          <code>amber-fox-42</code>. Ignored for <code>kind: &quot;tcp&quot;</code>.
+        </Property>
+        <Property name="remote_port" type="int">
+          <code>kind: &quot;tcp&quot;</code> only. Requested remote port;{" "}
+          <code>0</code> means server-assigned.
         </Property>
         <Property name="takeover" type="bool">
           Reclaim a binding — authorized by identity, not liveness.
+        </Property>
+        <Property name="basic_auth_sha256" type="[]string">
+          v2 only. SHA-256 digests, hex-encoded, of{" "}
+          <code>user:pass</code> credentials — the edge never sees the
+          plaintext. HTTP only; a TCP bind carrying this field is rejected.
+          See <a href="/docs/guides/access-control">Access control</a>.
+        </Property>
+        <Property name="basic_auth_realm" type="string">
+          v2 only. <code>WWW-Authenticate</code> realm string. Ignored
+          unless <code>basic_auth_sha256</code> is also set; falls back to a
+          default realm if empty.
+        </Property>
+        <Property name="allow_cidrs" type="[]string">
+          v2 only. Source CIDRs allowed to reach the tunnel. Applies to both{" "}
+          <code>kind: &quot;http&quot;</code> and{" "}
+          <code>kind: &quot;tcp&quot;</code>.
         </Property>
         <Property name="hostname" type="string">
           Returned in <code>BindOK</code>: the full bound hostname, e.g.{" "}
@@ -134,12 +156,25 @@ type AuthErr struct {
         <Property name="url" type="string">
           Returned in <code>BindOK</code>: the full public URL.
         </Property>
+        <Property name="port" type="int">
+          Returned in <code>BindOK</code> for <code>kind: &quot;tcp&quot;</code>:
+          the allocated remote port.
+        </Property>
         <Property name="code" type="string">
           Returned in <code>BindErr</code>:{" "}
-          <code>subdomain_taken</code>, <code>invalid_subdomain</code>, or{" "}
-          <code>kind_unsupported</code>.
+          <code>subdomain_taken</code>, <code>invalid_subdomain</code>,{" "}
+          <code>kind_unsupported</code>, <code>port_unavailable</code>,{" "}
+          <code>too_many_binds</code>, or <code>invalid_access</code>.
         </Property>
       </ParamTable>
+      <Callout variant="note" title="invalid_access">
+        Returned when the access-control fields fail validation (a
+        malformed CIDR, a digest that isn&apos;t 32 bytes, too many
+        credentials/CIDRs, basic auth on a <code>tcp</code> bind), and also
+        when a session negotiated protocol v1 but the <code>Bind</code>{" "}
+        carries any access-control field — see{" "}
+        <a href="#versioning">Versioning</a>.
+      </Callout>
       <p>
         <strong>Unbind / UnbindOK / Evicted</strong>
       </p>
@@ -188,7 +223,7 @@ type Pong struct { TS int64 \`json:"ts_unix_ms"\` } // echoes Ping.TS`}
       <CodeBlock
         language="go"
         code={`type StreamOpen struct {
-    Kind       string \`json:"kind"\`        // "http" v1; "tcp" later
+    Kind       string \`json:"kind"\`        // "http" or "tcp"
     Host       string \`json:"host"\`        // which binding this request targets
     ReqID      string \`json:"req_id"\`      // edge-minted ULID; ties edge logs ↔
                                              // inspector entries
@@ -197,16 +232,34 @@ type Pong struct { TS int64 \`json:"ts_unix_ms"\` } // echoes Ping.TS`}
       />
       <p>
         <code>ClientAddr</code> is carried here rather than derived from the
-        stream, because a future <code>Kind: &quot;tcp&quot;</code> stream
-        has no <code>X-Forwarded-For</code> header to fall back on.
+        stream, because a <code>Kind: &quot;tcp&quot;</code> stream has no{" "}
+        <code>X-Forwarded-For</code> header to fall back on.
       </p>
 
       <Anchor id="versioning">Versioning</Anchor>
       <p>
-        The protocol uses a single integer major version. The client offers
-        the versions it supports in <code>Auth.ProtoVersions</code>; the
-        server picks the highest mutual version and returns it in{" "}
-        <code>AuthOK.ProtoVersion</code>. v1 ships as <code>1</code>.
+        The protocol uses a single integer major version, currently{" "}
+        <code>2</code>. The agent offers every version it supports in{" "}
+        <code>Auth.ProtoVersions</code> — <code>[2, 1]</code> — and the edge
+        picks the highest version present in both its own supported list
+        and the agent&apos;s offer, returning it in{" "}
+        <code>AuthOK.ProtoVersion</code>. An edge that only understands v1
+        still negotiates fine with a v2-capable agent; it just settles on{" "}
+        <code>1</code>.
+      </p>
+      <p>
+        v2 added the three <code>Bind</code> access-control fields above (
+        <code>basic_auth_sha256</code>, <code>basic_auth_realm</code>,{" "}
+        <code>allow_cidrs</code>) and the <code>invalid_access</code> error
+        code. Access control is a hard v2 requirement, not a
+        best-effort one: if a session negotiates v1, the edge rejects a{" "}
+        <code>Bind</code> carrying any access-control field with{" "}
+        <code>invalid_access</code> rather than silently binding without
+        protection, and the agent checks this client-side too — it refuses
+        to send the <code>Bind</code> at all when{" "}
+        <code>--basic-auth</code>/<code>--allow-cidr</code> was requested but
+        the negotiated version is below <code>2</code>. Either way the
+        tunnel fails closed instead of coming up unprotected.
       </p>
       <p>
         Additive JSON fields never bump the version — unknown fields are

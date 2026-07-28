@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"sync"
 	"time"
 
@@ -53,6 +54,10 @@ type Config struct {
 
 	Kind       string
 	RemotePort int
+
+	BasicAuthSHA256 []string
+	BasicAuthRealm  string
+	AllowCIDRs      []string
 
 	InstanceID string
 
@@ -333,7 +338,7 @@ func streamConnContext(ctx context.Context, c net.Conn) context.Context {
 	})
 }
 
-func (a *Agent) authenticate(sess tunnel.Session, idgen *proto.IDGen) error {
+func (a *Agent) authenticate(sess tunnel.Session, idgen *proto.IDGen) (int, error) {
 	ctrl := sess.Control()
 
 	authID := idgen.Next()
@@ -341,39 +346,64 @@ func (a *Agent) authenticate(sess tunnel.Session, idgen *proto.IDGen) error {
 		Token:         a.cfg.Token,
 		InstanceID:    a.instanceID,
 		ClientVersion: version.String(),
-		ProtoVersions: []int{proto.ProtoVersion},
+		ProtoVersions: proto.SupportedVersions,
 	}); err != nil {
-		return err
+		return 0, err
 	}
 	msg, err := ctrl.Read()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	switch msg.Type {
 	case proto.TypeAuthErr:
 		e, _ := proto.Decode[proto.AuthErr](msg)
-		return fmt.Errorf("%w: %w", errFatalHandshake, &authErr{code: e.Code, message: e.Message})
+		return 0, fmt.Errorf("%w: %w", errFatalHandshake, &authErr{code: e.Code, message: e.Message})
 	case proto.TypeAuthOK:
-		return nil
+		ok, err := proto.Decode[proto.AuthOK](msg)
+		if err != nil {
+			return 0, err
+		}
+		if !slices.Contains(proto.SupportedVersions, ok.ProtoVersion) {
+			return 0, fmt.Errorf("%w: edge selected unsupported protocol version %d", errFatalHandshake, ok.ProtoVersion)
+		}
+		return ok.ProtoVersion, nil
 	default:
-		return fmt.Errorf("agent: unexpected reply %q to auth", msg.Type)
+		return 0, fmt.Errorf("agent: unexpected reply %q to auth", msg.Type)
 	}
 }
 
 func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK, error) {
-	if err := a.authenticate(sess, idgen); err != nil {
+	negotiated, err := a.authenticate(sess, idgen)
+	if err != nil {
 		return proto.BindOK{}, err
+	}
+
+	if (len(a.cfg.BasicAuthSHA256) > 0 || len(a.cfg.AllowCIDRs) > 0) && negotiated < 2 {
+		return proto.BindOK{}, fmt.Errorf("%w: edge does not support access control (negotiated protocol v%d); upgrade ngstoned to use --basic-auth/--allow-cidr", errFatalHandshake, negotiated)
+	}
+
+	if a.bindKind() == proto.KindTCP && len(a.cfg.BasicAuthSHA256) > 0 {
+		return proto.BindOK{}, fmt.Errorf("%w: basic auth is not supported for tcp tunnels", errFatalHandshake)
 	}
 
 	ctrl := sess.Control()
 
-	bindID := idgen.Next()
-	if err := ctrl.Write(proto.TypeBind, bindID, proto.Bind{
+	bindMsg := proto.Bind{
 		Kind:       a.bindKind(),
 		Subdomain:  a.cfg.Subdomain,
 		RemotePort: a.cfg.RemotePort,
 		Takeover:   a.bindKind() == proto.KindHTTP,
-	}); err != nil {
+		AllowCIDRs: a.cfg.AllowCIDRs,
+	}
+	if a.bindKind() == proto.KindHTTP {
+		bindMsg.BasicAuthSHA256 = a.cfg.BasicAuthSHA256
+		if len(a.cfg.BasicAuthSHA256) > 0 {
+			bindMsg.BasicAuthRealm = a.cfg.BasicAuthRealm
+		}
+	}
+
+	bindID := idgen.Next()
+	if err := ctrl.Write(proto.TypeBind, bindID, bindMsg); err != nil {
 		return proto.BindOK{}, err
 	}
 	msg, err := ctrl.Read()
@@ -383,7 +413,7 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 	switch msg.Type {
 	case proto.TypeBindErr:
 		e, _ := proto.Decode[proto.BindErr](msg)
-		if e.Code == proto.CodeInvalidSubdomain || e.Code == proto.CodeKindUnsupported {
+		if e.Code == proto.CodeInvalidSubdomain || e.Code == proto.CodeKindUnsupported || e.Code == proto.CodeInvalidAccess {
 			return proto.BindOK{}, fmt.Errorf("%w: bind failed: %s: %s", errFatalHandshake, e.Code, e.Message)
 		}
 		if e.Code == proto.CodeSubdomainTaken && a.cfg.Subdomain != "" {
@@ -504,7 +534,7 @@ func Verify(ctx context.Context, cfg Config) error {
 
 	a := New(cfg)
 	idgen := proto.NewAgentIDGen()
-	if err := a.authenticate(sess, idgen); err != nil {
+	if _, err := a.authenticate(sess, idgen); err != nil {
 		var ae *authErr
 		if errors.As(err, &ae) && ae.code == proto.CodeBadToken {
 			return fmt.Errorf("%w: %s", ErrBadToken, ae.message)

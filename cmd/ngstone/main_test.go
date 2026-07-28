@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"os"
@@ -671,5 +673,307 @@ func TestResolveServerPrecedenceFlagBeatsConfigBeatsDefault(t *testing.T) {
 	}
 	if got := resolveServer("", config.Config{}); got != defaultServer {
 		t.Fatalf("resolveServer with nothing set = %q, want default %q", got, defaultServer)
+	}
+}
+
+func TestParseAllowCIDRsRejectsEmptyEntriesInsteadOfSkippingThem(t *testing.T) {
+	for _, s := range []string{",", " , ", ",,,", " "} {
+		cidrs, err := parseAllowCIDRs(s)
+		if err == nil {
+			t.Fatalf("parseAllowCIDRs(%q) = (%v, nil), want an error (fail-open on empty CIDR entries)", s, cidrs)
+		}
+	}
+}
+
+func TestParseAllowCIDRsEmptyStringMeansNoRestriction(t *testing.T) {
+	cidrs, err := parseAllowCIDRs("")
+	if err != nil {
+		t.Fatalf("parseAllowCIDRs(\"\"): %v", err)
+	}
+	if cidrs != nil {
+		t.Fatalf("parseAllowCIDRs(\"\") = %v, want nil", cidrs)
+	}
+}
+
+func TestParseAllowCIDRsValidEntriesAreTrimmed(t *testing.T) {
+	cidrs, err := parseAllowCIDRs("10.0.0.0/8, 192.168.0.0/16")
+	if err != nil {
+		t.Fatalf("parseAllowCIDRs: %v", err)
+	}
+	want := []string{"10.0.0.0/8", "192.168.0.0/16"}
+	if len(cidrs) != len(want) {
+		t.Fatalf("parseAllowCIDRs = %v, want %v", cidrs, want)
+	}
+	for i := range want {
+		if cidrs[i] != want[i] {
+			t.Fatalf("parseAllowCIDRs[%d] = %q, want %q", i, cidrs[i], want[i])
+		}
+	}
+}
+
+func TestParseAllowCIDRsRejectsInvalidCIDR(t *testing.T) {
+	if _, err := parseAllowCIDRs("notacidr"); err == nil {
+		t.Fatal("parseAllowCIDRs(\"notacidr\") should error")
+	}
+}
+
+func TestParseBasicAuthCredsCorrectDigest(t *testing.T) {
+	digests, err := parseBasicAuthCreds([]string{"user:pass"})
+	if err != nil {
+		t.Fatalf("parseBasicAuthCreds: %v", err)
+	}
+	sum := sha256.Sum256([]byte("user:pass"))
+	want := hex.EncodeToString(sum[:])
+	if len(digests) != 1 || digests[0] != want {
+		t.Fatalf("parseBasicAuthCreds(\"user:pass\") = %v, want [%q]", digests, want)
+	}
+}
+
+func TestParseBasicAuthCredsPasswordWithColonSplitsOnFirstOnly(t *testing.T) {
+	digests, err := parseBasicAuthCreds([]string{"u:a:b"})
+	if err != nil {
+		t.Fatalf("parseBasicAuthCreds: %v", err)
+	}
+	sum := sha256.Sum256([]byte("u:a:b"))
+	want := hex.EncodeToString(sum[:])
+	if len(digests) != 1 || digests[0] != want {
+		t.Fatalf("parseBasicAuthCreds(\"u:a:b\") = %v, want digest of user=%q pass=%q -> %q", digests, "u", "a:b", want)
+	}
+}
+
+func TestParseBasicAuthCredsMissingColonErrors(t *testing.T) {
+	if _, err := parseBasicAuthCreds([]string{"nocolon"}); err == nil {
+		t.Fatal("parseBasicAuthCreds with no colon should error")
+	}
+}
+
+func TestParseBasicAuthCredsEmptyUserErrors(t *testing.T) {
+	if _, err := parseBasicAuthCreds([]string{":pass"}); err == nil {
+		t.Fatal("parseBasicAuthCreds with empty user should error")
+	}
+}
+
+func TestParseBasicAuthCredsEmptyPassErrors(t *testing.T) {
+	if _, err := parseBasicAuthCreds([]string{"user:"}); err == nil {
+		t.Fatal("parseBasicAuthCreds with empty pass should error")
+	}
+}
+
+func TestParseBasicAuthCredsTooManyEntriesErrors(t *testing.T) {
+	pairs := make([]string, maxAccessListLen+1)
+	for i := range pairs {
+		pairs[i] = "user:pass"
+	}
+	if _, err := parseBasicAuthCreds(pairs); err == nil {
+		t.Fatalf("parseBasicAuthCreds with %d entries should error (max %d)", len(pairs), maxAccessListLen)
+	}
+}
+
+func TestReadBasicAuthFileIgnoresBlankLinesAndComments(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "creds.txt")
+	content := "alice:secret1\n\n# a comment\nbob:secret2\n   \n#another comment\ncarol:secret3\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	pairs, err := readBasicAuthFile(path)
+	if err != nil {
+		t.Fatalf("readBasicAuthFile: %v", err)
+	}
+	want := []string{"alice:secret1", "bob:secret2", "carol:secret3"}
+	if len(pairs) != len(want) {
+		t.Fatalf("readBasicAuthFile = %v, want %v", pairs, want)
+	}
+	for i := range want {
+		if pairs[i] != want[i] {
+			t.Fatalf("readBasicAuthFile[%d] = %q, want %q", i, pairs[i], want[i])
+		}
+	}
+}
+
+func TestSplitBasicAuthEnvIgnoresBlankLines(t *testing.T) {
+	pairs := splitBasicAuthEnv("alice:secret1\n\nbob:secret2\n   \n")
+	want := []string{"alice:secret1", "bob:secret2"}
+	if len(pairs) != len(want) {
+		t.Fatalf("splitBasicAuthEnv = %v, want %v", pairs, want)
+	}
+	for i := range want {
+		if pairs[i] != want[i] {
+			t.Fatalf("splitBasicAuthEnv[%d] = %q, want %q", i, pairs[i], want[i])
+		}
+	}
+}
+
+func TestResolveBasicAuthPairsPrecedenceFlagBeatsFileBeatsEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "creds.txt")
+	if err := os.WriteFile(path, []byte("filealice:filepass\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	t.Setenv("NGSTONE_BASIC_AUTH", "envalice:envpass")
+
+	got, err := resolveBasicAuthPairs([]string{"flagalice:flagpass"}, path, os.Getenv("NGSTONE_BASIC_AUTH"))
+	if err != nil {
+		t.Fatalf("resolveBasicAuthPairs: %v", err)
+	}
+	if len(got) != 1 || got[0] != "flagalice:flagpass" {
+		t.Fatalf("resolveBasicAuthPairs with flag set = %v, want flag to win", got)
+	}
+
+	got, err = resolveBasicAuthPairs(nil, path, os.Getenv("NGSTONE_BASIC_AUTH"))
+	if err != nil {
+		t.Fatalf("resolveBasicAuthPairs: %v", err)
+	}
+	if len(got) != 1 || got[0] != "filealice:filepass" {
+		t.Fatalf("resolveBasicAuthPairs with flag empty = %v, want file to win over env", got)
+	}
+
+	got, err = resolveBasicAuthPairs(nil, "", os.Getenv("NGSTONE_BASIC_AUTH"))
+	if err != nil {
+		t.Fatalf("resolveBasicAuthPairs: %v", err)
+	}
+	if len(got) != 1 || got[0] != "envalice:envpass" {
+		t.Fatalf("resolveBasicAuthPairs with flag and file empty = %v, want env value", got)
+	}
+
+	got, err = resolveBasicAuthPairs(nil, "", "")
+	if err != nil {
+		t.Fatalf("resolveBasicAuthPairs: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("resolveBasicAuthPairs with nothing set = %v, want nil", got)
+	}
+}
+
+func TestResolveBasicAuthPairsEmptyFileFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.txt")
+	if err := os.WriteFile(path, []byte(""), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, err := resolveBasicAuthPairs(nil, path, "")
+	if err == nil {
+		t.Fatalf("resolveBasicAuthPairs with empty file = (%v, nil), want an error (fail closed instead of an open tunnel)", got)
+	}
+}
+
+func TestResolveBasicAuthPairsCommentsOnlyFileFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "comments.txt")
+	content := "# only comments here\n\n   \n# another comment\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, err := resolveBasicAuthPairs(nil, path, "")
+	if err == nil {
+		t.Fatalf("resolveBasicAuthPairs with comments/blank-only file = (%v, nil), want an error (fail closed instead of an open tunnel)", got)
+	}
+}
+
+func TestResolveBasicAuthPairsFileWithOnePairYieldsOneDigest(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "one.txt")
+	if err := os.WriteFile(path, []byte("alice:secret1\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	pairs, err := resolveBasicAuthPairs(nil, path, "")
+	if err != nil {
+		t.Fatalf("resolveBasicAuthPairs: %v", err)
+	}
+	digests, err := parseBasicAuthCreds(pairs)
+	if err != nil {
+		t.Fatalf("parseBasicAuthCreds: %v", err)
+	}
+	if len(digests) != 1 {
+		t.Fatalf("digests = %v, want exactly 1", digests)
+	}
+}
+
+func TestResolveBasicAuthPairsWhitespaceOnlyEnvFailsClosed(t *testing.T) {
+	t.Setenv("NGSTONE_BASIC_AUTH", "   ")
+
+	got, err := resolveBasicAuthPairs(nil, "", os.Getenv("NGSTONE_BASIC_AUTH"))
+	if err == nil {
+		t.Fatalf("resolveBasicAuthPairs with whitespace-only NGSTONE_BASIC_AUTH = (%v, nil), want an error (fail closed instead of an open tunnel)", got)
+	}
+}
+
+func TestResolveBasicAuthPairsEmptyEnvIsNotExplicitSelection(t *testing.T) {
+	t.Setenv("NGSTONE_BASIC_AUTH", "")
+
+	got, err := resolveBasicAuthPairs(nil, "", os.Getenv("NGSTONE_BASIC_AUTH"))
+	if err != nil {
+		t.Fatalf("resolveBasicAuthPairs with NGSTONE_BASIC_AUTH=\"\": %v", err)
+	}
+	if got != nil {
+		t.Fatalf("resolveBasicAuthPairs with NGSTONE_BASIC_AUTH=\"\" = %v, want nil (no auth requested)", got)
+	}
+}
+
+func TestResolveBasicAuthPairsUnsetEnvIsNotExplicitSelection(t *testing.T) {
+	got, err := resolveBasicAuthPairs(nil, "", os.Getenv("NGSTONE_BASIC_AUTH_UNSET_FOR_TEST"))
+	if err != nil {
+		t.Fatalf("resolveBasicAuthPairs with unset env: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("resolveBasicAuthPairs with unset env = %v, want nil (no auth requested)", got)
+	}
+}
+
+func TestParseBasicAuthCredsErrorDoesNotLeakSecretEmptyUser(t *testing.T) {
+	_, err := parseBasicAuthCreds([]string{":supersecret"})
+	if err == nil {
+		t.Fatal("parseBasicAuthCreds with empty user should error")
+	}
+	if strings.Contains(err.Error(), "supersecret") {
+		t.Fatalf("parseBasicAuthCreds error leaked the secret: %v", err)
+	}
+}
+
+func TestParseBasicAuthCredsErrorDoesNotLeakSecretEmptyPass(t *testing.T) {
+	_, err := parseBasicAuthCreds([]string{"user:supersecret"})
+	_ = err
+
+	_, err = parseBasicAuthCreds([]string{"supersecretuser:"})
+	if err == nil {
+		t.Fatal("parseBasicAuthCreds with empty pass should error")
+	}
+	if strings.Contains(err.Error(), "supersecretuser") {
+		t.Fatalf("parseBasicAuthCreds error leaked the user: %v", err)
+	}
+}
+
+func TestParseBasicAuthCredsErrorDoesNotLeakSecretNoColon(t *testing.T) {
+	_, err := parseBasicAuthCreds([]string{"nocolonsupersecret"})
+	if err == nil {
+		t.Fatal("parseBasicAuthCreds with no colon should error")
+	}
+	if strings.Contains(err.Error(), "nocolonsupersecret") {
+		t.Fatalf("parseBasicAuthCreds error leaked the entry: %v", err)
+	}
+}
+
+func TestReadBasicAuthFileMalformedLineErrorDoesNotLeakSecret(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.txt")
+	content := "alice:secret1\nnocolonsupersecret\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := readBasicAuthFile(path)
+	if err == nil {
+		t.Fatal("readBasicAuthFile with a malformed line should error")
+	}
+	if strings.Contains(err.Error(), "nocolonsupersecret") {
+		t.Fatalf("readBasicAuthFile error leaked the line content: %v", err)
+	}
+	if !strings.Contains(err.Error(), "line 2") {
+		t.Fatalf("readBasicAuthFile error = %v, want it to identify line 2", err)
 	}
 }

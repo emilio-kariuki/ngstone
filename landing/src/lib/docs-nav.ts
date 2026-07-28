@@ -54,6 +54,11 @@ export const NAV: NavGroup[] = [
         description: "Pick your own name instead of a random one.",
       },
       {
+        title: "Access control",
+        href: "/docs/guides/access-control",
+        description: "Per-tunnel HTTP basic auth and source-IP allowlisting.",
+      },
+      {
         title: "Using the request inspector",
         href: "/docs/guides/request-inspector",
         description: "The terminal dashboard that shows every request live.",

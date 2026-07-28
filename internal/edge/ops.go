@@ -20,6 +20,9 @@ var (
 	metricRejectedGlobalCap   = expvar.NewInt("ngstoned_rejected_global_cap_total")
 	metricRejectedSessionCap  = expvar.NewInt("ngstoned_rejected_session_cap_total")
 	metricRejected413         = expvar.NewInt("ngstoned_rejected_413_total")
+
+	metricRejectedForbiddenCIDR = expvar.NewInt("ngstoned_rejected_forbidden_cidr_total")
+	metricRejectedUnauthorized  = expvar.NewInt("ngstoned_rejected_unauthorized_total")
 )
 
 type certStatusJSON struct {

@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -255,15 +258,75 @@ func cmdAuth(args []string) int {
 	return 0
 }
 
+type stringSliceValue []string
+
+func (s *stringSliceValue) String() string {
+	if s == nil {
+		return ""
+	}
+	return strings.Join(*s, ",")
+}
+
+func (s *stringSliceValue) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+const maxAccessListLen = 64
+
+func parseBasicAuthCreds(pairs []string) ([]string, error) {
+	if len(pairs) > maxAccessListLen {
+		return nil, fmt.Errorf("too many -basic-auth entries (max %d)", maxAccessListLen)
+	}
+	digests := make([]string, 0, len(pairs))
+	for i, pair := range pairs {
+		user, pass, ok := strings.Cut(pair, ":")
+		if !ok || user == "" || pass == "" {
+			return nil, fmt.Errorf("invalid --basic-auth entry #%d: expected user:pass with a non-empty user and password", i+1)
+		}
+		sum := sha256.Sum256([]byte(user + ":" + pass))
+		digests = append(digests, hex.EncodeToString(sum[:]))
+	}
+	return digests, nil
+}
+
+func parseAllowCIDRs(s string) ([]string, error) {
+	if s == "" {
+		return nil, nil
+	}
+	parts := strings.Split(s, ",")
+	cidrs := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return nil, fmt.Errorf("--allow-cidr %q contains no valid CIDRs", s)
+		}
+		if _, err := netip.ParsePrefix(p); err != nil {
+			return nil, fmt.Errorf("invalid -allow-cidr entry %q: %v", p, err)
+		}
+		cidrs = append(cidrs, p)
+	}
+	if len(cidrs) == 0 {
+		return nil, fmt.Errorf("--allow-cidr %q contains no valid CIDRs", s)
+	}
+	if len(cidrs) > maxAccessListLen {
+		return nil, fmt.Errorf("too many -allow-cidr entries (max %d)", maxAccessListLen)
+	}
+	return cidrs, nil
+}
+
 type portFlags struct {
-	subdomain  string
-	server     string
-	token      string
-	instanceID string
-	insecure   bool
-	serverName string
-	pin        string
-	noTUI      bool
+	subdomain     string
+	server        string
+	token         string
+	instanceID    string
+	insecure      bool
+	serverName    string
+	pin           string
+	noTUI         bool
+	basicAuth     stringSliceValue
+	basicAuthFile string
+	allowCIDR     string
 }
 
 func newPortFlagSet() (*flag.FlagSet, *portFlags) {
@@ -278,7 +341,75 @@ func newPortFlagSet() (*flag.FlagSet, *portFlags) {
 	fs.StringVar(&pf.serverName, "server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
 	fs.StringVar(&pf.pin, "pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation")
 	fs.BoolVar(&pf.noTUI, "no-tui", false, "disable the terminal inspector UI and log plain text to stderr")
+	fs.Var(&pf.basicAuth, "basic-auth", "require HTTP basic auth (user:pass); repeatable for multiple credentials; WARNING: visible to other local users via ps/proc for this process's lifetime, prefer -basic-auth-file or $NGSTONE_BASIC_AUTH")
+	fs.StringVar(&pf.basicAuthFile, "basic-auth-file", "", "path to a file with one user:pass credential per line (blank lines and lines starting with # are ignored); safer than -basic-auth")
+	fs.StringVar(&pf.allowCIDR, "allow-cidr", "", "comma-separated CIDRs allowed to reach the tunnel (empty = allow all)")
 	return fs, pf
+}
+
+func splitBasicAuthEnv(v string) []string {
+	lines := strings.Split(v, "\n")
+	pairs := make([]string, 0, len(lines))
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l == "" {
+			continue
+		}
+		pairs = append(pairs, l)
+	}
+	return pairs
+}
+
+func readBasicAuthFile(path string) ([]string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading -basic-auth-file: %w", err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		fmt.Fprintf(os.Stderr, "ngstone: warning: %s is group/world readable; consider chmod 600 to protect credentials\n", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading -basic-auth-file: %w", err)
+	}
+	lines := strings.Split(string(data), "\n")
+	pairs := make([]string, 0, len(lines))
+	for i, l := range lines {
+		l = strings.TrimSpace(l)
+		if l == "" || strings.HasPrefix(l, "#") {
+			continue
+		}
+		user, pass, ok := strings.Cut(l, ":")
+		if !ok || user == "" || pass == "" {
+			return nil, fmt.Errorf("--basic-auth-file %s line %d: expected user:pass with a non-empty user and password", path, i+1)
+		}
+		pairs = append(pairs, l)
+	}
+	return pairs, nil
+}
+
+func resolveBasicAuthPairs(flagPairs []string, filePath, envVal string) ([]string, error) {
+	if len(flagPairs) > 0 {
+		return flagPairs, nil
+	}
+	if filePath != "" {
+		pairs, err := readBasicAuthFile(filePath)
+		if err != nil {
+			return nil, err
+		}
+		if len(pairs) == 0 {
+			return nil, fmt.Errorf("--basic-auth-file %s contains no credentials", filePath)
+		}
+		return pairs, nil
+	}
+	if envVal != "" {
+		pairs := splitBasicAuthEnv(envVal)
+		if len(pairs) == 0 {
+			return nil, fmt.Errorf("NGSTONE_BASIC_AUTH is set but contains no credentials")
+		}
+		return pairs, nil
+	}
+	return nil, nil
 }
 
 func cmdPort(args []string) int {
@@ -311,12 +442,31 @@ func cmdPort(args []string) int {
 	}
 	server := resolveServer(pf.server, cfg)
 
+	basicAuthPairs, err := resolveBasicAuthPairs(pf.basicAuth, pf.basicAuthFile, os.Getenv("NGSTONE_BASIC_AUTH"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
+		return 2
+	}
+	basicAuthDigests, err := parseBasicAuthCreds(basicAuthPairs)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
+		return 2
+	}
+	allowCIDRs, err := parseAllowCIDRs(pf.allowCIDR)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
+		return 2
+	}
+
 	acfg := agent.Config{
 		ControlAddr: server,
 		Token:       token,
 		Subdomain:   pf.subdomain,
 		TargetURL:   targetURL,
 		InstanceID:  pf.instanceID,
+
+		BasicAuthSHA256: basicAuthDigests,
+		AllowCIDRs:      allowCIDRs,
 
 		Insecure:   pf.insecure,
 		ServerName: pf.serverName,
@@ -385,6 +535,7 @@ type tcpFlags struct {
 	insecure   bool
 	serverName string
 	pin        string
+	allowCIDR  string
 }
 
 func newTCPFlagSet() (*flag.FlagSet, *tcpFlags) {
@@ -398,6 +549,7 @@ func newTCPFlagSet() (*flag.FlagSet, *tcpFlags) {
 	fs.BoolVar(&tf.insecure, "insecure", false, "dial the control plane in plaintext (dev/test only, no certificates involved)")
 	fs.StringVar(&tf.serverName, "server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
 	fs.StringVar(&tf.pin, "pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation")
+	fs.StringVar(&tf.allowCIDR, "allow-cidr", "", "comma-separated CIDRs allowed to reach the tunnel (empty = allow all)")
 	return fs, tf
 }
 
@@ -431,6 +583,12 @@ func cmdTCP(args []string) int {
 	}
 	server := resolveServer(tf.server, cfg)
 
+	allowCIDRs, err := parseAllowCIDRs(tf.allowCIDR)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
+		return 2
+	}
+
 	acfg := agent.Config{
 		ControlAddr: server,
 		Token:       token,
@@ -438,6 +596,8 @@ func cmdTCP(args []string) int {
 		TargetURL:   target,
 		RemotePort:  tf.remotePort,
 		InstanceID:  tf.instanceID,
+
+		AllowCIDRs: allowCIDRs,
 
 		Insecure:   tf.insecure,
 		ServerName: tf.serverName,

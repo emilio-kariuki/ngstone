@@ -49,11 +49,11 @@ func randomSubdomain() string {
 
 var errNoFreeName = errors.New("edge: could not assign a free subdomain")
 
-func assignRandomHostname(r *Registry, as *AgentSession, takeover bool, domain string, genName func() string) (hostname string, evicted *AgentSession, err error) {
+func assignRandomHostname(r *Registry, as *AgentSession, takeover bool, domain string, genName func() string, ac *accessControl) (hostname string, evicted *AgentSession, err error) {
 	for attempt := 0; attempt < maxRandomAttempts; attempt++ {
 		candidate := genName()
 		hostname = candidate + "." + domain
-		_, evicted, err = r.Bind(hostname, as, takeover)
+		_, evicted, err = r.Bind(hostname, as, takeover, ac)
 		if err == nil {
 			return hostname, evicted, nil
 		}

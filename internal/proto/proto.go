@@ -5,7 +5,9 @@ import (
 	"sync/atomic"
 )
 
-const ProtoVersion = 1
+const ProtoVersion = 2
+
+var SupportedVersions = []int{2, 1}
 
 const (
 	TypeAuth       = "auth"
@@ -36,6 +38,7 @@ const (
 	CodeInternal         = "internal"
 	CodePortUnavailable  = "port_unavailable"
 	CodeTooManyBinds     = "too_many_binds"
+	CodeInvalidAccess    = "invalid_access"
 )
 
 const (
@@ -72,6 +75,10 @@ type Bind struct {
 	Subdomain  string `json:"subdomain,omitempty"`
 	RemotePort int    `json:"remote_port,omitempty"`
 	Takeover   bool   `json:"takeover,omitempty"`
+
+	BasicAuthSHA256 []string `json:"basic_auth_sha256,omitempty"`
+	BasicAuthRealm  string   `json:"basic_auth_realm,omitempty"`
+	AllowCIDRs      []string `json:"allow_cidrs,omitempty"`
 }
 
 type BindOK struct {

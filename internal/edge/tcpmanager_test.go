@@ -173,7 +173,7 @@ func TestTCPAllocateFreeReuse(t *testing.T) {
 	fx := newTCPFixture(t, echoHandler)
 	defer fx.cleanup()
 
-	p1, err := fx.mgr.bind(fx.as, 0, "example.com")
+	p1, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("first bind: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestTCPAllocateFreeReuse(t *testing.T) {
 		t.Fatalf("bySession should be empty after release, has %d", nSess)
 	}
 
-	p2, err := fx.mgr.bind(fx.as, p1, "example.com")
+	p2, err := fx.mgr.bind(fx.as, p1, "example.com", nil)
 	if err != nil {
 		t.Fatalf("re-bind freed port %d: %v", p1, err)
 	}
@@ -225,14 +225,14 @@ func TestTCPExhaustionReturnsError(t *testing.T) {
 	for i := 0; i < total; i++ {
 		owner := fx.newOwner()
 		owners = append(owners, owner)
-		if _, err := fx.mgr.bind(owner, 0, "example.com"); err != nil {
+		if _, err := fx.mgr.bind(owner, 0, "example.com", nil); err != nil {
 			t.Fatalf("bind %d/%d failed early: %v", i+1, total, err)
 		}
 	}
 
 	lastOwner := fx.newOwner()
 	owners = append(owners, lastOwner)
-	if _, err := fx.mgr.bind(lastOwner, 0, "example.com"); err != errPortUnavailable {
+	if _, err := fx.mgr.bind(lastOwner, 0, "example.com", nil); err != errPortUnavailable {
 		t.Fatalf("expected errPortUnavailable at exhaustion, got %v", err)
 	}
 }
@@ -242,7 +242,7 @@ func TestTCPSpecificPortHonoredAndRejectedWhenTaken(t *testing.T) {
 	defer fx.cleanup()
 
 	want := 20005
-	got, err := fx.mgr.bind(fx.as, want, "example.com")
+	got, err := fx.mgr.bind(fx.as, want, "example.com", nil)
 	if err != nil {
 		t.Fatalf("specific bind: %v", err)
 	}
@@ -250,11 +250,11 @@ func TestTCPSpecificPortHonoredAndRejectedWhenTaken(t *testing.T) {
 		t.Fatalf("specific port not honored: want %d got %d", want, got)
 	}
 
-	if _, err := fx.mgr.bind(fx.as, want, "example.com"); err != errPortUnavailable {
+	if _, err := fx.mgr.bind(fx.as, want, "example.com", nil); err != errPortUnavailable {
 		t.Fatalf("second request for taken port should be errPortUnavailable, got %v", err)
 	}
 
-	if _, err := fx.mgr.bind(fx.as, 30000, "example.com"); err != errPortUnavailable {
+	if _, err := fx.mgr.bind(fx.as, 30000, "example.com", nil); err != errPortUnavailable {
 		t.Fatalf("out-of-range port should be errPortUnavailable, got %v", err)
 	}
 }
@@ -275,7 +275,7 @@ func TestTCPConcurrentBindsNeverDoubleAllocate(t *testing.T) {
 		owner := fx.newOwner()
 		go func() {
 			defer wg.Done()
-			p, err := fx.mgr.bind(owner, 0, "example.com")
+			p, err := fx.mgr.bind(owner, 0, "example.com", nil)
 			if err != nil {
 				return
 			}
@@ -308,7 +308,7 @@ func TestTCPEndToEndEchoSequential(t *testing.T) {
 	fx := newTCPFixture(t, echoHandler)
 	defer fx.cleanup()
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestTCPEndToEndEchoConcurrent(t *testing.T) {
 	fx := newTCPFixture(t, echoHandler)
 	defer fx.cleanup()
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -386,7 +386,7 @@ func TestTCPHalfClosePropagation(t *testing.T) {
 	fx := newTCPFixture(t, handler)
 	defer fx.cleanup()
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -467,7 +467,7 @@ func TestTCPHalfCloseAgentSideClientKeepsSending(t *testing.T) {
 	fx := newTCPFixture(t, handler)
 	defer fx.cleanup()
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -513,7 +513,7 @@ func TestTCPReleaseClosesListenersAndRefusesConnect(t *testing.T) {
 	fx := newTCPFixture(t, echoHandler)
 	defer fx.cleanup()
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -548,14 +548,14 @@ func TestTCPReleaseIsIdempotent(t *testing.T) {
 	fx := newTCPFixture(t, echoHandler)
 	defer fx.cleanup()
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 	fx.mgr.releaseSession(fx.as)
 	fx.mgr.releaseSession(fx.as)
 
-	p2, err := fx.mgr.bind(fx.as, port, "example.com")
+	p2, err := fx.mgr.bind(fx.as, port, "example.com", nil)
 	if err != nil {
 		t.Fatalf("re-bind after double release: %v", err)
 	}
@@ -575,7 +575,7 @@ func TestTCPPortInUseRollsBackAllocation(t *testing.T) {
 	}
 	defer blocker.Close()
 
-	if _, err := fx.mgr.bind(fx.as, occupied, "example.com"); err == nil {
+	if _, err := fx.mgr.bind(fx.as, occupied, "example.com", nil); err == nil {
 		t.Fatalf("bind on externally-occupied port should fail")
 	}
 
@@ -589,7 +589,7 @@ func TestTCPPortInUseRollsBackAllocation(t *testing.T) {
 	blocker.Close()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		p, err := fx.mgr.bind(fx.as, occupied, "example.com")
+		p, err := fx.mgr.bind(fx.as, occupied, "example.com", nil)
 		if err == nil {
 			if p != occupied {
 				t.Fatalf("expected to rebind %d, got %d", occupied, p)
@@ -608,7 +608,7 @@ func TestTCPBackpressureClosesWhenStreamSemFull(t *testing.T) {
 	defer fx.cleanup()
 	fx.as.streamSem = newGlobalSemaphore(0)
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -628,7 +628,7 @@ func TestTCPReleasesStreamSlot(t *testing.T) {
 	defer fx.cleanup()
 	fx.as.streamSem = newGlobalSemaphore(1)
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -669,7 +669,7 @@ func TestTCPInflightDrainsAfterRelease(t *testing.T) {
 	fx := newTCPFixture(t, echoHandler)
 	defer fx.cleanup()
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -704,7 +704,7 @@ func TestTCPNoGoroutineLeak(t *testing.T) {
 	defer fx.cleanup()
 	fx.mgr.forceCloseGrace = 200 * time.Millisecond
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -747,7 +747,7 @@ func TestTCPForceCloseTearsDownIdleConnWithinGrace(t *testing.T) {
 	defer fx.cleanup()
 	fx.mgr.forceCloseGrace = 200 * time.Millisecond
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -783,7 +783,7 @@ func TestTCPGlobalCapRejectsBeyondLimit(t *testing.T) {
 	const capN = 2
 	fx.mgr.globalSem = newGlobalSemaphore(capN)
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -829,7 +829,7 @@ func TestTCPEphemeralBindSkipsExternallyOccupiedFirstCandidate(t *testing.T) {
 	}
 	defer blocker.Close()
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("ephemeral bind should skip the externally-occupied first candidate: %v", err)
 	}
@@ -848,12 +848,12 @@ func TestTCPPerSessionBindCapRejectsBeyondLimit(t *testing.T) {
 	before := metricTCPRejectedBindCap.Value()
 
 	for i := 0; i < maxBindsPerSession; i++ {
-		if _, err := fx.mgr.bind(fx.as, 0, "example.com"); err != nil {
+		if _, err := fx.mgr.bind(fx.as, 0, "example.com", nil); err != nil {
 			t.Fatalf("bind %d/%d: %v", i+1, maxBindsPerSession, err)
 		}
 	}
 
-	if _, err := fx.mgr.bind(fx.as, 0, "example.com"); !errors.Is(err, errTooManyBinds) {
+	if _, err := fx.mgr.bind(fx.as, 0, "example.com", nil); !errors.Is(err, errTooManyBinds) {
 		t.Fatalf("bind past maxBindsPerSession: got %v, want errTooManyBinds", err)
 	}
 
@@ -965,7 +965,7 @@ func TestTCPForceCloseDrainsBlackholePeerWithoutFIN(t *testing.T) {
 	defer fx.cleanup()
 	fx.mgr.forceCloseGrace = 200 * time.Millisecond
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -990,7 +990,7 @@ func TestTCPHandleConnAbortsWhenReleasingSetBeforeDial(t *testing.T) {
 	fx := newTCPFixture(t, echoHandler)
 	defer fx.cleanup()
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -1035,7 +1035,7 @@ func TestTCPEphemeralBindSkipsSeveralOccupiedCandidates(t *testing.T) {
 		blockers = append(blockers, b)
 	}
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com")
+	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("ephemeral bind should skip past %d occupied candidates: %v", occupyCount, err)
 	}
@@ -1045,35 +1045,56 @@ func TestTCPEphemeralBindSkipsSeveralOccupiedCandidates(t *testing.T) {
 }
 
 func TestTCPEphemeralBindSucceedsPastTwentyOccupiedCandidates(t *testing.T) {
-	baseLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("reserve base port: %v", err)
-	}
-	lo := baseLn.Addr().(*net.TCPAddr).Port
-	baseLn.Close()
-	hi := lo + 40
-
-	mgr := newTCPManager(lo, hi, "127.0.0.1", nil)
-	as := &AgentSession{ID: randomHex(4), streamSem: newGlobalSemaphore(64)}
-	defer mgr.releaseSession(as)
-
 	const occupyCount = 20
-	var blockers []net.Listener
+	const maxAttempts = 5
+
+	var (
+		lo, hi   int
+		blockers []net.Listener
+	)
 	defer func() {
 		for _, b := range blockers {
 			b.Close()
 		}
 	}()
-	for i := 0; i < occupyCount; i++ {
-		p := lo + i
-		b, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(p)))
-		if err != nil {
-			t.Fatalf("occupy port %d: %v", p, err)
+
+	for attempt := 1; ; attempt++ {
+		for _, b := range blockers {
+			b.Close()
 		}
-		blockers = append(blockers, b)
+		blockers = nil
+
+		baseLn, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("reserve base port: %v", err)
+		}
+		lo = baseLn.Addr().(*net.TCPAddr).Port
+		baseLn.Close()
+		hi = lo + 40
+
+		occupied := true
+		for i := 0; i < occupyCount; i++ {
+			p := lo + i
+			b, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(p)))
+			if err != nil {
+				if attempt >= maxAttempts {
+					t.Fatalf("occupy port %d (attempt %d/%d): %v", p, attempt, maxAttempts, err)
+				}
+				occupied = false
+				break
+			}
+			blockers = append(blockers, b)
+		}
+		if occupied {
+			break
+		}
 	}
 
-	port, err := mgr.bind(as, 0, "example.com")
+	mgr := newTCPManager(lo, hi, "127.0.0.1", nil)
+	as := &AgentSession{ID: randomHex(4), streamSem: newGlobalSemaphore(64)}
+	defer mgr.releaseSession(as)
+
+	port, err := mgr.bind(as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("ephemeral bind should succeed past %d occupied candidates: %v", occupyCount, err)
 	}
@@ -1182,7 +1203,7 @@ func TestTCPHandleConnSelfAbortsOnLateOpenStreamAfterReleaseSnapshot(t *testing.
 	mgr := newTCPManager(lo, lo+9, "127.0.0.1", nil)
 	mgr.forceCloseGrace = 150 * time.Millisecond
 
-	port, err := mgr.bind(as, 0, "example.com")
+	port, err := mgr.bind(as, 0, "example.com", nil)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
