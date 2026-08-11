@@ -12,6 +12,10 @@ func (a *Agent) buildProxy(target *url.URL) http.Handler {
 	rewrite := func(pr *httputil.ProxyRequest) {
 		pr.Out.URL.Scheme = target.Scheme
 		pr.Out.URL.Host = target.Host
+		pr.Out.Host = pr.In.Host
+		if a.cfg.HostHeader != "" {
+			pr.Out.Host = a.cfg.HostHeader
+		}
 		pr.Out.Header["Forwarded"] = pr.In.Header["Forwarded"]
 		pr.Out.Header["X-Forwarded-For"] = pr.In.Header["X-Forwarded-For"]
 		pr.Out.Header["X-Forwarded-Host"] = pr.In.Header["X-Forwarded-Host"]

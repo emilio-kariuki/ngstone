@@ -64,6 +64,7 @@ Examples:
   ngstone auth <token>
   ngstone port 3000
   ngstone port 3000 --subdomain demo
+  ngstone port 3000 --host-header demo.localhost:3000
   ngstone tcp 5432
   ngstone tcp db.local:5432 --remote-port 15432
 `
@@ -323,6 +324,7 @@ type portFlags struct {
 	insecure      bool
 	serverName    string
 	pin           string
+	hostHeader    string
 	noTUI         bool
 	basicAuth     stringSliceValue
 	basicAuthFile string
@@ -340,6 +342,7 @@ func newPortFlagSet() (*flag.FlagSet, *portFlags) {
 	fs.BoolVar(&pf.insecure, "insecure", false, "dial the control plane in plaintext (dev/test only, no certificates involved)")
 	fs.StringVar(&pf.serverName, "server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
 	fs.StringVar(&pf.pin, "pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation")
+	fs.StringVar(&pf.hostHeader, "host-header", "", "Host header sent to the local app (empty = preserve the public host)")
 	fs.BoolVar(&pf.noTUI, "no-tui", false, "disable the terminal inspector UI and log plain text to stderr")
 	fs.Var(&pf.basicAuth, "basic-auth", "require HTTP basic auth (user:pass); repeatable for multiple credentials; WARNING: visible to other local users via ps/proc for this process's lifetime, prefer -basic-auth-file or $NGSTONE_BASIC_AUTH")
 	fs.StringVar(&pf.basicAuthFile, "basic-auth-file", "", "path to a file with one user:pass credential per line (blank lines and lines starting with # are ignored); safer than -basic-auth")
@@ -463,6 +466,7 @@ func cmdPort(args []string) int {
 		Token:       token,
 		Subdomain:   pf.subdomain,
 		TargetURL:   targetURL,
+		HostHeader:  pf.hostHeader,
 		InstanceID:  pf.instanceID,
 
 		BasicAuthSHA256: basicAuthDigests,
@@ -868,6 +872,7 @@ func legacyMain() {
 	token := flag.String("token", "", "shared auth token (defaults to NGSTONE_TOKEN env var)")
 	target := flag.String("target", "http://127.0.0.1:3000", "local target URL to forward requests to")
 	subdomain := flag.String("subdomain", "", "requested subdomain (empty = server-assigned)")
+	hostHeader := flag.String("host-header", "", "Host header sent to the local app (empty = preserve the public host)")
 	instanceID := flag.String("instance-id", "", "internal/undocumented: force a specific instance id (testing only)")
 
 	insecure := flag.Bool("insecure", false, "dial the control plane in plaintext (dev/test only, no certificates involved)")
@@ -912,6 +917,7 @@ func legacyMain() {
 		Token:       tok,
 		Subdomain:   *subdomain,
 		TargetURL:   *target,
+		HostHeader:  *hostHeader,
 		InstanceID:  *instanceID,
 
 		Insecure:   *insecure,

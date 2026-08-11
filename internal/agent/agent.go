@@ -51,6 +51,7 @@ type Config struct {
 	Token       string
 	Subdomain   string
 	TargetURL   string
+	HostHeader  string
 
 	Kind       string
 	RemotePort int
