@@ -232,9 +232,10 @@ func (e *fakeEdge) openUpgrade(sess tunnel.Session, reqID, path string) (net.Con
 }
 
 type localApp struct {
-	srv  *httptest.Server
-	mu   sync.Mutex
-	seen []http.Header
+	srv       *httptest.Server
+	mu        sync.Mutex
+	seen      []http.Header
+	seenHosts []string
 }
 
 func serveEchoUpgrade(w http.ResponseWriter, r *http.Request) {
@@ -276,6 +277,7 @@ func newLocalApp(t *testing.T) *localApp {
 	app.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		app.mu.Lock()
 		app.seen = append(app.seen, r.Header.Clone())
+		app.seenHosts = append(app.seenHosts, r.Host)
 		app.mu.Unlock()
 		if r.URL.Path == "/echo" {
 			serveEchoUpgrade(w, r)
@@ -299,6 +301,57 @@ func (l *localApp) lastHeader() http.Header {
 		return nil
 	}
 	return l.seen[len(l.seen)-1]
+}
+
+func (l *localApp) lastHost() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.seenHosts) == 0 {
+		return ""
+	}
+	return l.seenHosts[len(l.seenHosts)-1]
+}
+
+func TestHostHeaderOverride(t *testing.T) {
+	app := newLocalApp(t)
+	a := New(Config{TargetURL: app.srv.URL, HostHeader: "demo.localhost:3000"})
+	target := a.Target()
+	if target == nil {
+		t.Fatal("Target() = nil, want parsed URL")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://demo.ngstone.site/", nil)
+	req.Host = "demo.ngstone.site"
+	rec := httptest.NewRecorder()
+	a.buildProxy(target).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := app.lastHost(); got != "demo.localhost:3000" {
+		t.Fatalf("local app Host = %q, want %q", got, "demo.localhost:3000")
+	}
+}
+
+func TestHostHeaderDefaultsToIncomingHost(t *testing.T) {
+	app := newLocalApp(t)
+	a := New(Config{TargetURL: app.srv.URL})
+	target := a.Target()
+	if target == nil {
+		t.Fatal("Target() = nil, want parsed URL")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://demo.ngstone.site/", nil)
+	req.Host = "demo.ngstone.site:3000"
+	rec := httptest.NewRecorder()
+	a.buildProxy(target).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := app.lastHost(); got != "demo.ngstone.site:3000" {
+		t.Fatalf("local app Host = %q, want %q", got, "demo.ngstone.site:3000")
+	}
 }
 
 func startAgent(t *testing.T, cfg Config) (*Agent, context.CancelFunc, chan error) {

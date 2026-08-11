@@ -400,6 +400,20 @@ func TestPortFlagSetParsesNoTUI(t *testing.T) {
 	}
 }
 
+func TestPortFlagSetParsesHostHeader(t *testing.T) {
+	fs, pf := newPortFlagSet()
+	positionals, err := parsePermissive(fs, []string{"3000", "--host-header", "demo.localhost:3000"})
+	if err != nil {
+		t.Fatalf("parsePermissive: %v", err)
+	}
+	if len(positionals) != 1 || positionals[0] != "3000" {
+		t.Fatalf("positionals = %v, want [3000]", positionals)
+	}
+	if pf.hostHeader != "demo.localhost:3000" {
+		t.Fatalf("hostHeader = %q, want %q", pf.hostHeader, "demo.localhost:3000")
+	}
+}
+
 func TestShouldUseTUIRequiresFlagAndTerminal(t *testing.T) {
 	orig := stdoutIsTerminal
 	t.Cleanup(func() { stdoutIsTerminal = orig })
