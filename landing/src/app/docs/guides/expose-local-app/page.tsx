@@ -71,12 +71,19 @@ export default function ExposeLocalAppPage() {
 
       <Anchor id="the-host-header">The Host header</Anchor>
       <p>
-        The original public <code>Host</code> header is preserved end to
-        end — what most OAuth callback URLs and vhost routers expect.
-        There is currently no flag to rewrite it to something like{" "}
-        <code>localhost:3000</code> instead; if your app is picky about the{" "}
-        <code>Host</code> it receives, it needs to accept the public
-        hostname (e.g. <code>amber-fox-42.ngstone.site</code>) for now.
+        By default, ngstone preserves the public <code>Host</code> header end
+        to end — useful for OAuth callback URLs and virtual-host routers. If
+        your local app expects a different tenant hostname, override it with{" "}
+        <code>--host-header</code>:
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone port 3000 --host-header demo.localhost:3000`}
+      />
+      <p>
+        The local app receives <code>Host: demo.localhost:3000</code>. The{" "}
+        <code>X-Forwarded-Host</code> header still contains the public tunnel
+        hostname.
       </p>
 
       <Anchor id="app-not-running">When the local app isn&apos;t running</Anchor>

@@ -99,7 +99,8 @@ verified against ngstone.site:4443 and saved`} />
         language="bash"
         code={`$ ngstone port 3000
 $ ngstone port http://127.0.0.1:3000
-$ ngstone port 3000 --subdomain demo`}
+$ ngstone port 3000 --subdomain demo
+$ ngstone port 3000 --host-header demo.localhost:3000`}
       />
       <p>
         The positional argument is either a bare port number (forwarded to{" "}
@@ -111,6 +112,11 @@ $ ngstone port 3000 --subdomain demo`}
           Request a specific subdomain instead of a server-assigned one,
           e.g. <code>--subdomain demo</code> for{" "}
           <code>demo.ngstone.site</code>.
+        </Property>
+        <Property name="--host-header" type="string">
+          Host header sent to the local app. By default, the public tunnel
+          hostname is preserved. Set it when the app expects a local tenant
+          hostname, e.g. <code>--host-header demo.localhost:3000</code>.
         </Property>
         <Property name="--server" type="string">
           Edge control-plane address override. Defaults to the config file

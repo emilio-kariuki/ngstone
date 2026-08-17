@@ -1,5 +1,60 @@
 # Deploying ngstoned
 
+## Fast path (Ubuntu/Debian VPS)
+
+Create the apex and wildcard DNS records first, then run the installer from a
+fresh clone:
+
+```
+git clone https://github.com/emilio-kariuki/ngstone.git /opt/ngstone
+cd /opt/ngstone
+sudo ./deploy/install-edge.sh \
+  --domain example.com \
+  --email you@example.com \
+  --acme-ca production
+```
+
+The script prompts for the scoped Cloudflare DNS token without echoing it. It
+downloads and verifies the edge binary, generates the tunnel auth token,
+creates the root-only environment file, installs the hardened systemd unit,
+configures UFW, checks DNS, starts `ngstoned`, and prints the laptop command.
+Use `--acme-ca staging` first if you are still validating DNS or the VPS.
+
+For a disposable VPS, the same installer can be fetched directly after
+reviewing the script:
+
+```
+curl -fsSL https://raw.githubusercontent.com/emilio-kariuki/ngstone/main/deploy/install-edge.sh \
+  | sudo bash -s -- --domain example.com --email you@example.com --acme-ca production
+```
+
+The installer supports Ubuntu and Debian. It does not create DNS records or
+store the plaintext tunnel token on the VPS, so save the token it prints.
+
+## Uninstalling
+
+From the checkout on the VPS, remove the service, binary, and root-only
+secrets with a confirmation prompt:
+
+```
+sudo ./deploy/uninstall.sh
+```
+
+The default uninstall preserves the certificate and ACME account state under
+`/var/lib/private/ngstoned` so a later reinstall can continue using it. To
+remove that state as well, and remove matching public listener allow rules from
+UFW, use the explicit destructive options:
+
+```
+sudo ./deploy/uninstall.sh --remove-state --remove-firewall-rules
+```
+
+`--remove-firewall-rules` removes matching allow rules for only `80/tcp`,
+`443/tcp`, and `4443/tcp`; it leaves SSH rules alone. If another service
+uses the same allow rule, review it before selecting this option. The source
+checkout is never removed. Use `--yes` only when running the uninstall
+non-interactively.
+
 ## DNS records
 
 Two records in the `ngstone.site` zone, both proxy status "DNS only" (grey cloud) since Cloudflare's proxy would break the TLS termination and the agent's persistent yamux connection:
