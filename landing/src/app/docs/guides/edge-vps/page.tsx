@@ -15,6 +15,8 @@ export const metadata: Metadata = {
 }
 
 const TOC: TocItem[] = [
+  { id: "fast-path", title: "Fast path installer" },
+  { id: "uninstalling", title: "Uninstalling" },
   { id: "prerequisites", title: "Prerequisites" },
   { id: "dns-records", title: "DNS records" },
   { id: "cloudflare-token", title: "The Cloudflare API token" },
@@ -40,6 +42,59 @@ export default function EdgeVpsPage() {
         certificates, an open control plane, and an agent tunnelling through
         it. <code>example.com</code> stands in for your domain throughout.
       </p>
+
+      <Anchor id="fast-path">Fast path installer</Anchor>
+      <p>
+        On a fresh Ubuntu or Debian VPS, create the apex and wildcard DNS
+        records first, then install the edge from a checkout. The installer
+        downloads the release binary, verifies its checksum, creates the
+        root-only secrets file, installs the hardened systemd unit, configures
+        UFW, and starts <code>ngstoned</code>:
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ git clone https://github.com/emilio-kariuki/ngstone.git /opt/ngstone
+$ cd /opt/ngstone
+$ sudo ./deploy/install-edge.sh \\
+    --domain example.com \\
+    --email you@example.com \\
+    --acme-ca production`}
+      />
+      <p>
+        It prompts for a narrowly scoped Cloudflare DNS token without
+        echoing it, and prints the generated agent token once. Use{" "}
+        <code>--acme-ca staging</code> while validating DNS and promote to{" "}
+        <code>production</code> after the health check passes. The installer
+        does not create DNS records, so the apex and wildcard must already
+        resolve to the VPS.
+      </p>
+
+      <Anchor id="uninstalling">Uninstalling</Anchor>
+      <p>
+        From the checkout, remove the service, binary, and root-only secrets:
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ sudo ./deploy/uninstall.sh`}
+      />
+      <p>
+        Certificate and ACME state is preserved by default under{" "}
+        <code>/var/lib/private/ngstoned</code>, so a later reinstall can reuse
+        it. To delete that state and remove matching public UFW allow rules,
+        opt in explicitly:
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ sudo ./deploy/uninstall.sh --remove-state --remove-firewall-rules`}
+      />
+      <Callout variant="warning" title="SSH access is kept">
+        The firewall option removes matching allow rules for only{" "}
+        <code>80/tcp</code>, <code>443/tcp</code>, and <code>4443/tcp</code>.
+        SSH rules and the source checkout are left in place. If another
+        service uses the same allow rule, review it before selecting this
+        option. Use <code>--yes</code> only for a deliberate non-interactive
+        uninstall.
+      </Callout>
 
       <Anchor id="prerequisites">Prerequisites</Anchor>
       <Steps>

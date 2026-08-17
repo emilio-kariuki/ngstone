@@ -46,7 +46,12 @@ Authenticate against your edge, then expose a local port:
 ngstone auth <token>
 ngstone port 3000
 ngstone port 3000 --subdomain demo   # request a specific name instead of a random one
+ngstone port 3000 --host-header demo.localhost:3000
 ```
+
+By default, the local app receives the public tunnel hostname in `Host`. Use
+`--host-header` when it expects a tenant-specific local hostname; the public
+hostname remains available in `X-Forwarded-Host`.
 
 This assumes you (or someone) already has `ngstoned` running on a VPS with a
 domain pointed at it — see [Self-hosting](#self-hosting) below. `ngstoned` is
@@ -78,6 +83,29 @@ line simulates a browser request by setting the `Host` header directly (in
 production this would be the real hostname, resolved via DNS).
 
 ## Self-hosting
+
+For the easiest Ubuntu/Debian setup, create the apex and wildcard DNS records,
+then run the installer on the VPS:
+
+```
+git clone https://github.com/emilio-kariuki/ngstone.git /opt/ngstone
+cd /opt/ngstone
+sudo ./deploy/install-edge.sh --domain example.com --email you@example.com --acme-ca production
+```
+
+It installs `ngstoned`, configures systemd and UFW, obtains the certificates,
+and prints the agent authentication command. The full manual systemd path is
+in [deploy/README.md](deploy/README.md).
+
+To remove the edge later, run this from the VPS checkout:
+
+~~~
+sudo ./deploy/uninstall.sh
+~~~
+
+This removes the service, binary, and secrets while preserving certificate
+state by default. See [deploy/README.md](deploy/README.md#uninstalling) for
+the optional state and firewall cleanup flags.
 
 Running your own edge (`ngstoned`) requires:
 
