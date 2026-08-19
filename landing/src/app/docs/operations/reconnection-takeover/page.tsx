@@ -15,6 +15,7 @@ export const metadata: Metadata = {
 const TOC: TocItem[] = [
   { id: "instance-identity", title: "Instance identity" },
   { id: "takeover-rules", title: "The takeover rules" },
+  { id: "network-transports", title: "Network transports" },
   { id: "reconnect-backoff", title: "Reconnect backoff" },
   { id: "dead-peer-detection", title: "Dead-peer detection" },
   { id: "zombie-bindings", title: "Zombie bindings" },
@@ -69,6 +70,26 @@ export default function ReconnectionTakeoverPage() {
         it, and rebinds atomically under the registry lock. The evicted agent
         updates its status line instead of continuing to advertise a URL it
         no longer owns.
+      </p>
+      <p>
+        A named tunnel can opt into a connector pool with{" "}
+        <code>--multi-connector</code>. In that mode, agents with different{" "}
+        <code>InstanceID</code> values join the same explicit subdomain when
+        their HTTP/2, access-control, and traffic-policy settings match. A
+        reconnect replaces only its own connector; releasing one connector
+        stops new selection for it and lets its in-flight requests drain while
+        the remaining connectors continue serving traffic.
+      </p>
+
+      <Anchor id="network-transports">Network transports</Anchor>
+      <p>
+        <code>ngstone</code> defaults to <code>--transport auto</code>. It
+        tries the raw TLS yamux listener on <code>:4443</code> first, then
+        falls back to an authenticated WebSocket carrying the same yamux
+        session through <code>/_ngstone/control</code> on HTTPS{" "}
+        <code>:443</code>. Use <code>--transport raw</code> or{" "}
+        <code>--transport websocket</code> to force a path. QUIC is reserved
+        for a later transport mode.
       </p>
 
       <Anchor id="reconnect-backoff">Reconnect backoff</Anchor>

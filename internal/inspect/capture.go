@@ -14,6 +14,11 @@ import (
 
 const BodyCap = 256 << 10
 
+const (
+	RequestIDHeader  = "X-Ngstone-Request-ID"
+	ClientAddrHeader = "X-Ngstone-Client-Addr"
+)
+
 var upgradePublishInterval = 250 * time.Millisecond
 
 type ctxKey int
@@ -316,6 +321,7 @@ func (s *exchangeState) finalizeUpgrade(resp *http.Response) *upgradeCounters {
 		Req:      s.capturedReq(),
 		Resp: CapturedResp{
 			Status: resp.StatusCode,
+			Proto:  resp.Proto,
 			Header: resp.Header.Clone(),
 		},
 	}
@@ -349,6 +355,7 @@ func (s *exchangeState) finalizeHTTP(rec *recorder, errText string) {
 		Req:      s.capturedReq(),
 		Resp: CapturedResp{
 			Status:    status,
+			Proto:     s.proto,
 			Header:    header,
 			Body:      body,
 			BodySize:  size,

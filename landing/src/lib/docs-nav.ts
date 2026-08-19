@@ -69,6 +69,11 @@ export const NAV: NavGroup[] = [
         description: "Re-send a captured request straight to your local app.",
       },
       {
+        title: "GitHub Actions",
+        href: "/docs/guides/github-actions",
+        description: "Expose CI services with a checked, TTL-bound preview tunnel.",
+      },
+      {
         title: "WebSockets & SSE",
         href: "/docs/guides/websockets-sse",
         description: "Long-lived connections — not yet hardened (M4).",

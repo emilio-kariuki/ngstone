@@ -5,10 +5,13 @@ set -Eeuo pipefail
 SERVICE_NAME=ngstoned.service
 SERVICE_PATH=/etc/systemd/system/ngstoned.service
 BINARY_PATH=/usr/local/bin/ngstoned
+AGENT_BINARY_PATH=/usr/local/bin/ngstone
 ENV_DIR=/etc/ngstoned
 ENV_PATH=/etc/ngstoned/env
 STATE_PRIVATE=/var/lib/private/ngstoned
 STATE_PUBLIC=/var/lib/ngstoned
+SCOPED_CREDENTIALS_PATH=
+DATABASE_URL=
 ASSUME_YES=0
 REMOVE_STATE=0
 REMOVE_FIREWALL=0
@@ -37,8 +40,9 @@ Options:
   -h, --help                  show this help
 
 The default removes the ngstoned systemd unit, binary, and root-only secrets.
-Certificate state is preserved so a later reinstall can renew existing
-certificates. The source checkout and SSH firewall access are never removed.
+Certificate and SQLite control-plane state are preserved so a later reinstall
+can renew certificates and retain tunnels, credentials, and audit history. The
+source checkout and SSH firewall access are never removed.
 EOF
 }
 
@@ -76,8 +80,25 @@ fi
 
 command -v systemctl >/dev/null 2>&1 || fail "systemctl is required"
 
+if [[ -f "$ENV_PATH" ]]; then
+  SCOPED_CREDENTIALS_PATH="$(awk -F= '$1 == "NGSTONE_CREDENTIALS_FILE" { print substr($0, length($1) + 2); exit }' "$ENV_PATH")"
+  DATABASE_URL="$(awk -F= '$1 == "NGSTONE_DATABASE_URL" { print substr($0, length($1) + 2); exit }' "$ENV_PATH")"
+  case "$SCOPED_CREDENTIALS_PATH" in
+  /*)
+    ;;
+  *)
+    SCOPED_CREDENTIALS_PATH=
+    ;;
+  esac
+  case "$SCOPED_CREDENTIALS_PATH" in
+  ""|/|/var|/var/lib|/var/lib/private|/*/)
+    SCOPED_CREDENTIALS_PATH=
+    ;;
+  esac
+fi
+
 found=0
-for target in "$SERVICE_PATH" "$BINARY_PATH" "$ENV_PATH" "$STATE_PRIVATE" "$STATE_PUBLIC"; do
+for target in "$SERVICE_PATH" "$BINARY_PATH" "$AGENT_BINARY_PATH" "$ENV_PATH" "$STATE_PRIVATE" "$STATE_PUBLIC"; do
   if [[ -e "$target" || -L "$target" ]]; then
     found=1
     break
@@ -95,11 +116,18 @@ fi
 printf 'This removes:\n'
 printf '  - the %s systemd unit and its enablement\n' "$SERVICE_NAME"
 printf '  - %s\n' "$BINARY_PATH"
+printf '  - %s\n' "$AGENT_BINARY_PATH"
 printf '  - %s, including the Cloudflare API token and auth-token hash\n' "$ENV_PATH"
+if [[ -n "$SCOPED_CREDENTIALS_PATH" ]]; then
+  printf '  - scoped credential file %s\n' "$SCOPED_CREDENTIALS_PATH"
+fi
 if [[ "$REMOVE_STATE" -eq 1 ]]; then
-  printf '  - persisted certificate and ACME state under %s\n' "$STATE_PRIVATE"
+  printf '  - persisted certificate, ACME, and default SQLite control-plane state under %s\n' "$STATE_PRIVATE"
 else
-  printf 'The certificate and ACME state under %s will be preserved.\n' "$STATE_PRIVATE"
+  printf 'The certificate, ACME, and default SQLite control-plane state under %s will be preserved.\n' "$STATE_PRIVATE"
+fi
+if [[ -n "$DATABASE_URL" && "$DATABASE_URL" != sqlite:///* && "$DATABASE_URL" != file:* ]]; then
+  printf 'The configured external control-plane database will not be modified.\n'
 fi
 if [[ "$REMOVE_FIREWALL" -eq 1 ]]; then
   printf 'Matching UFW allow rules for 80/tcp, 443/tcp, and 4443/tcp will be removed; SSH rules stay.\n'
@@ -134,7 +162,11 @@ systemctl daemon-reload
 
 info "removing the edge binary and secrets"
 rm -f -- "$BINARY_PATH"
+rm -f -- "$AGENT_BINARY_PATH"
 rm -f -- "$ENV_PATH"
+if [[ -n "$SCOPED_CREDENTIALS_PATH" ]]; then
+  rm -f -- "$SCOPED_CREDENTIALS_PATH" "$SCOPED_CREDENTIALS_PATH.lock"
+fi
 rmdir -- "$ENV_DIR" 2>/dev/null || true
 
 if [[ "$REMOVE_STATE" -eq 1 ]]; then

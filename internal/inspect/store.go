@@ -48,6 +48,7 @@ type CapturedReq struct {
 
 type CapturedResp struct {
 	Status    int
+	Proto     string
 	Header    http.Header
 	Body      []byte
 	BodySize  int64
@@ -57,12 +58,14 @@ type CapturedResp struct {
 type Exchange struct {
 	ID       string
 	ReqID    string
+	Tunnel   string
 	Kind     string
 	Start    time.Time
 	Duration time.Duration
 	Req      CapturedReq
 	Resp     CapturedResp
 	Replayed bool
+	ReplayOf string
 	Err      string
 
 	BytesClientToApp int64

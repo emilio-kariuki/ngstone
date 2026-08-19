@@ -12,17 +12,18 @@ const STEPS = [
   {
     title: "Point DNS at your VPS, and start the edge",
     description:
-      "Add a wildcard A record for *.yourdomain.com pointing at your server, generate a token, then run the edge binary there.",
-    code: `$ TOKEN=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
-$ HASH=$(printf '%s' "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
-$ ngstoned --domain yourdomain.com --cert-email you@yourdomain.com \\
-    --cf-api-token "$CF_API_TOKEN" --token-sha256 "$HASH"`,
+      "Add a wildcard A record for *.yourdomain.com pointing at your server, run the edge binary there, then issue a scoped credential.",
+    code: `$ ngstoned --domain yourdomain.com --cert-email you@yourdomain.com \\
+    --cf-api-token "$CF_API_TOKEN" --credentials-file /var/lib/ngstoned/credentials.json
+$ ngstone credentials issue --file /var/lib/ngstoned/credentials.json \\
+    --subdomain demo --ttl 24h`,
   },
   {
     title: "Install the agent, and authenticate",
     description:
-      "Install the agent on your dev machine, then verify the plaintext token from step one against your edge.",
+      "Install the agent on your dev machine, then verify the one-time scoped token from step one against your edge.",
     code: `$ brew install emilio-kariuki/tap/ngstone
+$ TOKEN='<token printed by credentials issue>'
 $ ngstone auth "$TOKEN"`,
   },
   {

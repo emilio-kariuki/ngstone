@@ -70,7 +70,9 @@ type Model struct {
 
 	width, height int
 
-	err string
+	err      string
+	notice   string
+	diffText string
 }
 
 type exchangeMsg struct{ ex *inspect.Exchange }
@@ -241,6 +243,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		delete(m.replaying, msg.sourceID)
 		if msg.err != nil {
 			m.err = msg.err.Error()
+		} else {
+			m.err = ""
 		}
 		return m, nil
 	}
@@ -300,6 +304,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		}
 	case "r":
 		return m.handleReplayKey()
+	case "c":
+		return m.handleCurlKey(false)
+	case "C":
+		return m.handleCurlKey(true)
+	case "d":
+		return m.handleDiffKey()
+	case "s":
+		return m.handleSaveKey()
 	case "e":
 		if ex := m.selectedExchange(); ex != nil && ex.Kind != inspect.KindUpgrade {
 			m.editing = true
@@ -322,6 +334,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 }
 
 func (m Model) handleNavKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	m.diffText = ""
 	if m.focus == focusDetail {
 		var cmd tea.Cmd
 		m.detailVP, cmd = m.detailVP.Update(msg)
@@ -359,6 +372,7 @@ func (m Model) handleFilterKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case "enter":
 		m.filterQuery = strings.TrimSpace(m.filterInput.Value())
 		m.filterActive = false
+		m.diffText = ""
 		m.rebuildRows()
 		return m, nil
 	case "esc":
@@ -379,12 +393,95 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		sourceID := m.editForm.sourceID
 		ov := m.editForm.overrides()
 		m.editing = false
+		m.diffText = ""
 		m.replaying[sourceID] = struct{}{}
 		return m, replayCmd(m.store, m.target, m.rt, sourceID, ov)
 	}
 	var cmd tea.Cmd
 	m.editForm, cmd = m.editForm.Update(msg)
 	return m, cmd
+}
+
+func (m Model) handleCurlKey(includeSensitive bool) (Model, tea.Cmd) {
+	ex := m.selectedExchange()
+	if ex == nil {
+		return m, nil
+	}
+	command, err := inspect.BuildCurl(ex, inspect.CurlOptions{IncludeSensitive: includeSensitive})
+	if err != nil {
+		m.err = err.Error()
+		return m, nil
+	}
+	if err := copyToClipboard(command); err != nil {
+		m.err = "copy cURL failed: " + err.Error() + "; command: " + command
+		return m, nil
+	}
+	m.err = ""
+	if includeSensitive {
+		m.notice = "copied cURL with sensitive headers"
+	} else {
+		m.notice = "copied redacted cURL; press C to include sensitive headers"
+	}
+	return m, nil
+}
+
+func (m Model) handleDiffKey() (Model, tea.Cmd) {
+	if m.diffText != "" {
+		m.diffText = ""
+		return m, nil
+	}
+	ex := m.selectedExchange()
+	if ex == nil || ex.Kind == inspect.KindUpgrade {
+		return m, nil
+	}
+	original, replay := m.replayPair(ex)
+	if original == nil || replay == nil {
+		m.err = "no replay response found; press r first"
+		return m, nil
+	}
+	diff, err := inspect.DiffResponses(original, replay)
+	if err != nil {
+		m.err = err.Error()
+		return m, nil
+	}
+	m.err = ""
+	m.diffText = diff
+	m.notice = "response diff shown; press d or move selection to close"
+	return m, nil
+}
+
+func (m Model) replayPair(ex *inspect.Exchange) (*inspect.Exchange, *inspect.Exchange) {
+	if ex == nil {
+		return nil, nil
+	}
+	if ex.ReplayOf != "" {
+		original, ok := m.store.Get(ex.ReplayOf)
+		if ok {
+			return original, ex
+		}
+	}
+	for i := len(m.all) - 1; i >= 0; i-- {
+		candidate := m.all[i]
+		if candidate != nil && candidate.ReplayOf == ex.ID {
+			return ex, candidate
+		}
+	}
+	return nil, nil
+}
+
+func (m Model) handleSaveKey() (Model, tea.Cmd) {
+	ex := m.selectedExchange()
+	if ex == nil {
+		return m, nil
+	}
+	path := fmt.Sprintf("ngstone-replay-%s.json", ex.ID)
+	if err := inspect.SaveReplay(path, ex); err != nil {
+		m.err = "save replay failed: " + err.Error()
+		return m, nil
+	}
+	m.err = ""
+	m.notice = "saved replay file " + path
+	return m, nil
 }
 
 func (m Model) View() string {
@@ -403,7 +500,11 @@ func (m Model) View() string {
 	sections = append(sections, renderListHeader(m.width))
 	sections = append(sections, renderList(&m))
 
-	m.detailVP.SetContent(buildDetail(m.selectedExchange()))
+	if m.diffText != "" {
+		m.detailVP.SetContent(m.diffText)
+	} else {
+		m.detailVP.SetContent(buildDetail(m.selectedExchange()))
+	}
 	sections = append(sections, m.detailVP.View())
 
 	if m.showLogs && m.logs != nil {
@@ -418,6 +519,9 @@ func (m Model) View() string {
 
 	if m.err != "" {
 		sections = append(sections, errorStyle.Render(m.err))
+	}
+	if m.notice != "" {
+		sections = append(sections, helpStyle.Render(m.notice))
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, sections...)
@@ -463,7 +567,7 @@ func (m Model) renderHeader() string {
 }
 
 func (m Model) renderFooter() string {
-	return footerStyle.Render("↑↓ select   r replay   e edit & replay   / filter   l logs   q quit   ? help")
+	return footerStyle.Render("↑↓ select   r replay   e edit   c cURL   d diff   s save   / filter   l logs   q quit   ? help")
 }
 
 func (m Model) renderHelp() string {

@@ -15,7 +15,7 @@ export const metadata: Metadata = {
 
 const TOC: TocItem[] = [
   { id: "prerequisites", title: "Prerequisites" },
-  { id: "generate-a-token", title: "Generate a token" },
+  { id: "generate-a-token", title: "Generate a scoped credential" },
   { id: "start-the-edge", title: "Start the edge" },
   { id: "install-the-agent", title: "Install the agent" },
   { id: "authenticate", title: "Authenticate" },
@@ -31,7 +31,7 @@ export default function QuickstartPage() {
         This walks through the whole path: standing up the edge on a VPS
         you control, then pointing the agent at a local port from your
         laptop. No dashboard, no account creation — just two binaries and
-        one token.
+        one short-lived, per-tunnel credential.
       </p>
 
       <Anchor id="prerequisites">Prerequisites</Anchor>
@@ -47,35 +47,40 @@ export default function QuickstartPage() {
           address.
         </Step>
         <Step title="Go 1.25, to build the edge">
-          <code>ngstoned</code> isn&apos;t distributed as a prebuilt
-          binary — build it from source for the VPS&apos;s architecture.
-          The agent, by contrast, has prebuilt installs (next section), so
-          you don&apos;t need Go on your laptop.
+          Build <code>ngstoned</code> and the VPS-side credential CLI from
+          source for the VPS&apos;s architecture, or use the release archive.
+          The laptop agent has prebuilt installs (next section), so you
+          don&apos;t need Go on your laptop.
         </Step>
       </Steps>
 
-      <Anchor id="generate-a-token">Generate a token</Anchor>
+      <Anchor id="generate-a-token">Initialize durable storage and generate a scoped credential</Anchor>
       <p>
-        There&apos;s no <code>ngstone token</code> command — generate one
-        with a couple of standard tools. The edge only ever stores the
-        hash; keep the plaintext for the agent.
+        The edge uses SQLite by default for tunnel names, credentials, leases,
+        policies, domains, and audit history. Issue a short-lived credential
+        through the loopback management API; only a hash is stored and the
+        plaintext is printed once.
       </p>
       <CodeBlock
         language="bash"
-        code={`$ TOKEN=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
-$ HASH=$(printf '%s' "$TOKEN" | shasum -a 256 | cut -d' ' -f1)   # sha256sum on Linux`}
+        code={`$ ngstone admin credentials issue --server http://127.0.0.1:4041 \\
+    --subdomain demo --ttl 24h
+credential <id> issued
+token: <save this value on the laptop>`}
       />
 
       <Anchor id="start-the-edge">Start the edge</Anchor>
       <p>
         On the VPS, run <code>ngstoned</code> with your domain, a
-        certificate contact email, a Cloudflare API token scoped to{" "}
-        <code>Zone:DNS:Edit</code>, and the token hash from above:
+        certificate contact email, and a Cloudflare API token scoped to{" "}
+        <code>Zone:DNS:Edit</code>. SQLite is used automatically; set{" "}
+        <code>NGSTONE_DATABASE_URL</code> to a PostgreSQL URL for multiple
+        edge servers:
       </p>
       <CodeBlock
         language="bash"
-        code={`$ ngstoned --domain ngstone.site --cert-email you@ngstone.site \\
-    --cf-api-token "$CF_API_TOKEN" --token-sha256 "$HASH"`}
+        code={`$ NGSTONE_CF_API_TOKEN="$CF_API_TOKEN" \\
+  ngstoned --domain ngstone.site --cert-email you@ngstone.site`}
       />
       <p>
         The edge requests two independent TLS certificates via DNS-01 — a
@@ -99,7 +104,7 @@ $ curl -fsSL https://raw.githubusercontent.com/emilio-kariuki/ngstone/main/insta
 
       <Anchor id="authenticate">Authenticate</Anchor>
       <p>
-        Verify the plaintext token from earlier against your edge, and
+        Verify the scoped token from earlier against your edge, and
         save it locally:
       </p>
       <CodeBlock

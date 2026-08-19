@@ -1,0 +1,75 @@
+name: ngstone tunnel
+description: Start a TTL-bound ngstone preview tunnel for a GitHub Actions job
+branding:
+  icon: external-link
+  color: green
+inputs:
+  target:
+    description: Local port or URL to expose
+    required: true
+  token:
+    description: Legacy long-lived ngstone authentication token; use admin-server and admin-token for per-run credentials
+    required: false
+    default: ""
+  admin-server:
+    description: Management API URL used to issue and revoke the workflow credential
+    required: false
+    default: ""
+  admin-token:
+    description: Management API bearer token used only by this workflow run
+    required: false
+    default: ""
+  server:
+    description: Edge control-plane address
+    required: false
+    default: ngstone.site:4443
+  transport:
+    description: Control transport: auto, raw, or websocket
+    required: false
+    default: auto
+  server-name:
+    description: TLS ServerName/SNI for the edge
+    required: false
+    default: ngstone.site
+  subdomain:
+    description: Requested subdomain; when empty the short-lived credential gets a unique workflow-run subdomain
+    required: false
+    default: ""
+  host-header:
+    description: Host header to send to the local app
+    required: false
+    default: ""
+  ttl:
+    description: Maximum tunnel and workflow credential lifetime
+    required: false
+    default: 30m
+  version:
+    description: Release tag to download, or latest
+    required: false
+    default: v0.3.2
+  repository:
+    description: GitHub repository containing ngstone releases
+    required: false
+    default: emilio-kariuki/ngstone
+  wait-timeout:
+    description: Seconds to wait for the tunnel URL
+    required: false
+    default: "60"
+  insecure:
+    description: Use plaintext control-plane transport for local test edges
+    required: false
+    default: "false"
+  command:
+    description: Optional shell command to run while the tunnel is alive
+    required: false
+    default: ""
+outputs:
+  url:
+    description: Public tunnel URL
+  pid:
+    description: Background ngstone process ID
+runs:
+  using: node20
+  main: action/main.js
+  post: action/post.js
+  post-if: always()

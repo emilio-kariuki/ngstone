@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -220,4 +221,23 @@ func TestResizeThenNormalViewDoesNotPanic(t *testing.T) {
 	}
 
 	_ = m2.View()
+}
+
+func TestDiffShortcutFindsReplayPair(t *testing.T) {
+	original := mkExchange("original", "GET", "/items", 200)
+	original.Resp.Body = []byte("one")
+	replay := mkExchange("replay", "GET", "/items", 500)
+	replay.Replayed = true
+	replay.ReplayOf = original.ID
+	replay.Resp.Body = []byte("two")
+	m := newTestModel(t, []*inspect.Exchange{original, replay})
+	m.cursor = 0
+	m.selectedID = m.rows[0].ID
+	updated, _ := m.handleKey(testKey("d"))
+	if updated.diffText == "" {
+		t.Fatal("diff shortcut did not render a response diff")
+	}
+	if !strings.Contains(updated.diffText, "500") {
+		t.Fatalf("diff = %q, want replay status", updated.diffText)
+	}
 }

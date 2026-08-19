@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,10 +12,14 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"golang.org/x/net/http2"
+
 	"ngstone/internal/inspect"
+	"ngstone/internal/policy"
 	"ngstone/internal/proto"
 	"ngstone/internal/tunnel"
 	"ngstone/internal/version"
@@ -32,6 +38,18 @@ const (
 var errFatalHandshake = errors.New("agent: fatal handshake error")
 var errEdgeGoodbye = errors.New("agent: edge said goodbye")
 
+type preBindTransportError struct {
+	err error
+}
+
+func (e *preBindTransportError) Error() string { return e.err.Error() }
+func (e *preBindTransportError) Unwrap() error { return e.err }
+
+func isPreBindTransportError(err error) bool {
+	var target *preBindTransportError
+	return errors.As(err, &target)
+}
+
 var (
 	ErrBadToken    = errors.New("agent: token rejected by server")
 	ErrUnreachable = errors.New("agent: cannot reach server")
@@ -48,17 +66,23 @@ func (e *authErr) Error() string {
 
 type Config struct {
 	ControlAddr string
+	Transport   string
 	Token       string
+	Name        string
 	Subdomain   string
 	TargetURL   string
 	HostHeader  string
 
-	Kind       string
-	RemotePort int
+	Kind           string
+	RemotePort     int
+	HTTP2          bool
+	MultiConnector bool
+	ConnectorToken string
 
 	BasicAuthSHA256 []string
 	BasicAuthRealm  string
 	AllowCIDRs      []string
+	Policy          *policy.Policy
 
 	InstanceID string
 
@@ -83,6 +107,7 @@ const (
 	StateReconnecting = "reconnecting"
 	StateEvicted      = "evicted"
 	StateOffline      = "offline"
+	StateExpired      = "expired"
 )
 
 type StatusEvent struct {
@@ -96,10 +121,11 @@ type Agent struct {
 	cfg        Config
 	instanceID string
 
-	transport *http.Transport
-	store     *inspect.Store
-	target    *url.URL
-	targetErr error
+	transport      *http.Transport
+	http2Transport *http2.Transport
+	store          *inspect.Store
+	target         *url.URL
+	targetErr      error
 
 	mu     sync.Mutex
 	status Status
@@ -122,6 +148,9 @@ func New(cfg Config) *Agent {
 	}
 	if u, err := url.Parse(cfg.TargetURL); err == nil {
 		a.target = u
+		if cfg.HTTP2 {
+			a.http2Transport = newHTTP2Transport(u)
+		}
 	} else {
 		a.targetErr = err
 	}
@@ -181,6 +210,11 @@ func (a *Agent) setEvicted(hostname string) {
 func (a *Agent) Run(ctx context.Context) error {
 	bo := newBackoff(reconnectBase, reconnectCap)
 	defer a.transport.CloseIdleConnections()
+	defer func() {
+		if a.http2Transport != nil {
+			a.http2Transport.CloseIdleConnections()
+		}
+	}()
 
 	first := true
 
@@ -223,15 +257,25 @@ func (a *Agent) Run(ctx context.Context) error {
 }
 
 func (a *Agent) runOnce(ctx context.Context, bo *backoff) error {
-	conn, err := dialControl(ctx, a.cfg)
+	modes, err := transportModes(a.cfg.Transport)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", errFatalHandshake, err)
 	}
+	var lastErr error
+	for i, mode := range modes {
+		lastErr = a.runOnceTransport(ctx, bo, mode)
+		if lastErr == nil || ctx.Err() != nil || errors.Is(lastErr, errFatalHandshake) || !isPreBindTransportError(lastErr) || i == len(modes)-1 {
+			return lastErr
+		}
+		slog.Warn("agent: control transport failed, trying fallback", "transport", mode, "err", lastErr)
+	}
+	return lastErr
+}
 
-	sess, err := tunnel.Client(conn)
+func (a *Agent) runOnceTransport(ctx context.Context, bo *backoff, mode string) error {
+	sess, err := dialControlSession(ctx, a.cfg, mode)
 	if err != nil {
-		conn.Close()
-		return fmt.Errorf("agent: session: %w", err)
+		return &preBindTransportError{err: err}
 	}
 	defer sess.Close("agent session ended")
 
@@ -239,7 +283,10 @@ func (a *Agent) runOnce(ctx context.Context, bo *backoff) error {
 
 	bindOK, err := a.handshake(sess, idgen)
 	if err != nil {
-		return err
+		if errors.Is(err, errFatalHandshake) {
+			return err
+		}
+		return &preBindTransportError{err: err}
 	}
 	a.setBound(bindOK.Hostname, a.advertisedURL(bindOK))
 	bo.reset()
@@ -316,6 +363,12 @@ func (a *Agent) newServer() (tunnelServer, error) {
 	if target == nil {
 		return nil, fmt.Errorf("agent: parse target: %w", a.targetErr)
 	}
+	if a.cfg.HTTP2 && a.http2Transport == nil {
+		return nil, errors.New("agent: HTTP/2 mode requires an http or https target")
+	}
+	if a.cfg.HTTP2 {
+		return newHTTP2TunnelServer(a.buildProxy(target), a.buildHTTP2Proxy(target)), nil
+	}
 	return &http.Server{
 		Handler:     a.buildProxy(target),
 		ConnContext: streamConnContext,
@@ -379,22 +432,47 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		return proto.BindOK{}, err
 	}
 
-	if (len(a.cfg.BasicAuthSHA256) > 0 || len(a.cfg.AllowCIDRs) > 0) && negotiated < 2 {
-		return proto.BindOK{}, fmt.Errorf("%w: edge does not support access control (negotiated protocol v%d); upgrade ngstoned to use --basic-auth/--allow-cidr", errFatalHandshake, negotiated)
+	if a.cfg.Policy != nil {
+		if err := a.cfg.Policy.Validate(); err != nil {
+			return proto.BindOK{}, fmt.Errorf("%w: invalid traffic policy: %v", errFatalHandshake, err)
+		}
 	}
 
-	if a.bindKind() == proto.KindTCP && len(a.cfg.BasicAuthSHA256) > 0 {
-		return proto.BindOK{}, fmt.Errorf("%w: basic auth is not supported for tcp tunnels", errFatalHandshake)
+	if (len(a.cfg.BasicAuthSHA256) > 0 || len(a.cfg.AllowCIDRs) > 0 || a.cfg.Policy != nil || a.cfg.HTTP2 || a.cfg.MultiConnector) && negotiated < 2 {
+		return proto.BindOK{}, fmt.Errorf("%w: edge does not support access control, traffic policies, HTTP/2 tunnels, or multiple connectors (negotiated protocol v%d); upgrade ngstoned", errFatalHandshake, negotiated)
+	}
+
+	if a.bindKind() == proto.KindTCP && (len(a.cfg.BasicAuthSHA256) > 0 || a.cfg.Policy != nil || a.cfg.HTTP2 || a.cfg.MultiConnector) {
+		return proto.BindOK{}, fmt.Errorf("%w: basic auth, traffic policies, HTTP/2, and multiple connectors are not supported for tcp tunnels", errFatalHandshake)
+	}
+
+	policyDigest := ""
+	if a.cfg.Policy != nil {
+		policyDigest = a.cfg.Policy.Digest()
+	}
+	connectorTokenDigest := ""
+	if a.cfg.MultiConnector {
+		if strings.TrimSpace(a.cfg.ConnectorToken) == "" {
+			return proto.BindOK{}, fmt.Errorf("%w: multiple connectors require a connector token", errFatalHandshake)
+		}
+		sum := sha256.Sum256([]byte(a.cfg.ConnectorToken))
+		connectorTokenDigest = hex.EncodeToString(sum[:])
 	}
 
 	ctrl := sess.Control()
 
 	bindMsg := proto.Bind{
-		Kind:       a.bindKind(),
-		Subdomain:  a.cfg.Subdomain,
-		RemotePort: a.cfg.RemotePort,
-		Takeover:   a.bindKind() == proto.KindHTTP,
-		AllowCIDRs: a.cfg.AllowCIDRs,
+		Kind:                 a.bindKind(),
+		Name:                 a.cfg.Name,
+		Subdomain:            a.cfg.Subdomain,
+		RemotePort:           a.cfg.RemotePort,
+		Takeover:             a.bindKind() == proto.KindHTTP,
+		HTTP2:                a.cfg.HTTP2,
+		MultiConnector:       a.cfg.MultiConnector,
+		ConnectorTokenSHA256: connectorTokenDigest,
+		AllowCIDRs:           a.cfg.AllowCIDRs,
+		Policy:               a.cfg.Policy,
+		PolicyDigest:         policyDigest,
 	}
 	if a.bindKind() == proto.KindHTTP {
 		bindMsg.BasicAuthSHA256 = a.cfg.BasicAuthSHA256
@@ -414,7 +492,7 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 	switch msg.Type {
 	case proto.TypeBindErr:
 		e, _ := proto.Decode[proto.BindErr](msg)
-		if e.Code == proto.CodeInvalidSubdomain || e.Code == proto.CodeKindUnsupported || e.Code == proto.CodeInvalidAccess {
+		if e.Code == proto.CodeInvalidSubdomain || e.Code == proto.CodeKindUnsupported || e.Code == proto.CodeInvalidAccess || e.Code == proto.CodeConnectorConfigMismatch || e.Code == proto.CodeCredentialScope {
 			return proto.BindOK{}, fmt.Errorf("%w: bind failed: %s: %s", errFatalHandshake, e.Code, e.Message)
 		}
 		if e.Code == proto.CodeSubdomainTaken && a.cfg.Subdomain != "" {
@@ -425,6 +503,15 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		bindOK, err := proto.Decode[proto.BindOK](msg)
 		if err != nil {
 			return proto.BindOK{}, err
+		}
+		if policyDigest != "" && bindOK.PolicyDigest != policyDigest {
+			return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge the traffic policy; upgrade ngstoned", errFatalHandshake)
+		}
+		if a.cfg.HTTP2 && !bindOK.HTTP2 {
+			return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge HTTP/2 mode; upgrade ngstoned", errFatalHandshake)
+		}
+		if a.cfg.MultiConnector && !bindOK.MultiConnector {
+			return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge multiple-connector mode; upgrade ngstoned", errFatalHandshake)
 		}
 		return bindOK, nil
 	default:
@@ -497,6 +584,10 @@ func (a *Agent) controlLoop(sess tunnel.Session, idgen *proto.IDGen) error {
 				a.setEvicted(ev.Hostname)
 				return fmt.Errorf("agent: evicted: %s (%s)", ev.Hostname, ev.Reason)
 			case proto.TypeGoodbye:
+				gb, _ := proto.Decode[proto.Goodbye](m)
+				if gb.Reason == proto.GoodbyeReasonCredentialInactive {
+					return fmt.Errorf("%w: %s", errFatalHandshake, gb.Reason)
+				}
 				return errEdgeGoodbye
 			case proto.TypeError:
 				e, _ := proto.Decode[proto.Error](m)
@@ -521,28 +612,34 @@ func (a *Agent) controlLoop(sess tunnel.Session, idgen *proto.IDGen) error {
 }
 
 func Verify(ctx context.Context, cfg Config) error {
-	conn, err := dialControl(ctx, cfg)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrUnreachable, err)
-	}
-
-	sess, err := tunnel.Client(conn)
-	if err != nil {
-		conn.Close()
-		return fmt.Errorf("%w: %v", ErrUnreachable, err)
-	}
-	defer sess.Close("verify done")
-
 	a := New(cfg)
-	idgen := proto.NewAgentIDGen()
-	if _, err := a.authenticate(sess, idgen); err != nil {
+	modes, err := transportModes(cfg.Transport)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrUnreachable, err)
+	}
+	var lastErr error
+	for i, mode := range modes {
+		sess, dialErr := dialControlSession(ctx, cfg, mode)
+		if dialErr != nil {
+			lastErr = dialErr
+			continue
+		}
+		idgen := proto.NewAgentIDGen()
+		_, authErrValue := a.authenticate(sess, idgen)
+		if authErrValue == nil {
+			a.sendGoodbye(sess, idgen, "verify done")
+			sess.Close("verify done")
+			return nil
+		}
+		sess.Close("verify failed")
 		var ae *authErr
-		if errors.As(err, &ae) && ae.code == proto.CodeBadToken {
+		if errors.As(authErrValue, &ae) && ae.code == proto.CodeBadToken {
 			return fmt.Errorf("%w: %s", ErrBadToken, ae.message)
 		}
-		return err
+		lastErr = authErrValue
+		if errors.Is(authErrValue, errFatalHandshake) || i == len(modes)-1 {
+			return authErrValue
+		}
 	}
-
-	a.sendGoodbye(sess, idgen, "verify done")
-	return nil
+	return fmt.Errorf("%w: %v", ErrUnreachable, lastErr)
 }

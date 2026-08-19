@@ -8,6 +8,9 @@ type keyMap struct {
 	Tab    key.Binding
 	Replay key.Binding
 	Edit   key.Binding
+	Copy   key.Binding
+	Diff   key.Binding
+	Save   key.Binding
 	Filter key.Binding
 	Logs   key.Binding
 	Help   key.Binding
@@ -35,6 +38,18 @@ var keys = keyMap{
 		key.WithKeys("e"),
 		key.WithHelp("e", "edit & replay"),
 	),
+	Copy: key.NewBinding(
+		key.WithKeys("c", "C"),
+		key.WithHelp("c/C", "copy cURL"),
+	),
+	Diff: key.NewBinding(
+		key.WithKeys("d"),
+		key.WithHelp("d", "response diff"),
+	),
+	Save: key.NewBinding(
+		key.WithKeys("s"),
+		key.WithHelp("s", "save replay"),
+	),
 	Filter: key.NewBinding(
 		key.WithKeys("/"),
 		key.WithHelp("/", "filter"),
@@ -54,13 +69,13 @@ var keys = keyMap{
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Up, k.Down, k.Replay, k.Edit, k.Filter, k.Logs, k.Quit}
+	return []key.Binding{k.Up, k.Down, k.Replay, k.Edit, k.Copy, k.Diff, k.Save, k.Filter, k.Logs, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Tab},
-		{k.Replay, k.Edit, k.Filter},
+		{k.Replay, k.Edit, k.Copy, k.Diff, k.Save, k.Filter},
 		{k.Logs, k.Help, k.Quit},
 	}
 }

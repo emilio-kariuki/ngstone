@@ -59,14 +59,24 @@ export default function SecurityModelPage() {
 
       <Anchor id="leaked-token">Leaked token</Anchor>
       <Callout variant="danger" title="What a leaked token grants — and doesn't">
-        A leaked token grants: binding any non-denylisted subdomain,
+        A legacy shared token grants: binding any non-denylisted subdomain,
         receiving that traffic, and serving phishing content under your
-        domain. It does <strong>not</strong> grant: reading other tunnels&apos;
-        traffic in flight, shell access to the edge, or control over
-        certificates/DNS. Rotation is just a config change and a restart —
-        set a new <code>token_sha256</code> and every existing session dies
-        at its next reconnect-auth.
+        domain. Prefer a scoped credential instead: it is short-lived, bound
+        to one exact subdomain or TCP port, and can be revoked independently.
+        Scoped credentials are hashed in the edge database (or compatibility
+        file) and checked again while a session is alive. Neither credential type grants: reading other
+        tunnels&apos; traffic in flight, shell access to the edge, or control over
+        certificates/DNS.
       </Callout>
+      <p>
+        A scoped credential is intentionally presented as a bearer token to
+        the control plane, so protect it like a password. The edge never
+        stores the plaintext token. Revocation is fail-closed if the
+        credential store cannot be read, and active sessions are disconnected
+        on the next heartbeat after revocation or expiry. Durable storage also
+        expires connector leases so another edge can safely reclaim an offline
+        tunnel.
+      </p>
 
       <Anchor id="per-tunnel-access-control">Per-tunnel access control</Anchor>
       <p>
@@ -134,19 +144,23 @@ export default function SecurityModelPage() {
       </p>
 
       <Anchor id="out-of-scope">Out of scope</Anchor>
-      <p>Accepted gaps for a single-user v1:</p>
+      <p>
+        OIDC team authentication now protects the management dashboard and API.
+        It does not authenticate anonymous visitors to a public tunnel; use
+        tunnel access controls for that surface. Remaining gaps include:
+      </p>
       <ul>
         <li>
-          Native gRPC and h2c backends — the tunnel carries raw HTTP/1.1
-          bytes inside each stream, which structurally cannot survive
-          gRPC&apos;s trailers and full-duplex h2 semantics
+          WebSocket over h2 extended CONNECT — native gRPC and h2c backends
+          use the explicit HTTP/2 bind mode; WebSocket clients should use
+          the existing HTTP/1.1 upgrade path
         </li>
         <li>Volumetric DDoS beyond the VPS&apos;s own capacity</li>
         <li>
           Compromise of the VPS itself — it terminates TLS and sees
           plaintext, so it&apos;s treated as trusted infrastructure
         </li>
-        <li>OAuth-grade authentication in front of tunnels</li>
+        <li>mTLS team authentication</li>
       </ul>
     </DocsArticle>
   )

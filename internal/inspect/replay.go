@@ -128,6 +128,7 @@ func Replay(ctx context.Context, ex *Exchange, target *url.URL, rt http.RoundTri
 		Kind:     KindHTTP,
 		Start:    start,
 		Replayed: true,
+		ReplayOf: ex.ID,
 		Req: CapturedReq{
 			Method:   method,
 			URL:      req.URL.String(),
@@ -165,6 +166,7 @@ func Replay(ctx context.Context, ex *Exchange, target *url.URL, rt http.RoundTri
 	out.Duration = time.Since(start)
 	out.Resp = CapturedResp{
 		Status:    resp.StatusCode,
+		Proto:     resp.Proto,
 		Header:    resp.Header.Clone(),
 		Body:      rbody,
 		BodySize:  rsize,

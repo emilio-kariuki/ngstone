@@ -19,7 +19,11 @@ const (
 )
 
 func dialControl(ctx context.Context, cfg Config) (net.Conn, error) {
-	var d net.Dialer
+	return dialRawControl(ctx, cfg)
+}
+
+func dialRawControl(ctx context.Context, cfg Config) (net.Conn, error) {
+	d := net.Dialer{Timeout: tlsHandshakeTimeout}
 	raw, err := d.DialContext(ctx, "tcp", cfg.ControlAddr)
 	if err != nil {
 		return nil, fmt.Errorf("agent: dial control: %w", err)
@@ -29,6 +33,23 @@ func dialControl(ctx context.Context, cfg Config) (net.Conn, error) {
 		return raw, nil
 	}
 
+	tlsCfg, err := controlTLSConfig(cfg)
+	if err != nil {
+		raw.Close()
+		return nil, err
+	}
+
+	tlsConn := tls.Client(raw, tlsCfg)
+	hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
+	defer cancel()
+	if err := tlsConn.HandshakeContext(hctx); err != nil {
+		raw.Close()
+		return nil, fmt.Errorf("agent: tls handshake: %w", err)
+	}
+	return tlsConn, nil
+}
+
+func controlTLSConfig(cfg Config) (*tls.Config, error) {
 	serverName := cfg.ServerName
 	if serverName == "" {
 		serverName = DefaultServerName
@@ -40,22 +61,13 @@ func dialControl(ctx context.Context, cfg Config) (net.Conn, error) {
 		MinVersion: tls.VersionTLS13,
 	}
 	if cfg.Pin != "" {
-		want, perr := parsePin(cfg.Pin)
-		if perr != nil {
-			raw.Close()
-			return nil, fmt.Errorf("agent: invalid -pin: %w", perr)
+		want, err := parsePin(cfg.Pin)
+		if err != nil {
+			return nil, fmt.Errorf("agent: invalid -pin: %w", err)
 		}
 		tlsCfg.VerifyPeerCertificate = pinVerifier(want)
 	}
-
-	tlsConn := tls.Client(raw, tlsCfg)
-	hctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
-	defer cancel()
-	if err := tlsConn.HandshakeContext(hctx); err != nil {
-		raw.Close()
-		return nil, fmt.Errorf("agent: tls handshake: %w", err)
-	}
-	return tlsConn, nil
+	return tlsCfg, nil
 }
 
 func parsePin(s string) ([sha256.Size]byte, error) {

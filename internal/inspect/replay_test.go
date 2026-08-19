@@ -95,6 +95,9 @@ func TestReplayReproducesRequestByteIdentically(t *testing.T) {
 	if !replayed.Replayed {
 		t.Fatal("replayed exchange not flagged")
 	}
+	if replayed.ReplayOf != ex.ID {
+		t.Fatalf("replay source = %q, want %q", replayed.ReplayOf, ex.ID)
+	}
 	if rr.count() != 2 {
 		t.Fatalf("app saw %d requests after replay, want 2", rr.count())
 	}

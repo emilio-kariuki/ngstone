@@ -9,7 +9,7 @@ import { ParamTable, Property } from "@/components/docs/param-table"
 
 export const metadata: Metadata = {
   title: "Access control",
-  description: "Per-tunnel HTTP basic auth and source-IP allowlisting, enforced at the edge.",
+  description: "Per-tunnel edge-enforced access controls and HTTP traffic policies.",
 }
 
 const TOC: TocItem[] = [
@@ -17,6 +17,7 @@ const TOC: TocItem[] = [
   { id: "credential-precedence", title: "Credential precedence" },
   { id: "allow-cidr", title: "IP allowlisting" },
   { id: "combining-both", title: "Combining both" },
+  { id: "traffic-policies", title: "Traffic policies" },
   { id: "security-notes", title: "Security notes" },
   { id: "requires-v2", title: "Requires protocol v2" },
 ]
@@ -145,6 +146,62 @@ tcp://amber-fox-42.example.com:14201 -> 127.0.0.1:22`}
         inside a raw TCP stream.
       </Callout>
 
+      <Anchor id="traffic-policies">Traffic policies</Anchor>
+      <p>
+        Add request-level rules to an HTTP tunnel with a strict JSON policy
+        file. The edge evaluates rules in order and stops at the first match:
+      </p>
+      <CodeBlock
+        filename="traffic-policy.json"
+        language="json"
+        code={`{
+  "default_action": "deny",
+  "rules": [
+    {"action": "allow", "path_prefix": "/public"},
+    {"action": "allow", "method": "GET", "path_prefix": "/preview", "header": "X-Preview", "header_value": "yes"}
+  ]
+}`}
+      />
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone port 3000 --policy-file traffic-policy.json
+$ ngstone preview 3000 --ttl 30m --policy-file traffic-policy.json`}
+      />
+      <ParamTable>
+        <Property name="default_action" type="string" defaultValue="allow">
+          Action for requests that match no rule: <code>allow</code> or{" "}
+          <code>deny</code>.
+        </Property>
+        <Property name="action" type="string" required>
+          Each rule uses <code>allow</code> or <code>deny</code>. A denied
+          request receives <code>403 Forbidden</code> and is never forwarded.
+        </Property>
+        <Property name="method" type="string">
+          Optional HTTP method match, such as <code>GET</code> or{" "}
+          <code>POST</code>.
+        </Property>
+        <Property name="path_prefix" type="string">
+          Optional URL-path prefix. Prefixes respect path boundaries, so{" "}
+          <code>/api</code> matches <code>/api/users</code> but not{" "}
+          <code>/apian</code>.
+        </Property>
+        <Property name="header, header_value" type="string">
+          Optional case-insensitive header name and exact value. Omit{" "}
+          <code>header_value</code> to match header presence.
+        </Property>
+        <Property name="--policy-file" type="string">
+          Load the policy for <code>port</code> or <code>preview</code>. In{" "}
+          <code>ngstone.json</code>, use <code>policy_file</code>; relative{" "}
+          paths resolve from the project file directory.
+        </Property>
+      </ParamTable>
+      <Callout variant="warning" title="Policies are not authentication">
+        A policy can hide paths or restrict methods, but it does not identify
+        callers. Combine it with <code>--basic-auth</code> or{" "}
+        <code>--allow-cidr</code> when the tunnel must be private. Policies{" "}
+        are HTTP-only; TCP tunnels reject them.
+      </Callout>
+
       <Anchor id="security-notes">Security notes</Anchor>
       <Callout variant="danger" title="Prefer the file or the env var over the flag">
         Command-line arguments are visible to any other local user for the
@@ -192,13 +249,14 @@ tcp://amber-fox-42.example.com:14201 -> 127.0.0.1:22`}
       <Anchor id="requires-v2">Requires protocol v2</Anchor>
       <p>
         Access control is carried in wire protocol v2. If an agent requests{" "}
-        <code>--basic-auth</code> or <code>--allow-cidr</code> and the edge
+        <code>--basic-auth</code>, <code>--allow-cidr</code>, or a traffic
+        policy and the edge
         only negotiates v1, the agent refuses to bind — it fails closed
         rather than silently opening an unprotected tunnel:
       </p>
       <CodeBlock
         language="text"
-        code={`ngstone: edge does not support access control (negotiated protocol v1); upgrade ngstoned to use --basic-auth/--allow-cidr`}
+        code={`ngstone: edge does not support access control or traffic policies (negotiated protocol v1); upgrade ngstoned`}
       />
       <p>
         Upgrade <code>ngstoned</code> to a version that offers protocol{" "}

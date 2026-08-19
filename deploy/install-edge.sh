@@ -4,6 +4,7 @@ set -Eeuo pipefail
 
 REPOSITORY="emilio-kariuki/ngstone"
 INSTALL_PATH="/usr/local/bin/ngstoned"
+AGENT_INSTALL_PATH="/usr/local/bin/ngstone"
 SERVICE_PATH="/etc/systemd/system/ngstoned.service"
 ENV_DIR="/etc/ngstoned"
 ENV_PATH="${ENV_DIR}/env"
@@ -11,9 +12,22 @@ VERSION="${NGSTONE_VERSION:-}"
 DOMAIN="${NGSTONE_DOMAIN:-}"
 EMAIL="${NGSTONE_CERT_EMAIL:-}"
 CF_API_TOKEN="${NGSTONE_CF_API_TOKEN:-}"
+ADMIN_TOKEN_HASH="${NGSTONE_ADMIN_TOKEN_SHA256:-}"
+ADMIN_TOKEN="${NGSTONE_ADMIN_TOKEN:-}"
+ALERT_WEBHOOK_URL="${NGSTONE_ALERT_WEBHOOK_URL:-}"
+ALERT_WEBHOOK_TOKEN="${NGSTONE_ALERT_WEBHOOK_TOKEN:-}"
 AUTH_TOKEN="${NGSTONE_AUTH_TOKEN:-}"
 ACME_CA="${NGSTONE_ACME_CA:-}"
 BINARY_PATH="${NGSTONE_EDGE_BINARY:-}"
+AGENT_BINARY_PATH="${NGSTONE_AGENT_BINARY:-}"
+SUBDOMAIN="${NGSTONE_SUBDOMAIN:-demo}"
+CREDENTIAL_TTL="${NGSTONE_CREDENTIAL_TTL:-24h}"
+CREDENTIALS_PATH="${NGSTONE_CREDENTIALS_FILE:-/var/lib/private/ngstoned/credentials.json}"
+DATABASE_URL="${NGSTONE_DATABASE_URL:-sqlite:///var/lib/ngstoned/control.db}"
+LEGACY_MODE=0
+PRESERVE_SCOPED=0
+INITIAL_TOKEN=""
+INITIAL_CREDENTIAL_ID=""
 SSH_PORT="${NGSTONE_SSH_PORT:-22}"
 SKIP_FIREWALL=0
 SKIP_DNS_CHECK=0
@@ -53,13 +67,22 @@ Options:
   --acme-ca staging|production
   --ssh-port PORT           SSH port to preserve in UFW (default: 22)
   --binary PATH             use a local ngstoned binary instead of downloading
+  --agent-binary PATH       use a local ngstone binary with --binary
+  --subdomain NAME          initial scoped credential subdomain (default: demo)
+  --credential-ttl DURATION initial scoped credential lifetime (default: 24h)
   --skip-firewall           do not configure UFW
   --skip-dns-check          do not verify apex and wildcard DNS first
   -h, --help                show this help
 
 The Cloudflare token is read from NGSTONE_CF_API_TOKEN or prompted for
-without echoing it. The auth token is generated automatically unless
-NGSTONE_AUTH_TOKEN is provided or an existing installation is detected.
+without echoing it. Fresh installs issue a scoped credential automatically.
+NGSTONE_AUTH_TOKEN and existing NGSTONE_TOKEN_SHA256 installations remain
+available as a legacy shared-token migration path.
+The management API stays loopback-only unless NGSTONE_ADMIN_TOKEN_SHA256 is set.
+Fresh installs use SQLite at /var/lib/ngstoned/control.db. Set
+NGSTONE_DATABASE_URL to a PostgreSQL URL to use PostgreSQL instead. Set
+NGSTONE_ADMIN_TOKEN when also setting NGSTONE_ADMIN_TOKEN_SHA256 if the
+installer should issue the first credential through the authenticated API.
 EOF
 }
 
@@ -111,6 +134,21 @@ while [[ $# -gt 0 ]]; do
     BINARY_PATH="$2"
     shift 2
     ;;
+  --agent-binary)
+    [[ $# -ge 2 ]] || fail "--agent-binary requires a path"
+    AGENT_BINARY_PATH="$2"
+    shift 2
+    ;;
+  --subdomain)
+    [[ $# -ge 2 ]] || fail "--subdomain requires a value"
+    SUBDOMAIN="$2"
+    shift 2
+    ;;
+  --credential-ttl)
+    [[ $# -ge 2 ]] || fail "--credential-ttl requires a duration"
+    CREDENTIAL_TTL="$2"
+    shift 2
+    ;;
   --skip-firewall)
     SKIP_FIREWALL=1
     shift
@@ -156,7 +194,7 @@ if command -v apt-get >/dev/null 2>&1; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl dnsutils openssl ufw
 fi
 
-for command_name in awk curl dig install openssl sha256sum systemctl tar; do
+for command_name in awk curl dig dirname install openssl runuser sha256sum stat systemctl tar; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command not found: $command_name"
 done
 
@@ -206,6 +244,11 @@ prompt_secret() {
 }
 
 EXISTING_HASH="$(get_env_value NGSTONE_TOKEN_SHA256)"
+EXISTING_CREDENTIALS_FILE="$(get_env_value NGSTONE_CREDENTIALS_FILE)"
+EXISTING_ADMIN_TOKEN_HASH="$(get_env_value NGSTONE_ADMIN_TOKEN_SHA256)"
+EXISTING_ALERT_WEBHOOK_URL="$(get_env_value NGSTONE_ALERT_WEBHOOK_URL)"
+EXISTING_ALERT_WEBHOOK_TOKEN="$(get_env_value NGSTONE_ALERT_WEBHOOK_TOKEN)"
+EXISTING_DATABASE_URL="$(get_env_value NGSTONE_DATABASE_URL)"
 EXISTING_CF_API_TOKEN="$(get_env_value NGSTONE_CF_API_TOKEN)"
 EXISTING_EMAIL="$(get_env_value NGSTONE_CERT_EMAIL)"
 EXISTING_DOMAIN="$(get_service_value -domain)"
@@ -223,6 +266,12 @@ fi
 if [[ -z "$CF_API_TOKEN" ]]; then
   prompt_secret "Cloudflare API token: " CF_API_TOKEN
 fi
+if [[ -z "$ALERT_WEBHOOK_URL" ]]; then
+  ALERT_WEBHOOK_URL="$EXISTING_ALERT_WEBHOOK_URL"
+fi
+if [[ -z "$ALERT_WEBHOOK_TOKEN" ]]; then
+  ALERT_WEBHOOK_TOKEN="$EXISTING_ALERT_WEBHOOK_TOKEN"
+fi
 
 if [[ -z "$ACME_CA" ]]; then
   ACME_CA="$EXISTING_ACME_CA"
@@ -234,6 +283,27 @@ if [[ -z "$ACME_CA" ]]; then
   fi
 fi
 ACME_CA="${ACME_CA,,}"
+
+if [[ -n "$EXISTING_CREDENTIALS_FILE" && -z "${NGSTONE_CREDENTIALS_FILE:-}" ]]; then
+  CREDENTIALS_PATH="$EXISTING_CREDENTIALS_FILE"
+fi
+if [[ -z "$ADMIN_TOKEN_HASH" ]]; then
+  ADMIN_TOKEN_HASH="$EXISTING_ADMIN_TOKEN_HASH"
+fi
+if [[ -z "${NGSTONE_DATABASE_URL:-}" && -n "$EXISTING_DATABASE_URL" ]]; then
+  DATABASE_URL="$EXISTING_DATABASE_URL"
+fi
+if [[ -n "$EXISTING_CREDENTIALS_FILE" && -f "$CREDENTIALS_PATH" ]]; then
+  PRESERVE_SCOPED=1
+fi
+
+case "$CREDENTIALS_PATH" in
+/*)
+  ;;
+*)
+  fail "NGSTONE_CREDENTIALS_FILE must be an absolute path"
+  ;;
+esac
 
 if [[ ! "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] || [[ "$DOMAIN" != *.* ]] || [[ "$DOMAIN" == *..* ]]; then
   fail "invalid domain: $DOMAIN"
@@ -247,17 +317,33 @@ fi
 if [[ -z "$CF_API_TOKEN" ]]; then
   fail "Cloudflare API token is required"
 fi
+if [[ -n "$ADMIN_TOKEN_HASH" && ! "$ADMIN_TOKEN_HASH" =~ ^[0-9a-fA-F]{64}$ ]]; then
+  fail "NGSTONE_ADMIN_TOKEN_SHA256 must be a 64-character hex digest"
+fi
+if [[ -n "$ADMIN_TOKEN" ]]; then
+  computed_admin_hash="$(printf '%s' "$ADMIN_TOKEN" | sha256sum | awk '{print $1}')"
+  if [[ -n "$ADMIN_TOKEN_HASH" && "${ADMIN_TOKEN_HASH,,}" != "$computed_admin_hash" ]]; then
+    fail "NGSTONE_ADMIN_TOKEN does not match NGSTONE_ADMIN_TOKEN_SHA256"
+  fi
+  ADMIN_TOKEN_HASH="$computed_admin_hash"
+fi
+if [[ "$DATABASE_URL" == *$'\n'* || "$DATABASE_URL" == *$'\r'* ]]; then
+  fail "NGSTONE_DATABASE_URL must not contain newlines"
+fi
 
 if [[ -n "$AUTH_TOKEN" ]]; then
+  LEGACY_MODE=1
   TOKEN_HASH="$(printf '%s' "$AUTH_TOKEN" | sha256sum | awk '{print $1}')"
+elif [[ -n "$EXISTING_CREDENTIALS_FILE" || -n "${NGSTONE_CREDENTIALS_FILE:-}" ]]; then
+  LEGACY_MODE=0
 elif [[ -n "$EXISTING_HASH" ]]; then
+  LEGACY_MODE=1
   TOKEN_HASH="$EXISTING_HASH"
   if [[ ! "$TOKEN_HASH" =~ ^[0-9a-fA-F]{64}$ ]]; then
     fail "existing NGSTONE_TOKEN_SHA256 is not a 64-character hex digest"
   fi
 else
-  AUTH_TOKEN="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
-  TOKEN_HASH="$(printf '%s' "$AUTH_TOKEN" | sha256sum | awk '{print $1}')"
+  LEGACY_MODE=0
 fi
 
 resolve_version() {
@@ -268,10 +354,21 @@ resolve_version() {
 }
 
 install_binary() {
-  local architecture archive checksum_line download_base
+  local architecture archive checksum_line download_base local_agent
   if [[ -n "$BINARY_PATH" ]]; then
     [[ -f "$BINARY_PATH" ]] || fail "edge binary not found: $BINARY_PATH"
     install -o root -g root -m 0755 "$BINARY_PATH" "$INSTALL_PATH"
+    if [[ -n "$AGENT_BINARY_PATH" ]]; then
+      [[ -f "$AGENT_BINARY_PATH" ]] || fail "agent binary not found: $AGENT_BINARY_PATH"
+      install -o root -g root -m 0755 "$AGENT_BINARY_PATH" "$AGENT_INSTALL_PATH"
+    else
+      local_agent="$(dirname "$BINARY_PATH")/ngstone"
+      if [[ -f "$local_agent" ]]; then
+        install -o root -g root -m 0755 "$local_agent" "$AGENT_INSTALL_PATH"
+      elif [[ "$LEGACY_MODE" -eq 0 ]]; then
+        fail "fresh scoped installs need --agent-binary or a ngstone binary next to the ngstoned binary"
+      fi
+    fi
     return
   fi
   if [[ -z "$VERSION" ]]; then
@@ -301,7 +398,9 @@ install_binary() {
   ( cd "$TEMP_DIR" && printf '%s\n' "$checksum_line" | sha256sum -c - )
   tar -xzf "${TEMP_DIR}/${archive}" -C "$TEMP_DIR"
   [[ -f "${TEMP_DIR}/ngstoned" ]] || fail "release archive did not contain ngstoned"
+  [[ -f "${TEMP_DIR}/ngstone" ]] || fail "release archive did not contain ngstone"
   install -o root -g root -m 0755 "${TEMP_DIR}/ngstoned" "$INSTALL_PATH"
+  install -o root -g root -m 0755 "${TEMP_DIR}/ngstone" "$AGENT_INSTALL_PATH"
 }
 
 check_dns() {
@@ -337,7 +436,22 @@ write_env() {
   local temporary
   install -d -o root -g root -m 0700 "$ENV_DIR"
   temporary="$(mktemp "${ENV_DIR}/.env.XXXXXX")"
-  printf 'NGSTONE_TOKEN_SHA256=%s\n' "$TOKEN_HASH" > "$temporary"
+  if [[ "$LEGACY_MODE" -eq 1 ]]; then
+    printf 'NGSTONE_TOKEN_SHA256=%s\n' "$TOKEN_HASH" > "$temporary"
+  elif [[ "$PRESERVE_SCOPED" -eq 1 ]]; then
+    printf 'NGSTONE_CREDENTIALS_FILE=%s\n' "$CREDENTIALS_PATH" > "$temporary"
+  else
+    printf 'NGSTONE_DATABASE_URL=%s\n' "$DATABASE_URL" > "$temporary"
+  fi
+  if [[ -n "$ADMIN_TOKEN_HASH" ]]; then
+    printf 'NGSTONE_ADMIN_TOKEN_SHA256=%s\n' "$ADMIN_TOKEN_HASH" >> "$temporary"
+  fi
+  if [[ -n "$ALERT_WEBHOOK_URL" ]]; then
+    printf 'NGSTONE_ALERT_WEBHOOK_URL=%s\n' "$ALERT_WEBHOOK_URL" >> "$temporary"
+  fi
+  if [[ -n "$ALERT_WEBHOOK_TOKEN" ]]; then
+    printf 'NGSTONE_ALERT_WEBHOOK_TOKEN=%s\n' "$ALERT_WEBHOOK_TOKEN" >> "$temporary"
+  fi
   printf 'NGSTONE_CERT_EMAIL=%s\n' "$EMAIL" >> "$temporary"
   printf 'NGSTONE_CF_API_TOKEN=%s\n' "$CF_API_TOKEN" >> "$temporary"
   chown root:root "$temporary"
@@ -416,6 +530,26 @@ wait_for_health() {
   fail "ngstoned started but its loopback health endpoint did not become ready"
 }
 
+issue_scoped_credential() {
+  local issue_output
+  if [[ "$LEGACY_MODE" -eq 1 || "$PRESERVE_SCOPED" -eq 1 ]]; then
+    return
+  fi
+  [[ -x "$AGENT_INSTALL_PATH" ]] || fail "the ngstone agent binary is required to issue the initial scoped credential"
+  if [[ -n "$ADMIN_TOKEN_HASH" && -z "$ADMIN_TOKEN" ]]; then
+    warn "NGSTONE_ADMIN_TOKEN_SHA256 is configured without NGSTONE_ADMIN_TOKEN; the initial credential was not issued. Run ngstone admin credentials issue with the bearer token after installation."
+    return
+  fi
+  if [[ -n "$ADMIN_TOKEN" ]]; then
+    issue_output="$($AGENT_INSTALL_PATH admin credentials issue --server http://127.0.0.1:4041 --token "$ADMIN_TOKEN" --subdomain "$SUBDOMAIN" --ttl "$CREDENTIAL_TTL" --json)" || fail "could not issue the initial scoped credential"
+  else
+    issue_output="$($AGENT_INSTALL_PATH admin credentials issue --server http://127.0.0.1:4041 --subdomain "$SUBDOMAIN" --ttl "$CREDENTIAL_TTL" --json)" || fail "could not issue the initial scoped credential"
+  fi
+  INITIAL_TOKEN="$(printf '%s\n' "$issue_output" | awk -F'"' '$2 == "token" { print $4; exit }')"
+  INITIAL_CREDENTIAL_ID="$(printf '%s\n' "$issue_output" | awk -F'"' '$2 == "id" { print $4; exit }')"
+  [[ -n "$INITIAL_TOKEN" && -n "$INITIAL_CREDENTIAL_ID" ]] || fail "the credential command returned no usable token"
+}
+
 info "checking DNS"
 check_dns
 info "installing edge binary"
@@ -429,17 +563,32 @@ configure_firewall
 info "starting ngstoned"
 start_service
 wait_for_health
+info "issuing scoped tunnel credential"
+issue_scoped_credential
 
 CONTROL_HOST="edge.${DOMAIN}"
 printf '\nngstoned is running for %s using %s certificates.\n' "$DOMAIN" "$ACME_CA"
 printf 'Health endpoint: http://127.0.0.1:4041/healthz\n'
-if [[ -n "$AUTH_TOKEN" ]]; then
+if [[ -n "$INITIAL_TOKEN" ]]; then
+  printf '\nSave this scoped auth token now; it is not written to the VPS:\n%s\n' "$INITIAL_TOKEN"
+  printf '\nCredential ID: %s\n' "$INITIAL_CREDENTIAL_ID"
+  printf '\nLaptop setup:\n'
+  printf "ngstone auth '%s' --server %s:4443 --server-name %s\n" "$INITIAL_TOKEN" "$CONTROL_HOST" "$CONTROL_HOST"
+  printf 'ngstone port 3000 --server %s:4443 --server-name %s --subdomain %s\n' "$CONTROL_HOST" "$CONTROL_HOST" "$SUBDOMAIN"
+elif [[ -n "$AUTH_TOKEN" ]]; then
   printf '\nSave this auth token now; it is not written to the VPS:\n%s\n' "$AUTH_TOKEN"
   printf '\nLaptop setup:\n'
   printf "ngstone auth '%s' --server %s:4443 --server-name %s\n" "$AUTH_TOKEN" "$CONTROL_HOST" "$CONTROL_HOST"
   printf 'ngstone port 3000 --server %s:4443 --server-name %s --subdomain demo\n' "$CONTROL_HOST" "$CONTROL_HOST"
 else
-  printf '\nThe existing auth token hash was preserved. Use the original token on the laptop.\n'
+  if [[ "$LEGACY_MODE" -eq 1 ]]; then
+    printf '\nThe existing auth token hash was preserved. Use the original token on the laptop.\n'
+  elif [[ "$PRESERVE_SCOPED" -eq 0 ]]; then
+    printf '\nDurable control-plane storage is ready. Use the management API to issue a scoped credential:\n'
+    printf 'ngstone admin credentials issue --server http://127.0.0.1:4041 --subdomain %s --ttl %s\n' "$SUBDOMAIN" "$CREDENTIAL_TTL"
+  else
+    printf '\nThe existing scoped credential file was preserved. Use its existing token on the laptop.\n'
+  fi
 fi
 if [[ "$ACME_CA" == staging ]]; then
   printf '\nAfter staging health checks pass, rerun with --acme-ca production.\n'

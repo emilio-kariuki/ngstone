@@ -74,7 +74,9 @@ export default function CustomSubdomainsPage() {
       <Anchor id="collisions-and-takeover">Collisions and takeover</Anchor>
       <p>
         Requesting a name someone else already holds resolves differently
-        depending on who&apos;s asking:
+        depending on who&apos;s asking. The rules below apply to normal binds;
+        use <code>--multi-connector</code> when the agents are intentional
+        members of one load-balanced tunnel:
       </p>
       <ParamTable>
         <Property name="Different instance, holder is live" type="BindErr">
@@ -90,6 +92,14 @@ export default function CustomSubdomainsPage() {
           Immediate takeover, regardless of whether the old session still
           looks alive — this is what makes reconnecting after your laptop
           sleeps feel instant.
+        </Property>
+        <Property name="Multi-connector mode" type="Pool">
+          Run every agent with <code>--multi-connector</code> and the same
+          explicit <code>--subdomain</code>. Live connectors share requests;
+          a reconnect replaces only its own connector, and stopping one
+          drains its in-flight requests without taking the other connectors
+          offline. HTTP/2, access-control, and traffic-policy settings must
+          match.
         </Property>
       </ParamTable>
       <CardGrid columns={1}>

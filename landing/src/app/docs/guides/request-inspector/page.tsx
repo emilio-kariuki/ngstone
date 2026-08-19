@@ -19,6 +19,9 @@ const TOC: TocItem[] = [
   { id: "the-request-list", title: "The request list" },
   { id: "inspecting", title: "Inspecting a request" },
   { id: "bodies-truncation", title: "Bodies and truncation" },
+  { id: "har-export", title: "HAR export" },
+  { id: "workflow-shortcuts", title: "Workflow shortcuts" },
+  { id: "saved-replay-files", title: "Saved replay files" },
   { id: "key-bindings", title: "Key bindings" },
   { id: "plain-output", title: "Plain output instead" },
 ]
@@ -129,6 +132,67 @@ export default function RequestInspectorPage() {
         Binary bodies of any kind render as a hex preview.
       </p>
 
+      <Anchor id="har-export">HAR export</Anchor>
+      <p>
+        Export the in-memory request history when the process exits with{" "}
+        <code>--har</code>:
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone port 3000 --har requests.har
+$ ngstone up --har project-requests.har`}
+      />
+      <p>
+        The export is HAR 1.2. It includes the captured request and response
+        headers, query parameters, timing, and bodies, with binary bodies
+        encoded as base64. The inspector keeps the latest 200 exchanges, so
+        the export is bounded and is written only when the tunnel exits.
+      </p>
+      <Callout variant="warning" title="Review HAR files before sharing">
+        Authorization, cookie, <code>Set-Cookie</code>, proxy-authorization,
+        and <code>X-API-Key</code> headers are replaced with{" "}
+        <code>[REDACTED]</code> by default. Pass{" "}
+        <code>--har-include-sensitive</code> only when you need those headers.
+        Request and response bodies are still included and may contain
+        secrets, so inspect the file before uploading or sharing it. The
+        output file is created with mode <code>0600</code>.
+      </Callout>
+
+      <Anchor id="workflow-shortcuts">Workflow shortcuts</Anchor>
+      <p>
+        The inspector is also a small response investigation workbench. Press{" "}
+        <code>c</code> to copy a redacted cURL command, or{" "}
+        <code>C</code> when you explicitly need sensitive headers. After{" "}
+        replaying a request with <code>r</code>, press <code>d</code> on the{" "}
+        original or replay row to compare response status, headers, and body.
+      </p>
+      <Callout variant="note" title="Clipboard fallback">
+        Copying uses <code>pbcopy</code> on macOS, <code>wl-copy</code> or{" "}
+        <code>xclip</code> on Linux, and <code>clip</code> on Windows. If no{" "}
+        clipboard command is available, the inspector prints the generated{" "}
+        command in its error line so it can still be copied manually.
+      </Callout>
+
+      <Anchor id="saved-replay-files">Saved replay files</Anchor>
+      <p>
+        Press <code>s</code> on an HTTP request to write a private{" "}
+        <code>ngstone-replay-&lt;id&gt;.json</code> file in the current{" "}
+        directory. It contains the complete captured request, including the{" "}
+        body, so treat it like a credential-bearing fixture and keep it out of{" "}
+        source control.
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone replay ngstone-replay-000000000001.json --target 3000
+$ ngstone replay ngstone-replay-000000000001.json --target 3000 --json
+$ ngstone replay ngstone-replay-000000000001.json --curl`}
+      />
+      <p>
+        The CLI replay path sends the request directly to the local target,
+        never back through the public tunnel. Use <code>--curl</code> to print
+        a portable command instead of sending it.
+      </p>
+
       <Anchor id="key-bindings">Key bindings</Anchor>
       <ParamTable>
         <Property name="↑/k, ↓/j" type="">
@@ -142,6 +206,15 @@ export default function RequestInspectorPage() {
         </Property>
         <Property name="e" type="">
           Edit-and-replay: open a form over method, URL, headers, and body.
+        </Property>
+        <Property name="c / C" type="">
+          Copy a redacted or sensitive cURL command for the selected request.
+        </Property>
+        <Property name="d" type="">
+          Compare a response with its replay; press again to close the diff.
+        </Property>
+        <Property name="s" type="">
+          Save the selected request as a private replay JSON file.
         </Property>
         <Property name="/" type="">
           Filter by method, path substring, or status class.

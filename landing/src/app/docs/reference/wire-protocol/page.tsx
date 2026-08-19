@@ -29,8 +29,8 @@ export default function WireProtocolPage() {
       <p>
         A dedicated control stream carries a small, fully-typed set of JSON
         messages between the agent and the edge. Every other stream — one
-        per proxied request — carries a single JSON preamble followed by raw
-        bytes.
+        per HTTP/1.1 exchange or native HTTP/2 connection — carries a single
+        JSON preamble followed by the selected protocol bytes.
       </p>
 
       <Anchor id="framing">Framing &amp; encoding</Anchor>
@@ -47,9 +47,10 @@ export default function WireProtocolPage() {
         JSON was chosen over protobuf or gob — it&apos;s greppable in debug
         logs, control-plane volume is a few messages a minute so performance
         is irrelevant, and it avoids codegen for a handful of message types
-        owned by one repo. Data streams carry{" "}
-        <strong>raw HTTP/1.1 bytes</strong> after the preamble — JSON never
-        touches the hot path.
+        owned by one repo. HTTP/1.1 data streams carry{" "}
+        <strong>raw HTTP/1.1 bytes</strong> after the preamble; native HTTP/2
+        streams carry the HTTP/2 preface and frames. JSON never touches either
+        data path.
       </p>
 
       <Anchor id="envelope">The message envelope</Anchor>
@@ -103,8 +104,10 @@ type AuthErr struct {
       <p>
         The first message must be <code>Auth</code> within{" "}
         <strong>5 seconds</strong> of TLS establishment, or the edge closes
-        the connection. The token check is a constant-time comparison
-        against the SHA-256 of the configured token.
+        the connection. In scoped-credential mode the edge hashes the bearer
+        token, checks its expiration and revocation state, and attaches the
+        resulting scope to the session. The legacy mode compares the token
+        against the configured SHA-256 digest.
       </p>
 
       <Anchor id="tunnel-lifecycle">Tunnel lifecycle</Anchor>
@@ -149,6 +152,33 @@ type AuthErr struct {
           <code>kind: &quot;http&quot;</code> and{" "}
           <code>kind: &quot;tcp&quot;</code>.
         </Property>
+        <Property name="policy" type="object">
+          v2 only and HTTP-only. Ordered method/path/header allow-or-deny
+          rules sent from <code>--policy-file</code>. The edge evaluates the
+          policy before opening a request stream.
+        </Property>
+        <Property name="policy_digest" type="string">
+          SHA-256 digest of the normalized policy. The agent includes it in
+          <code>Bind</code>, and the edge echoes it in <code>BindOK</code> so
+          an older edge cannot silently ignore a policy.
+        </Property>
+        <Property name="http2" type="bool">
+          v2 only and HTTP-only. Selects the native HTTP/2 data path. The edge
+          echoes this in <code>BindOK</code>; the agent fails closed if an
+          older edge silently ignores the request.
+        </Property>
+        <Property name="multi_connector" type="bool">
+          v2 only and HTTP-only. Requires an explicit subdomain and lets
+          multiple sessions join one load-balanced connector pool. Every
+          connector must match the pool&apos;s HTTP/2, access-control, and
+          traffic-policy settings. The edge echoes this in <code>BindOK</code>.
+        </Property>
+        <Property name="connector_token_sha256" type="string">
+          v2 only and required with <code>multi_connector</code>. SHA-256 hex
+          digest of the per-tunnel connector secret. The secret itself is
+          never placed in the control message; a mismatch prevents a session
+          from joining the pool.
+        </Property>
         <Property name="hostname" type="string">
           Returned in <code>BindOK</code>: the full bound hostname, e.g.{" "}
           <code>api.ngstone.site</code>.
@@ -164,15 +194,18 @@ type AuthErr struct {
           Returned in <code>BindErr</code>:{" "}
           <code>subdomain_taken</code>, <code>invalid_subdomain</code>,{" "}
           <code>kind_unsupported</code>, <code>port_unavailable</code>,{" "}
-          <code>too_many_binds</code>, or <code>invalid_access</code>.
+          <code>too_many_binds</code>, <code>invalid_access</code>, or{" "}
+          <code>connector_config_mismatch</code>, or{" "}
+          <code>credential_scope</code>.
         </Property>
       </ParamTable>
       <Callout variant="note" title="invalid_access">
-        Returned when the access-control fields fail validation (a
+        Returned when access-control or policy fields fail validation (a
         malformed CIDR, a digest that isn&apos;t 32 bytes, too many
-        credentials/CIDRs, basic auth on a <code>tcp</code> bind), and also
+        credentials/CIDRs, an invalid policy, or protected fields on a{" "}
+        <code>tcp</code> bind), and also
         when a session negotiated protocol v1 but the <code>Bind</code>{" "}
-        carries any access-control field — see{" "}
+        carries any protected field — see{" "}
         <a href="#versioning">Versioning</a>.
       </Callout>
       <p>
@@ -195,6 +228,13 @@ type AuthErr struct {
         <strong>15 seconds</strong>; <code>Pong</code> echoes the ping&apos;s
         timestamp so the sender can log RTT. <strong>Three consecutive
         misses</strong> (≈45 seconds) declares the peer dead.
+      </p>
+      <p>
+        A scoped credential is revalidated from the credential file on each
+        edge heartbeat. If it expires, is revoked, or the file becomes
+        unreadable, the edge sends <code>Goodbye</code> and releases the
+        session&apos;s bindings. This keeps revocation independent without
+        putting the plaintext token on the wire again.
       </p>
       <CodeBlock
         language="go"
@@ -223,13 +263,21 @@ type Pong struct { TS int64 \`json:"ts_unix_ms"\` } // echoes Ping.TS`}
       <CodeBlock
         language="go"
         code={`type StreamOpen struct {
-    Kind       string \`json:"kind"\`        // "http" or "tcp"
+    Kind       string \`json:"kind"\`        // "http", "h2", or "tcp"
     Host       string \`json:"host"\`        // which binding this request targets
     ReqID      string \`json:"req_id"\`      // edge-minted ULID; ties edge logs ↔
                                              // inspector entries
     ClientAddr string \`json:"client_addr"\` // public client ip:port
 }`}
       />
+      <p>
+        A <code>Kind: &quot;h2&quot;</code> stream carries a native HTTP/2
+        connection after the preamble. The edge opens it with the HTTP/2
+        client transport; the agent serves it with an HTTP/2 server, allowing
+        request trailers, response trailers, streaming, and full-duplex
+        exchanges to pass through. A <code>Kind: &quot;http&quot;</code> stream
+        continues to carry one HTTP/1.1 request/response exchange.
+      </p>
       <p>
         <code>ClientAddr</code> is carried here rather than derived from the
         stream, because a <code>Kind: &quot;tcp&quot;</code> stream has no{" "}
@@ -251,15 +299,22 @@ type Pong struct { TS int64 \`json:"ts_unix_ms"\` } // echoes Ping.TS`}
         v2 added the three <code>Bind</code> access-control fields above (
         <code>basic_auth_sha256</code>, <code>basic_auth_realm</code>,{" "}
         <code>allow_cidrs</code>) and the <code>invalid_access</code> error
-        code. Access control is a hard v2 requirement, not a
-        best-effort one: if a session negotiates v1, the edge rejects a{" "}
-        <code>Bind</code> carrying any access-control field with{" "}
+        code. Access control and traffic policies are hard v2 requirements,
+        not best-effort features: if a session negotiates v1, the edge rejects
+        a <code>Bind</code> carrying any protected field with{" "}
         <code>invalid_access</code> rather than silently binding without
         protection, and the agent checks this client-side too — it refuses
         to send the <code>Bind</code> at all when{" "}
-        <code>--basic-auth</code>/<code>--allow-cidr</code> was requested but
-        the negotiated version is below <code>2</code>. Either way the
-        tunnel fails closed instead of coming up unprotected.
+        <code>--basic-auth</code>, <code>--allow-cidr</code>, or{" "}
+        <code>--policy-file</code> was requested but the negotiated version is
+        below <code>2</code>. A policy also requires a matching digest in{" "}
+        <code>BindOK</code>. Either way the tunnel fails closed instead of
+        coming up unprotected.
+      </p>
+      <p>
+        HTTP/2 mode is also v2-only and requires the <code>http2</code> echo in
+        <code>BindOK</code>, so an older edge cannot silently fall back to
+        HTTP/1.1.
       </p>
       <p>
         Additive JSON fields never bump the version — unknown fields are

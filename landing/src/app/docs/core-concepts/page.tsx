@@ -97,7 +97,9 @@ export default function CoreConceptsPage() {
       <p>
         Routing a request is a read lock and a map lookup. A miss returns an
         immediate <code>404</code> without ever touching the agent; a hit
-        hands the request to that binding&apos;s session.
+        selects the next healthy connector in that binding&apos;s pool. Normal
+        tunnels have one connector, while <code>--multi-connector</code> named
+        tunnels round-robin requests across several agent sessions.
       </p>
 
       <Anchor id="instance-identity">Instance identity</Anchor>

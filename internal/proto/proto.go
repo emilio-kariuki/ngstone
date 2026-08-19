@@ -3,6 +3,8 @@ package proto
 import (
 	"encoding/json"
 	"sync/atomic"
+
+	"ngstone/internal/policy"
 )
 
 const ProtoVersion = 2
@@ -27,24 +29,29 @@ const (
 )
 
 const (
-	CodeBadToken         = "bad_token"
-	CodeNoCommonVersion  = "no_common_version"
-	CodeSubdomainTaken   = "subdomain_taken"
-	CodeInvalidSubdomain = "invalid_subdomain"
-	CodeKindUnsupported  = "kind_unsupported"
-	CodeUnknownType      = "unknown_type"
-	CodeMalformed        = "malformed"
-	CodeNotBound         = "not_bound"
-	CodeInternal         = "internal"
-	CodePortUnavailable  = "port_unavailable"
-	CodeTooManyBinds     = "too_many_binds"
-	CodeInvalidAccess    = "invalid_access"
+	CodeBadToken                = "bad_token"
+	CodeNoCommonVersion         = "no_common_version"
+	CodeSubdomainTaken          = "subdomain_taken"
+	CodeInvalidSubdomain        = "invalid_subdomain"
+	CodeKindUnsupported         = "kind_unsupported"
+	CodeUnknownType             = "unknown_type"
+	CodeMalformed               = "malformed"
+	CodeNotBound                = "not_bound"
+	CodeInternal                = "internal"
+	CodePortUnavailable         = "port_unavailable"
+	CodeTooManyBinds            = "too_many_binds"
+	CodeInvalidAccess           = "invalid_access"
+	CodeConnectorConfigMismatch = "connector_config_mismatch"
+	CodeCredentialScope         = "credential_scope"
 )
 
 const (
-	KindHTTP = "http"
-	KindTCP  = "tcp"
+	KindHTTP  = "http"
+	KindHTTP2 = "h2"
+	KindTCP   = "tcp"
 )
+
+const GoodbyeReasonCredentialInactive = "tunnel credential is inactive"
 
 type Msg struct {
 	Type string          `json:"type"`
@@ -71,20 +78,29 @@ type AuthErr struct {
 }
 
 type Bind struct {
-	Kind       string `json:"kind"`
-	Subdomain  string `json:"subdomain,omitempty"`
-	RemotePort int    `json:"remote_port,omitempty"`
-	Takeover   bool   `json:"takeover,omitempty"`
+	Kind                 string `json:"kind"`
+	Name                 string `json:"name,omitempty"`
+	Subdomain            string `json:"subdomain,omitempty"`
+	RemotePort           int    `json:"remote_port,omitempty"`
+	Takeover             bool   `json:"takeover,omitempty"`
+	HTTP2                bool   `json:"http2,omitempty"`
+	MultiConnector       bool   `json:"multi_connector,omitempty"`
+	ConnectorTokenSHA256 string `json:"connector_token_sha256,omitempty"`
 
-	BasicAuthSHA256 []string `json:"basic_auth_sha256,omitempty"`
-	BasicAuthRealm  string   `json:"basic_auth_realm,omitempty"`
-	AllowCIDRs      []string `json:"allow_cidrs,omitempty"`
+	BasicAuthSHA256 []string       `json:"basic_auth_sha256,omitempty"`
+	BasicAuthRealm  string         `json:"basic_auth_realm,omitempty"`
+	AllowCIDRs      []string       `json:"allow_cidrs,omitempty"`
+	Policy          *policy.Policy `json:"policy,omitempty"`
+	PolicyDigest    string         `json:"policy_digest,omitempty"`
 }
 
 type BindOK struct {
-	Hostname string `json:"hostname"`
-	URL      string `json:"url"`
-	Port     int    `json:"port,omitempty"`
+	Hostname       string `json:"hostname"`
+	URL            string `json:"url"`
+	Port           int    `json:"port,omitempty"`
+	HTTP2          bool   `json:"http2,omitempty"`
+	MultiConnector bool   `json:"multi_connector,omitempty"`
+	PolicyDigest   string `json:"policy_digest,omitempty"`
 }
 
 type BindErr struct {

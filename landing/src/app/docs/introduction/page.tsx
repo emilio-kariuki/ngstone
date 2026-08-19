@@ -97,7 +97,7 @@ export default function IntroductionPage() {
       </Callout>
       <p>The following are explicitly out of scope for v1:</p>
       <ul>
-        <li>Native gRPC and h2c backends</li>
+        <li>WebSocket over h2 extended CONNECT</li>
         <li>Defending against volumetric DDoS beyond your VPS&apos;s own capacity</li>
         <li>VPS compromise — the edge is treated as trusted infrastructure</li>
         <li>OAuth-grade authentication in front of tunnels</li>

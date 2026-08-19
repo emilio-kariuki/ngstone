@@ -17,9 +17,17 @@ coverage.html
 
 .DS_Store
 landing/node_modules/
+android/.gradle/
+android/local.properties
+android/**/build/
+android/.kotlin/
+ios/.build/
+ios/DerivedData/
 # secrets — never commit
 token.md
 *.token
+credentials.json
+*.credentials.json
 .env
 .env.*
 
@@ -28,3 +36,4 @@ CLAUDE.md
 **/CLAUDE.md
 AGENTS.md
 .claude/
+REVIEW.md

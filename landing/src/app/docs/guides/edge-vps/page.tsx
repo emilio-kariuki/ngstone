@@ -21,7 +21,7 @@ const TOC: TocItem[] = [
   { id: "dns-records", title: "DNS records" },
   { id: "cloudflare-token", title: "The Cloudflare API token" },
   { id: "two-certificates", title: "Two certificates, not one" },
-  { id: "auth-token", title: "Generating an auth token" },
+  { id: "auth-token", title: "Scoped tunnel credentials" },
   { id: "install-the-binary", title: "Installing the binary" },
   { id: "systemd-unit", title: "Running it under systemd" },
   { id: "firewall", title: "Firewall" },
@@ -47,7 +47,7 @@ export default function EdgeVpsPage() {
       <p>
         On a fresh Ubuntu or Debian VPS, create the apex and wildcard DNS
         records first, then install the edge from a checkout. The installer
-        downloads the release binary, verifies its checksum, creates the
+        downloads both release binaries, verifies their checksums, creates the
         root-only secrets file, installs the hardened systemd unit, configures
         UFW, and starts <code>ngstoned</code>:
       </p>
@@ -62,7 +62,9 @@ $ sudo ./deploy/install-edge.sh \\
       />
       <p>
         It prompts for a narrowly scoped Cloudflare DNS token without
-        echoing it, and prints the generated agent token once. Use{" "}
+        echoing it, initializes durable SQLite storage, and prints a scoped
+        agent credential once. Set <code>NGSTONE_DATABASE_URL</code> before
+        running it to use PostgreSQL. Use{" "}
         <code>--acme-ca staging</code> while validating DNS and promote to{" "}
         <code>production</code> after the health check passes. The installer
         does not create DNS records, so the apex and wildcard must already
@@ -78,7 +80,7 @@ $ sudo ./deploy/install-edge.sh \\
         code={`$ sudo ./deploy/uninstall.sh`}
       />
       <p>
-        Certificate and ACME state is preserved by default under{" "}
+        Certificate, ACME, and default SQLite control-plane state is preserved by default under{" "}
         <code>/var/lib/private/ngstoned</code>, so a later reinstall can reuse
         it. To delete that state and remove matching public UFW allow rules,
         opt in explicitly:
@@ -142,12 +144,13 @@ $ sudo ./deploy/install-edge.sh \\
       <p>
         Use <code>AAAA</code> instead if the VPS is IPv6-only, or add both.
       </p>
-      <Callout variant="warning" title="Set both records to DNS only (grey cloud)">
-        Cloudflare&apos;s orange-cloud proxy terminates TLS itself and will
-        not carry the agent&apos;s long-lived control connection on{" "}
-        <code>:4443</code>. <code>ngstoned</code> terminates its own TLS;
-        proxying in front of it breaks both certificate validation and the
-        tunnel.
+      <Callout variant="warning" title="DNS-only is simplest; auto has a :443 fallback">
+        Cloudflare&apos;s orange-cloud proxy cannot carry the raw agent control
+        connection on <code>:4443</code>, but the default{" "}
+        <code>--transport auto</code> can fall back to the authenticated
+        WebSocket control endpoint on HTTPS <code>:443</code> when WebSockets
+        are enabled. Use DNS-only records when forcing{" "}
+        <code>--transport raw</code> or when you want the simplest path.
       </Callout>
 
       <Anchor id="cloudflare-token">The Cloudflare API token</Anchor>
@@ -198,8 +201,9 @@ $ sudo ./deploy/install-edge.sh \\
         This is forced anyway, because a wildcard covers exactly one
         left-most label (RFC 6125) — <code>*.example.com</code> does{" "}
         <em>not</em> match SNI <code>example.com</code>. The wildcard serves
-        public tunnel traffic on <code>:443</code>; the apex certificate
-        serves the control plane on <code>:4443</code>, where agents connect.
+        public tunnel traffic; the apex certificate serves the WebSocket
+        fallback on <code>:443</code> and the raw control plane on{" "}
+        <code>:4443</code>.
         Both names validate through the same{" "}
         <code>_acme-challenge.example.com</code> TXT record.
       </p>
@@ -213,42 +217,52 @@ $ sudo ./deploy/install-edge.sh \\
         certificate&apos;s expiry separately — check both, not just one.
       </Callout>
 
-      <Anchor id="auth-token">Generating an auth token</Anchor>
-      <Callout variant="note" title="There is no ngstone token command">
-        Token generation is a shell one-liner, not a CLI verb. The edge only
-        ever stores the SHA-256 hash; the plaintext lives on machines
-        running the agent and never touches the VPS disk.
+      <Anchor id="auth-token">Durable storage and scoped tunnel credentials</Anchor>
+      <Callout variant="note" title="Issue one credential per tunnel">
+        SQLite is the default control-plane store. It persists tunnel names,
+        ownership, credentials, connector leases, audit events, traffic
+        policies, and custom-domain registrations. The edge stores only a
+        hash of each scoped credential; the plaintext is printed once by the
+        management API and never stored.
       </Callout>
       <CodeBlock
         language="bash"
-        code={`$ TOKEN=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
-$ HASH=$(printf '%s' "$TOKEN" | shasum -a 256 | cut -d' ' -f1)   # sha256sum on Linux
-$ echo "$TOKEN"   # keep this for 'ngstone auth' on the agent machine
-$ echo "$HASH"    # this goes to the edge`}
+        code={"$ ngstone admin credentials issue --server http://127.0.0.1:4041 \\\n$   --subdomain demo --ttl 24h\ncredential <id> issued\ntoken: <save this value on the laptop>"}
       />
       <p>
-        The hash must be 64 hex characters; <code>ngstoned</code> refuses to
-        start otherwise. There is exactly one token per edge — rotating it
-        means changing the hash and restarting, which invalidates every
-        agent at once.
+        Copy the printed token to the laptop and run <code>ngstone auth</code>,
+        then use <code>ngstone port 3000 --subdomain demo</code>. Set{" "}
+        <code>NGSTONE_DATABASE_URL=sqlite:///var/lib/ngstoned/control.db</code>
+        in the unit&apos;s environment. For active/active edges, use the same
+        PostgreSQL URL on every edge and a different <code>NGSTONE_EDGE_ID</code>.
       </p>
       <p>
-        The edge reads three values from its environment. Put them in{" "}
+        The edge reads its storage and certificate values from the environment. Put them in{" "}
         <code>/etc/ngstoned/env</code>, mode <code>0600</code>, owned by
         root:
       </p>
       <CodeBlock
         filename="/etc/ngstoned/env"
         language="ini"
-        code={`NGSTONE_TOKEN_SHA256=3b1f0c2d…64 hex characters…9a7e
+        code={`NGSTONE_DATABASE_URL=sqlite:///var/lib/ngstoned/control.db
+NGSTONE_EDGE_ID=edge-a
 NGSTONE_CERT_EMAIL=you@example.com
 NGSTONE_CF_API_TOKEN=cf_fake_token_value_goes_here`}
       />
       <ParamTable>
-        <Property name="NGSTONE_TOKEN_SHA256" type="env" required>
-          Hex SHA-256 of the auth token. Equivalent flag{" "}
-          <code>-token-sha256</code>; the environment wins when both are
-          set.
+        <Property name="NGSTONE_DATABASE_URL" type="env" required>
+          SQLite or PostgreSQL control-plane URL. Use a shared PostgreSQL URL
+          for multiple edge servers.
+        </Property>
+        <Property name="NGSTONE_EDGE_ID" type="env" required>
+          Stable identity for this edge in connector leases and audit events.
+        </Property>
+        <Property name="NGSTONE_CREDENTIALS_FILE" type="env">
+          Compatibility path to the versioned scoped credential file.
+        </Property>
+        <Property name="NGSTONE_TOKEN_SHA256" type="env">
+          Legacy shared-token SHA-256. Equivalent flag <code>-token-sha256</code>;
+          use it only while migrating older installations.
         </Property>
         <Property name="NGSTONE_CF_API_TOKEN" type="env" required>
           The scoped Cloudflare token. Equivalent flag{" "}
@@ -266,8 +280,9 @@ NGSTONE_CF_API_TOKEN=cf_fake_token_value_goes_here`}
         <code>/proc/&lt;pid&gt;/cmdline</code> is world-readable, so any
         local user can read a flag value with <code>ps auxww</code> — but
         not the process environment. That is precisely why{" "}
-        <code>ngstoned</code> prefers <code>$NGSTONE_TOKEN_SHA256</code> and{" "}
-        <code>$NGSTONE_CF_API_TOKEN</code> over their flags. Keep both out
+        <code>ngstoned</code> prefers <code>$NGSTONE_CREDENTIALS_FILE</code>,{" "}
+        the legacy <code>$NGSTONE_TOKEN_SHA256</code>, and{" "}
+        <code>$NGSTONE_CF_API_TOKEN</code> over their flags. Keep all out
         of <code>ExecStart</code>.
       </Callout>
 
@@ -285,7 +300,8 @@ $ BASE=https://github.com/emilio-kariuki/ngstone/releases/download/$VERSION
 $ curl -fsSLO "$BASE/$ARCHIVE"
 $ curl -fsSLO "$BASE/checksums.txt"
 $ sha256sum --ignore-missing -c checksums.txt
-$ tar -xzf "$ARCHIVE" ngstoned
+$ tar -xzf "$ARCHIVE" ngstone ngstoned
+$ sudo install -m 0755 ngstone /usr/local/bin/ngstone
 $ sudo install -m 0755 ngstoned /usr/local/bin/ngstoned
 $ ngstoned -version`}
       />
@@ -390,8 +406,9 @@ $ systemctl status ngstoned`}
           tunnel traffic lands.
         </Property>
         <Property name="-control" type="string" defaultValue=":4443">
-          Control plane. Must be reachable from wherever agents run. Serves
-          the apex certificate.
+          Raw control plane. Must be reachable from wherever agents run when
+          using <code>--transport raw</code>; <code>--transport auto</code>{" "}
+          can fall back through the public <code>:443</code> WebSocket path.
         </Property>
         <Property name="-http" type="string" defaultValue=":80">
           Plain HTTP, which only issues <code>301</code> redirects to HTTPS.
@@ -609,8 +626,9 @@ $ curl http://127.0.0.1:4041/healthz`}
           being healthy proves nothing about the apex.
         </Property>
         <Property name="ngstoned refuses to start with no ACME traffic" type="config">
-          <code>-token-sha256</code> (or{" "}
-          <code>$NGSTONE_TOKEN_SHA256</code>) is required always, and{" "}
+          <code>-credentials-file</code> (or{" "}
+          <code>$NGSTONE_CREDENTIALS_FILE</code>) is required for scoped mode;
+          the legacy <code>-token-sha256</code> path remains available, and{" "}
           <code>-cert-email</code> plus <code>-cf-api-token</code> are
           required unless <code>-insecure</code>. Each missing value is
           named in a single error line before exit.
@@ -623,8 +641,11 @@ $ curl http://127.0.0.1:4041/healthz`}
           restart.
         </Property>
         <Property name="could not reach ..." type="agent">
-          Port <code>4443</code> is closed, or the agent is dialling the
-          wrong host. Confirm the firewall rule and the saved address with{" "}
+          Port <code>4443</code> may be closed or the agent may be dialling
+          the wrong host. With <code>--transport auto</code>, confirm that
+          HTTPS <code>443</code> reaches the edge and that WebSockets are
+          enabled; with <code>--transport raw</code>, confirm the raw
+          firewall rule. Check the saved address with{" "}
           <code>ngstone config get server</code>.
         </Property>
         <Property name="TLS handshake failures from the agent" type="agent">

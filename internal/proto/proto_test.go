@@ -166,8 +166,18 @@ func TestGoldenWireFormat(t *testing.T) {
 			`{"code":"bad_token","message":"bad token"}`},
 		{"bind", Bind{Kind: KindHTTP, Subdomain: "foo", Takeover: true},
 			`{"kind":"http","subdomain":"foo","takeover":true}`},
+		{"bind_http2", Bind{Kind: KindHTTP, HTTP2: true},
+			`{"kind":"http","http2":true}`},
+		{"bind_multi_connector", Bind{Kind: KindHTTP, MultiConnector: true},
+			`{"kind":"http","multi_connector":true}`},
+		{"bind_multi_connector_token", Bind{Kind: KindHTTP, MultiConnector: true, ConnectorTokenSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			`{"kind":"http","multi_connector":true,"connector_token_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`},
 		{"bind_ok", BindOK{Hostname: "foo.example.com", URL: "https://foo.example.com"},
 			`{"hostname":"foo.example.com","url":"https://foo.example.com"}`},
+		{"bind_ok_http2", BindOK{Hostname: "foo.example.com", URL: "https://foo.example.com", HTTP2: true},
+			`{"hostname":"foo.example.com","url":"https://foo.example.com","http2":true}`},
+		{"bind_ok_multi_connector", BindOK{Hostname: "foo.example.com", URL: "https://foo.example.com", MultiConnector: true},
+			`{"hostname":"foo.example.com","url":"https://foo.example.com","multi_connector":true}`},
 		{"bind_err", BindErr{Code: CodeSubdomainTaken, Message: "taken"},
 			`{"code":"subdomain_taken","message":"taken"}`},
 		{"unbind", Unbind{Hostname: "foo.example.com"},
@@ -192,8 +202,8 @@ func TestGoldenWireFormat(t *testing.T) {
 			`{"hostname":"foo.example.com","url":"https://foo.example.com","port":5432}`},
 	}
 
-	if len(cases) != 16 {
-		t.Fatalf("got %d golden cases, want 16", len(cases))
+	if len(cases) != 21 {
+		t.Fatalf("got %d golden cases, want 21", len(cases))
 	}
 
 	for _, tc := range cases {

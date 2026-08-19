@@ -13,9 +13,9 @@ Guiding principles, in priority order: **stdlib-first, boring over clever, one p
 ```
                     VPS (Linux)                                Dev machine (macOS)
               ┌──────────────────────┐                     ┌─────────────────────────┐
- browser ───► │ :443  public TLS     │                     │  ngstone agent          │
-              │ :80   → 301 https    │   one TLS TCP conn  │   ├─ tunnel session     │
-              │ :4443 control TLS ◄──┼─────────────────────┼───┤  (yamux client)      │
+ browser ───► │ :443  public TLS/WS  │                     │  ngstone agent          │
+              │ :80   → 301 https    │   TLS/WS fallback    │   ├─ tunnel session     │
+              │ :4443 control TLS ◄──┼── raw TLS :4443 ─────┼───┤  (yamux client)      │
               │                      │   yamux session     │   ├─ local proxy        │──► localhost:3000
               │  ngstoned            │   (agent dials out) │   └─ terminal inspector │
               │   ├─ certmagic       │                     │       (Bubble Tea TUI)  │
@@ -24,7 +24,7 @@ Guiding principles, in priority order: **stdlib-first, boring over clever, one p
               └──────────────────────┘
 ```
 
-The agent **always dials out** (VPS never connects into the laptop — NAT-friendly, no inbound firewall holes at home). One long-lived TLS TCP connection carries a yamux session; the first stream is the control stream; every proxied request gets its own yamux stream.
+The agent **always dials out** (VPS never connects into the laptop — NAT-friendly, no inbound firewall holes at home). By default it tries one long-lived TLS TCP connection on `:4443`, then falls back to an authenticated WebSocket upgrade on HTTPS `:443`; both carry the same yamux session. The first stream is the control stream; every proxied request gets its own yamux stream.
 
 ### One HTTP request, hop by hop
 
@@ -33,12 +33,12 @@ The agent **always dials out** (VPS never connects into the laptop — NAT-frien
 1. **Browser → edge :443.** TCP + TLS 1.3 handshake. `certmagic`'s `GetCertificate` serves the wildcard `*.ngstone.site` cert for SNI `api.ngstone.site`. ALPN negotiates `h2` or `http/1.1`; stdlib `http.Server` handles either transparently.
 2. **Edge routing.** The handler extracts the host (port stripped, lowercased), does an `RLock`ed map lookup in the `Registry`. Miss → immediate `404` (uniform body, no agent work). Hit → a `*Binding` holding the owning agent's yamux session.
 3. **Admission.** Per-IP token bucket and global in-flight semaphore checked (§5). Reject → `429`.
-4. **Edge → agent stream open.** `httputil.ReverseProxy` runs with a per-binding `http.Transport` whose `DialContext` opens a **new yamux stream** and writes a one-frame JSON preamble: `{"type":"stream_open","data":{"kind":"http","host":"api.ngstone.site","req_id":"01J8ZQ…","client_addr":"203.0.113.9:51844"}}` — `req_id` correlates edge logs with inspector entries; `client_addr` is carried now because the future `kind:"tcp"` has no `X-Forwarded-For` to fall back on. `DisableKeepAlives: true` → exactly one request per stream, so stream lifetime == request lifetime.
-5. **Request serialization.** ReverseProxy writes the request as plain HTTP/1.1 onto the stream (h2 on the public side is downgraded here — fine, the tunnel is private). Headers rewritten first: `X-Forwarded-For` appended, `X-Forwarded-Proto: https`, `X-Forwarded-Host` set; original `Host` preserved by default (§5). Body streams through — never fully buffered on the edge.
-6. **Agent accepts the stream**, reads the preamble, then hands the stream to a per-session `http.Server` (via a `net.Listener` adapter that yields yamux streams). Its handler is the **capture middleware** wrapping a second `httputil.ReverseProxy`.
-7. **Agent → localhost:3000** over a pooled keep-alive `http.Transport` (§6). Capture middleware tees up to 256 KiB of each body into the inspector ring buffer without blocking the stream (§6).
-8. **Response path** is the same pipe in reverse: app → agent proxy → yamux stream → edge proxy → browser. Both proxies are `io.Copy` loops over flow-controlled streams, so a slow browser backpressures all the way to the app's socket writes. `FlushInterval: -1` on the edge proxy means bytes are flushed as they arrive (SSE/streaming just works).
-9. **Teardown.** Response completes → yamux stream closed → transport slot freed. The finalized `*Exchange` (status, timing, capped bodies) is pushed onto the `Store`'s fan-out channels, which the terminal inspector is subscribed to directly in-process — no HTTP hop, no SSE.
+4. **Edge → agent stream open.** The binding chooses either the HTTP/1.1 or native HTTP/2 transport. Both open a yamux stream and write a one-frame JSON preamble; HTTP/1.1 uses `kind:"http"` and native HTTP/2 uses `kind:"h2"`. The HTTP/2 transport pools requests on a yamux-backed h2 connection, while the HTTP/1.1 transport keeps one request per stream.
+5. **Request serialization.** The default path writes plain HTTP/1.1 onto the stream. With `--http2`, the stream carries the HTTP/2 client preface and frames instead, so gRPC trailers, streaming, and full-duplex request/response behavior survive. Headers are rewritten first: `X-Forwarded-For` appended, `X-Forwarded-Proto: https`, `X-Forwarded-Host` set; original `Host` preserved by default (§5). Bodies stream through — never fully buffered on the edge.
+6. **Agent accepts the stream**, reads the preamble, and dispatches `kind:"http"` to a per-session `http.Server` or `kind:"h2"` to `http2.Server.ServeConn`. Both handlers use the **capture middleware** around a reverse proxy.
+7. **Agent → localhost:3000** uses a pooled keep-alive `http.Transport` by default, or a native `http2.Transport` for `--http2`. An `http://` target uses h2c; an `https://` target uses TLS HTTP/2. Capture middleware tees up to 256 KiB of each body into the inspector ring buffer without blocking the stream (§6).
+8. **Response path** is the same pipe in reverse: app → agent proxy → yamux stream → edge proxy → browser. Both proxies are `io.Copy` loops over flow-controlled streams, so a slow browser backpressures all the way to the app's socket writes. `FlushInterval: -1` on the edge proxy means bytes are flushed as they arrive (SSE/streaming just works); native h2 keeps the connection open and uses HTTP/2 stream flow control for concurrent requests.
+9. **Teardown.** An HTTP/1.1 response completes → its yamux stream closes → the transport slot is freed. A native h2 response completes → its HTTP/2 stream closes while the yamux-backed h2 connection may remain pooled. The finalized `*Exchange` (status, timing, capped bodies) is pushed onto the `Store`'s fan-out channels, which the terminal inspector is subscribed to directly in-process — no HTTP hop, no SSE.
 
 Added latency budget: one extra TCP/TLS-encrypted hop + yamux framing ≈ RTT(laptop↔VPS) + ~1 ms. No per-request handshakes anywhere: public keep-alive to edge, persistent yamux session, keep-alive pool to the local app.
 
@@ -46,18 +46,18 @@ Added latency budget: one extra TCP/TLS-encrypted hop + yamux framing ≈ RTT(la
 
 ## 2. Transport: agent ↔ edge
 
-**Decision: `hashicorp/yamux` over a single TLS 1.3 TCP connection (agent dials edge :4443).**
+**Decision: `hashicorp/yamux` over a single TLS 1.3 TCP connection, with an authenticated WebSocket-over-TLS fallback on :443.**
 
 | Option | Verdict | Why rejected / accepted |
 |---|---|---|
 | **yamux over TLS TCP** | ✅ **chosen** | Symmetric stream opening (either peer can open — critical, since *the edge* initiates per-request streams toward the agent), per-stream flow control with configurable windows, built-in keepalive, ~1k LOC of battle-tested code (Nomad/Consul), zero codegen, trivial to debug. It's a dumb byte-stream multiplexer — exactly the abstraction we need, nothing we don't. (smux is equivalent; yamux wins on maintenance record and window-update semantics.) |
-| HTTP/2 streams (`x/net/http2`) | ❌ | h2 streams are request/response-shaped and *client-initiated*; our requests flow edge→agent, so we'd have to run the agent as an h2 *server* on a connection it dialed (`http2.Server.ServeConn` on a client socket). Workable but contorted, flow-control tuning is opaque, and we'd be fighting the library's HTTP semantics to get raw bidirectional streams for future TCP tunnels. Same TCP HOL blocking as yamux, more machinery. |
-| WebSocket + mux layer | ❌ | WS only buys traversal of HTTP-only middleboxes between agent and edge. We own both endpoints and the VPS; there is no such middlebox. It adds a dependency and a framing layer, and you *still* need yamux on top for streams. Pure cost. |
+| HTTP/2 streams (`x/net/http2`) | ✅ **HTTP/2 mode** | Used as a second, explicit data path for HTTP/gRPC binds. The edge opens a yamux stream, the agent serves it with `http2.Server.ServeConn`, and the local target is reached with `http2.Transport`. HTTP/1.1 remains the default for compatibility with ordinary local apps; TCP tunnels still use raw yamux streams. |
+| WebSocket + yamux fallback | ✅ **`--transport websocket` / `auto` fallback** | Uses the existing HTTPS public listener at `/_ngstone/control` to carry the same yamux byte stream through HTTP-aware networks. The WebSocket handshake requires the ngstone control subprotocol; tunnel authentication remains inside the yamux control stream. |
 | QUIC / HTTP3 (`quic-go`) | ❌ *for v1* | The genuinely tempting one: native streams, no TCP HOL blocking, connection migration. Rejected because: UDP is throttled/blocked on enough hotel/corp networks to matter for a laptop-side agent; userspace QUIC costs CPU on a small VPS; `quic-go` API churn; harder ops debugging. At single-user concurrency, TCP HOL blocking is a rounding error. The `tunnel.Session` interface (§7) is deliberately narrow so QUIC can be slotted in later as `transport=quic` without touching the control protocol. |
 
 **Mechanics:**
 
-- **Per-request streams.** Edge calls `session.OpenStream(ctx, preamble)`; one stream = one HTTP exchange (or, later, one TCP connection). Stream ID space is yamux's; we never expose it.
+- **Stream allocation.** The HTTP/1.1 path calls `session.OpenStream(ctx, preamble)` for each exchange. Native HTTP/2 calls it once per h2 connection and multiplexes requests inside that connection; TCP calls it once per TCP connection. Stream ID space is yamux's; we never expose it.
 - **Stream-open cancellation.** Verified against yamux v0.1.2 source, because the obvious reading of this API is wrong in two ways:
   - **`Config.StreamOpenTimeout` is a session killer, not a per-stream deadline.** `setOpenTimeout` fires and calls `s.Close()` — "Close the session to force connection re-establishment". An earlier draft here said to set it to 5 s to match our dial budget; that is actively harmful, converting one slow SYN-ACK into a teardown of *every tunnel on the session*, the same failure class as the `ConnectionWriteTimeout: 10s` trap below. **Leave it at the 75 s default** (or higher) and treat it purely as a wedged-connection backstop.
   - **`OpenStream()` does not wait for the ACK.** It blocks only on the `synCh` semaphore (depth `AcceptBacklog`), then allocates an ID, registers the stream, sends a window update, and returns. The returned stream is *not yet established* — the first write is optimistic. So the only thing ctx must race is `synCh` back-pressure, not a round trip.
@@ -69,6 +69,7 @@ Added latency budget: one extra TCP/TLS-encrypted hop + yamux framing ≈ RTT(la
 - **Head-of-line blocking.** Exists at the TCP layer (one lost packet stalls all streams for one RTT). Accepted: single user, a handful of concurrent requests. The session-level keepalive prevents a *stalled* connection from lingering.
 - **Keepalive & dead peers.** yamux `EnableKeepAlive: true, KeepAliveInterval: 10s, ConnectionWriteTimeout: 45s`. The write timeout is deliberately **not** 10 s: in yamux, `ConnectionWriteTimeout` is a whole-session kill switch guarding *every* data send (`waitForSendErr`/`sendNoWait`), not a keepalive knob. At 10 s, a saturated uplink or flaky hotel wifi during one large download would trip `ErrConnectionWriteTimeout` and kill the entire session — every tunnel, every in-flight request — presenting as "tunnel randomly drops under load". 45 s keeps the kill switch for genuinely wedged connections while liveness comes from pings, not from data-write stalls; the yamux shutdown error is logged verbatim so a write-timeout death is distinguishable from a real disconnect. Belt-and-suspenders app-level `ping` on the control stream every 15 s (§3) detects a wedged agent *process* whose kernel still ACKs.
 - **Reconnect with in-flight requests.** Requests in flight when the session dies **fail fast**: edge streams error, ReverseProxy returns `502` with a small branded error page. We deliberately do **not** replay them from the edge — the edge cannot know a request is idempotent (a `POST /charge` replay is worse than a 502). The agent reconnects with decorrelated-jitter backoff (500 ms → 30 s cap), re-authenticates, and re-issues `bind` for its tunnel; the public URL is identical after recovery. Users who want retry get it from their HTTP client, where idempotency is knowable.
+- **Transport fallback.** `--transport auto` tries raw TLS on the configured control address first. A dial, TLS, yamux setup, or pre-bind handshake failure then gets one WebSocket/TLS attempt on port `443`; explicit `raw` and `websocket` modes disable the other path. QUIC is intentionally deferred until a later transport mode.
 
 ---
 
@@ -82,7 +83,7 @@ Every control message (control stream) and every stream preamble (first frame of
 uint32 big-endian payload length | JSON payload      (max frame: 64 KiB)
 ```
 
-**Encoding: JSON.** Rejected protobuf (codegen + dependency for ~10 message types owned by one repo compiling both ends in lockstep — negative ROI) and gob (unreadable in logs, painful cross-version evolution). JSON with a tagged envelope is greppable in debug logs, and control-plane volume is a few messages a minute — performance is irrelevant. Data streams carry **raw HTTP/1.1 bytes after the preamble** — JSON never touches the hot path.
+**Encoding: JSON.** Rejected protobuf (codegen + dependency for ~10 message types owned by one repo compiling both ends in lockstep — negative ROI) and gob (unreadable in logs, painful cross-version evolution). JSON with a tagged envelope is greppable in debug logs, and control-plane volume is a few messages a minute — performance is irrelevant. HTTP/1.1 data streams carry raw HTTP/1.1 bytes after the preamble; native HTTP/2 streams carry the HTTP/2 preface and frames. JSON never touches either hot path.
 
 ```go
 // internal/proto/proto.go
@@ -119,14 +120,33 @@ type AuthErr struct {
 
 // ---- tunnel lifecycle ----
 type Bind struct {
-    Kind      string `json:"kind"`                // "http" or "tcp".
-    Subdomain string `json:"subdomain,omitempty"` // "" → server assigns random (e.g. "amber-fox-42")
-    Takeover  bool   `json:"takeover,omitempty"`  // reclaim a binding; authorized by identity, not
-                                                  // liveness — see conflict rules below
+    Kind         string `json:"kind"`                // "http" or "tcp".
+    Subdomain    string `json:"subdomain,omitempty"` // "" → server assigns random (e.g. "amber-fox-42")
+    Takeover     bool   `json:"takeover,omitempty"`  // reclaim a binding; authorized by identity, not
+                                                     // liveness — see conflict rules below
+    HTTP2        bool   `json:"http2,omitempty"`      // native h2/h2c data path
+    MultiConnector bool `json:"multi_connector,omitempty"` // share this named binding as a pool
+    ConnectorTokenSHA256 string `json:"connector_token_sha256,omitempty"` // per-tunnel pool membership digest
+    Policy       *Policy `json:"policy,omitempty"`   // ordered HTTP allow/deny rules
+    PolicyDigest string  `json:"policy_digest,omitempty"` // normalized policy SHA-256
+}
+type Policy struct {
+    DefaultAction string       `json:"default_action,omitempty"` // "allow" or "deny"
+    Rules         []PolicyRule `json:"rules"`                   // first match wins
+}
+type PolicyRule struct {
+    Action      string `json:"action"`                 // "allow" or "deny"
+    Method      string `json:"method,omitempty"`
+    PathPrefix  string `json:"path_prefix,omitempty"`
+    Header      string `json:"header,omitempty"`
+    HeaderValue string `json:"header_value,omitempty"`
 }
 type BindOK struct {
-    Hostname string `json:"hostname"` // "api.ngstone.site"
-    URL      string `json:"url"`      // "https://api.ngstone.site"
+    Hostname     string `json:"hostname"` // "api.ngstone.site"
+    URL          string `json:"url"`      // "https://api.ngstone.site"
+    HTTP2        bool   `json:"http2,omitempty"`
+    MultiConnector bool `json:"multi_connector,omitempty"`
+    PolicyDigest string `json:"policy_digest,omitempty"` // echoed policy digest
 }
 type BindErr struct {
     Code    string `json:"code"`    // subdomain_taken, invalid_subdomain, kind_unsupported
@@ -162,7 +182,7 @@ type Goodbye struct {
 
 // ---- data-stream preamble (first & only frame before raw bytes) ----
 type StreamOpen struct {
-    Kind       string `json:"kind"`        // "http" or "tcp" — raw bytes follow either way
+    Kind       string `json:"kind"`        // "http", "h2", or "tcp"
     Host       string `json:"host"`        // which binding this request targets
     ReqID      string `json:"req_id"`      // edge-minted ULID; correlates edge logs ↔ inspector entries
     ClientAddr string `json:"client_addr"` // public client ip:port — Kind:"tcp" has no
@@ -170,15 +190,15 @@ type StreamOpen struct {
 }
 ```
 
-**Raw TCP tunnels.** `Bind{Kind:"tcp", …}` returns an allocated port in `BindOK`, and `StreamOpen{Kind:"tcp"}` is followed by raw bytes instead of HTTP/1.1 bytes; `ClientAddr` carries what XFF cannot. Allocation is per-tunnel from the operator-configured `-tcp-ports` range (`internal/edge/tcpmanager.go`): a specific port can be requested, or the edge picks the first free one in range. The edge binds each allocated port directly on `-tcp-bind` — a real listener, not routed through the `:443` reverse proxy or any front proxy in front of it — so the range needs its own firewall opening. There is no TLS termination for `Kind:"tcp"`: it's raw pass-through end to end, so the tunneled protocol is only as encrypted as it makes itself. Each TCP connection reuses the same per-session stream-acquisition cap (`tryAcquireStream`) and `inflight` drain accounting that HTTP streams use (§5), so a TCP tunnel counts against the same per-session concurrency budget as HTTP requests. The feature is off entirely unless `-tcp-ports` is set. Be honest about what this does **not** buy: the "raw HTTP/1.1 bytes inside the stream" choice permanently forecloses native gRPC (trailers + full-duplex h2) and h2c backends for `Kind:"http"` — that is a real v1 protocol limitation, catalogued in §9's out-of-scope list, not a two-field tweak away.
+**Raw TCP tunnels.** `Bind{Kind:"tcp", …}` returns an allocated port in `BindOK`, and `StreamOpen{Kind:"tcp"}` is followed by raw bytes; `ClientAddr` carries what XFF cannot. Allocation is per-tunnel from the operator-configured `-tcp-ports` range (`internal/edge/tcpmanager.go`): a specific port can be requested, or the edge picks the first free one in range. The edge binds each allocated port directly on `-tcp-bind` — a real listener, not routed through the `:443` reverse proxy or any front proxy in front of it — so the range needs its own firewall opening. There is no TLS termination for `Kind:"tcp"`: it's raw pass-through end to end, so the tunneled protocol is only as encrypted as it makes itself. Each TCP connection reuses the same per-session stream-acquisition cap (`tryAcquireStream`) and `inflight` drain accounting that HTTP streams use (§5), so a TCP tunnel counts against the same per-session concurrency budget as HTTP requests. The feature is off entirely unless `-tcp-ports` is set. Native gRPC and h2c are available through the explicit HTTP/2 mode on HTTP binds; TCP remains protocol-agnostic raw pass-through.
 
 ### Protocol rules
 
 - **Reply correlation (frozen in M0):** a reply carries the **same `Msg.ID` as the request it answers** — `AuthOK` echoes `Auth`'s ID, `BindOK` echoes `Bind`'s, `Pong` echoes `Ping`'s. The odd/even per-direction ID spaces exist *only* so both peers can **initiate** without colliding; they do not apply to replies. Minting a fresh ID for a reply would leave the requester correlating by arrival order, which breaks the moment two requests are in flight.
 - **Versioning:** single integer protocol major. Client offers a set, server picks the max intersection in `AuthOK`. Additive JSON fields never bump the version (unknown fields are ignored); semantic changes do. v1 ships as `1`. Within a negotiated version, an unknown `Msg.Type` or malformed frame on the control stream gets a generic `Error{unknown_type|malformed}` and then session close — never a silent ignore.
-- **Auth:** first message must be `Auth` within 5 s of TLS establishment or the edge closes the conn. Token check is `subtle.ConstantTimeCompare` against the SHA-256 of the configured token. Failures are logged with source IP and rate-limited (max 5 auth attempts / IP / minute).
-- **Subdomain assignment & conflict — takeover is authorized by identity, not liveness.** Names validated as `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`, denylist `{www, mail, ns1, ns2, admin, api-edge}`. Every binding records the holder's `Auth.InstanceID`. `Bind` on a name held by another binding resolves as: **(a)** requester's `instance_id` equals the holder's (same agent process reconnecting past a half-open zombie) → takeover succeeds *immediately*, regardless of whether the zombie still looks alive; **(b)** different `instance_id` but the holder's session is dead → takeover succeeds; **(c)** different `instance_id` and the holder is live → `BindErr{subdomain_taken}` — two laptops shouldn't silently fight, and liveness is only consulted in this one case. On any successful takeover the edge sends the old session `Evicted{hostname, reason:"takeover"}`, force-closes it, and rebinds atomically under the registry lock; the evicted agent updates its status line instead of advertising a URL it no longer owns. The agent reconnect flow always sends `Takeover:true` — rule (a) is what makes reconnect-after-partition instant instead of waiting out the 45 s dead-peer window. (An earlier draft gated takeover on the holder being *dead*, which deadlocked the exact half-open-TCP case takeover exists to solve.)
-- **Dead-peer detection:** transport layer — yamux keepalive ping every 10 s, with `ConnectionWriteTimeout: 45s` as the session kill switch (§2 — it guards all sends, so it must not be tight); application layer — control-stream `Ping` every 15 s, 3 consecutive misses (45 s) → session torn down, bindings released. Both layers converge on ≈45 s worst-case detection; rule (a) above means the *owner's own* recovery never waits on it.
+- **Auth:** first message must be `Auth` within 5 s of TLS establishment or the edge closes the conn. In scoped-credential mode, the edge validates the opaque token against the versioned credential file, enforces its exact subdomain or TCP-port scope, and rechecks expiry/revocation on each heartbeat. The legacy mode uses `subtle.ConstantTimeCompare` against the SHA-256 of the configured shared token. Failures are logged with source IP and rate-limited (max 5 auth attempts / IP / minute).
+- **Subdomain assignment & conflict — takeover is authorized by identity, not liveness.** Names validated as `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`, denylist `{www, mail, ns1, ns2, admin, api-edge}`. A normal binding records one holder's `Auth.InstanceID`; **(a)** the same instance reconnecting past a half-open zombie takes over immediately, **(b)** a different instance can take over a dead holder, and **(c)** a different live instance gets `BindErr{subdomain_taken}`. A bind with `MultiConnector:true` must name an explicit subdomain and include a SHA-256 digest of a shared, high-entropy connector secret. The first connector creates a pool and later connectors with the same flag join it only when the token digest, HTTP/2, access-control, and traffic-policy settings match. The secret is read from an environment variable (the project file stores only that variable's name) and never sent over the control protocol; only its digest crosses the wire. A connector with the same `InstanceID` replaces only its previous pool member. Removing one member unroutes no other member: new requests stop selecting it while its in-flight requests drain. Mixing pooled and normal binds returns `connector_config_mismatch`.
+- **Dead-peer detection:** transport layer — yamux keepalive ping every 10 s, with `ConnectionWriteTimeout: 45s` as the session kill switch (§2 — it guards all sends, so it must not be tight); application layer — control-stream `Ping` every 15 s, 3 consecutive misses (45 s) → session torn down, bindings released. Connector selection also excludes sessions outside that heartbeat health window before opening new streams. Both layers converge on ≈45 s worst-case detection; rule (a) above means the *owner's own* recovery never waits on it.
 - **Graceful shutdown:** on SIGTERM the agent sends `Goodbye{drain_ms:15000}` (fire-and-forget, see schema note), the edge immediately unroutes its hostnames (new requests → 404), then waits on that session's in-flight accounting — a per-session `sync.WaitGroup` (§5), not guesswork — racing a 15 s timer, then closes. Edge shutdown mirrors it: `Goodbye` to all agents, unroute, drain, `http.Server.Shutdown`.
 
 ---
@@ -197,9 +217,9 @@ type StreamOpen struct {
   - **Pin `certmagic` and `libdns/cloudflare` to exact versions.** The libdns v1 interface migration (`libdns.RR`) versus certmagic's expected provider interface is a live, recurring source of "it compiled last month" breakage. This is the one dependency pair in the project where a `go get -u` can take the edge down.
 - **Control-plane TLS (:4443):** served by the **apex** cert (`ngstone.site`), a different certificate from the public wildcard, via `tls.Config.GetCertificate`. Agents connect to `ngstone.site:4443`.
 - **Agent-side verification:** standard WebPKI validation (`ServerName: "ngstone.site"`, system roots). **Optional SPKI pin** (`--pin sha256/BASE64`) checked in `VerifyPeerCertificate` *in addition to* chain validation; off by default because pins + auto-renewing certs is a footgun (pin the *key* and reuse it across renewals via certmagic's key reuse if enabled — document loudly).
-- **Agent authentication is the bearer token,** not client certs. Rejected mTLS: adds a private CA, issuance, and rotation ceremony for a single user with zero security gain over a 256-bit token inside TLS.
+- **Agent authentication is a short-lived, per-tunnel bearer credential,** not client certs. The credential file stores only token hashes and can revoke each tunnel independently. The management API supports OIDC browser sessions with group-mapped team roles; mTLS team authentication remains a later extension because it would add a private CA, issuance, and rotation ceremony without replacing the need for scoped tunnel authorization.
 
-Token hygiene: generated once with `openssl rand -base64 32` on the agent host and saved via `ngstone auth <token>`. The edge stores only the SHA-256 (`NGSTONE_TOKEN_SHA256`, hex); the plaintext token never lives on the VPS disk.
+Token hygiene: issue with `ngstone credentials issue` on the edge host, save the printed token via `ngstone auth <token>`, and keep the token file mode `0600`. The edge stores only the SHA-256 in `NGSTONE_CREDENTIALS_FILE`; the plaintext token never lives on the VPS disk. `NGSTONE_TOKEN_SHA256` remains a legacy migration path.
 
 ---
 
@@ -212,7 +232,7 @@ Token hygiene: generated once with `openssl rand -base64 32` on the agent host a
 | `:443` | Public traffic. `tls.Config` from certmagic; `NextProtos: ["h2","http/1.1"]`. One `http.Server`. |
 | `:80` | `301` → `https://` (same host+path). Nothing else — DNS-01 means no ACME traffic here. |
 | `:4443` | Control plane. Raw `tls.Listener`; accept → 5 s handshake deadline → yamux server session → control-stream auth loop. |
-| `127.0.0.1:4041` | Ops endpoint: `expvar` counters, `/healthz`, pprof. Loopback only; reach via `ssh -L`. |
+| `127.0.0.1:4041` | Ops endpoint: local dashboard, versioned management API at `/api/v1`, `/api/state`, Prometheus `/metrics`, `expvar`, `/healthz`, pprof. The management API is loopback-only unless a bearer-token hash or OIDC is configured; OIDC sessions map provider groups to viewer/operator/admin roles. Reach it via `ssh -L` by default. |
 
 ### Routing table
 
@@ -226,15 +246,24 @@ type Registry struct {
 }
 type Binding struct {
     Hostname   string
-    Sess       *AgentSession   // owns the yamux session + a dedicated http.Transport
-    InstanceID string          // holder's Auth.InstanceID — authorizes takeover (§3)
+    Sess       *AgentSession   // compatibility view of the first connector
+    InstanceID string          // compatibility view of that connector's identity
     BoundAt    time.Time
-    transport  *http.Transport // DialContext → Sess.OpenStream; DisableKeepAlives
+    connectors map[*AgentSession]*bindingConnector
+    order      []*bindingConnector // round-robin order; removed members are drained
 }
 func (r *Registry) Route(host string) (*Binding, bool)
 func (r *Registry) Bind(host string, s *AgentSession, takeover bool) (*Binding, error)
 func (r *Registry) ReleaseSession(s *AgentSession) // idempotent; compare-and-delete, see below
 ```
+
+Public request routing takes the next non-draining connector that is still
+alive and can acquire its per-session stream slot. Each connector owns its own
+HTTP/1.1 transport or native HTTP/2 transport, so h2 connection pools do not
+cross connector boundaries. Session release removes only that connector from
+the pool; the edge's existing per-session `WaitGroup` drains its active streams.
+The connector membership digest is compared before a session joins, so knowing
+the global edge auth token and hostname is not enough to join an existing pool.
 
 **Concurrency model: `sync.RWMutex` over a plain map.** Rejected `sync.Map` (untyped, tuned for disjoint-key churn we don't have) and lock-free copy-on-write (complexity with zero payoff — reads are a sub-microsecond `RLock`+lookup, writes happen a few times an hour).
 
@@ -259,9 +288,43 @@ func (r *Registry) ReleaseSession(s *AgentSession) // idempotent; compare-and-de
 
 **In-flight requests are counted.** Each `AgentSession` carries a `sync.WaitGroup` incremented in the transport's `DialContext` and decremented on stream close. This is required for graceful drain (§3) — knowing when in-flight reaches zero is by definition per-session accounting, and an earlier draft's "no reference counting needed" only ever held for the *ungraceful* path, where broken streams fail on their own. Drain = unroute, `wg.Wait()` racing a 15 s timer, close.
 
+### Durable control-plane state
+
+The registry remains a process-local routing cache. Durable ownership is held
+in `internal/storage`, backed by SQLite by default and PostgreSQL when
+`NGSTONE_DATABASE_URL` is a PostgreSQL URL. Migrations create these records:
+
+| Record | Durable fields | Coordination rule |
+|---|---|---|
+| `tunnels` | name, hostname, kind, owner, policy digest, status, timestamps | one identity per hostname/kind/port |
+| `credentials` | scope, owner, token hash, expiry, revocation | plaintext token is never persisted |
+| `connector_leases` | instance, session, edge, renewal and expiry | active lease required to serve; expired leases are reclaimable |
+| `traffic_policies` | owner, name, normalized JSON, digest | policy digest is persisted with the tunnel |
+| `custom_domains` | domain, owner, tunnel association, status | unique domain registration |
+| `audit_events` | edge, actor, action, resource, metadata, timestamp | append-only operational history |
+
+An HTTP or TCP bind claims a database lease before entering the local
+registry. A control heartbeat renews every lease for that session. Session
+teardown deletes only that session's leases and marks the durable tunnel
+offline when no live connector remains. The edge dashboard merges the local
+routing cache with durable leases, so an operator can inspect connectors on
+other edge processes. PostgreSQL row locks and SQLite's single-writer/WAL
+behavior make the claim path atomic across edge processes; the local registry
+is never treated as the source of truth for ownership.
+
+The file-backed credential store and `NGSTONE_TOKEN_SHA256` remain compatibility
+paths for existing single-edge deployments. They do not provide durable tunnel
+ownership or active/active coordination and should not be used for a cluster.
+
+Durable ownership is not inter-edge data forwarding. A public request still
+has to arrive at the edge whose local registry contains the connector. A
+shared database therefore needs a compatible load-balancer or DNS strategy
+until an inter-edge forwarding layer is introduced.
+
 ### Public-side protocol handling
 
-- **HTTP/1.1 and h2:** both terminate in the stdlib `http.Server`; the handler sees a normalized `*http.Request` either way. Inside the tunnel everything is HTTP/1.1 — `httputil.ReverseProxy` does the h2→h1.1 downgrade for free.
+- **HTTP/1.1 and h2:** both terminate in the stdlib `http.Server`; the handler sees a normalized `*http.Request` either way. A normal bind uses the HTTP/1.1 transport inside the tunnel. An `--http2` bind selects the native h2 path and preserves gRPC trailers, streaming, and full-duplex behavior. In insecure edge mode, the public server accepts both HTTP/1.1 and prior-knowledge h2c; TLS public listeners negotiate h2 through ALPN.
+- **Native gRPC validation:** the transport tests cover response trailers, bidirectional request/response streaming, h2c targets, client deadline and cancellation propagation, 2 MiB messages, and reuse of one backend HTTP/2 connection for sequential calls.
 - **WebSocket:** `ReverseProxy` handles `Connection: Upgrade` natively (hijacks, completes the 101, then bidirectional-copies) — the upgraded byte stream rides the same per-request yamux stream, which lives as long as the socket. **Caveat:** WS-over-h2 (RFC 8441 extended CONNECT) is not enabled; browsers fall back to HTTP/1.1 for WS automatically. Documented, not worked around.
 - **Header rewriting — use `Rewrite` + `SetXForwarded()` here, and understand *why* it works.** When `Rewrite != nil`, `ReverseProxy` **unconditionally deletes** `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host` and `X-Forwarded-Proto` from the outbound request *before* calling your func. On the edge that delete is exactly what we want: it destroys inbound spoof attempts, and `pr.SetXForwarded()` then stamps the truth. (`SetXForwarded` *appends* to any prior XFF — it is only safe because the delete already ran. Do **not** "improve" the edge by switching to `Director`; you would silently start trusting attacker-supplied XFF.) `X-Real-IP` is not in the delete set — strip it explicitly. **`Host` is preserved** (forwarded as the public hostname) — ngrok's default, and what OAuth callbacks/vhost routers expect; `--host-header=localhost:3000` on the agent rewrites it for picky apps. **The agent-side proxy needs the opposite treatment** — see §6, where this same behavior is a footgun.
 - **Streaming:** `FlushInterval: -1`; request and response bodies are never buffered on the edge.
@@ -315,7 +378,7 @@ yamux stream ─► streamListener (net.Listener adapter)
 - **Local forwarding:** `httputil.ReverseProxy` with a single pooled `http.Transport` to the local app. `FlushInterval: -1` here too. Local dial failure → agent synthesizes a `502` *with a helpful body* ("ngstone: nothing listening on localhost:3000").
 - **The agent's proxy must copy the forwarding headers explicitly. `Director` alone is NOT sufficient** — corrected in M1 after the behavior was observed directly. In the `Rewrite == nil` path, `ReverseProxy.ServeHTTP` *still appends* `req.RemoteAddr`'s IP to `X-Forwarded-For`. Because the agent's `streamConn` reports the preamble's `ClientAddr` as `RemoteAddr` (the whole point of carrying it), that append **duplicates the client**: the local app receives `X-Forwarded-For: 203.0.113.9, 203.0.113.9`, and any rightmost-trusted-hop parser then treats the client's own IP as a trusted proxy. The correct construction is a `Rewrite` that sets the target URL and **copies `Forwarded` and `X-Forwarded-{For,Host,Proto}` from `pr.In` to `pr.Out` verbatim**, never calling `SetXForwarded`. Note this supersedes the original reasoning below, which assumed the agent had only a synthetic yamux address to offer:
 - **(Superseded rationale, kept because the underlying stdlib behavior still bites.)** `Director` vs `Rewrite` on the agent (§5). `Rewrite` deletes `Forwarded`/`X-Forwarded-For`/`X-Forwarded-Host`/`X-Forwarded-Proto` before your func runs. On the edge that is a feature; here it would **destroy the client IP the edge just stamped**, and §9.5's promise that "the local app can trust them" would be a lie. Worse, the reflexive fix — calling `SetXForwarded()` on the agent — stamps the *yamux stream's* synthetic `RemoteAddr` as the client IP, so the local app confidently logs a fake address. Rules: the agent uses `Director`, or a `Rewrite` that explicitly copies those four headers from `pr.In` to `pr.Out`; the agent **never** calls `SetXForwarded`. An e2e assertion that the local app observes the *browser's* real IP belongs in M4 — this bug is invisible until someone reads their access log and believes it.
-- **Session loop:** dial `ngstone.site:4443` → TLS → yamux client → open control stream → `Auth`/`Bind` → then `for { AcceptStream() }`, each stream: read preamble, hand to the HTTP server. Control-stream reader handles `Pong`/`Goodbye`; any session error tears everything down and enters the backoff-reconnect loop (§2). The CLI status line is driven by session-state events.
+- **Session loop:** in `auto` mode, dial `ngstone.site:4443` with TLS first and fall back to the authenticated WebSocket endpoint on `:443` if the raw path cannot establish a session. The selected connection becomes a yamux client: open the control stream → `Auth`/`Bind` → then `for { AcceptStream() }`, each stream reads its preamble and is handed to the HTTP server. The control-stream reader handles `Pong`/`Goodbye`; any session error tears everything down and enters the backoff-reconnect loop (§2). The CLI status line is driven by session-state events.
 
 ### Capture pipeline (the part that must not wreck streaming)
 
@@ -469,10 +532,10 @@ func (s *Store) Subscribe(ctx context.Context) <-chan *Exchange
 | **Slow/hung local app** | `ResponseHeaderTimeout` 30 s | `504` to the public client; tunnel/session unaffected. Post-header slowness is legal (streaming) and bounded by client patience + flow control. |
 | **Saturated uplink during a large transfer** | yamux `ErrConnectionWriteTimeout`, logged verbatim | With `ConnectionWriteTimeout` at 45 s rather than 10 s, a stalled send no longer kills the whole session (§2). If it *does* fire, the verbatim log distinguishes "we killed it" from a real disconnect — otherwise this presents as "the tunnel randomly drops under load", which is miserable to diagnose. |
 | **Oversized request body** | `ContentLength` pre-check; else `MaxBytesReader` + `ErrorHandler` | Declared-length → real `413`, nothing crosses the tunnel. Chunked → `413` synthesized from `*http.MaxBytesError`, with the caveat that the agent may already have forwarded a partial body (§5). The naive `MaxBytesReader`-only design returned `502` *after* shipping 256 MiB. |
-| **Subdomain collision** | `Registry.Bind` under lock | Different `InstanceID` + live holder → `BindErr{subdomain_taken}`; agent prints the error and exits non-zero (explicit name) or retries with a fresh random name (auto-assigned). Same `InstanceID`, or dead holder → `Takeover` succeeds, old session gets `Evicted`. |
+| **Subdomain collision** | `Registry.Bind` under lock | Normal bind: different live `InstanceID` → `BindErr{subdomain_taken}`. Multi-connector bind: same explicit subdomain joins the pool when settings match; a mismatch returns `connector_config_mismatch`. Reconnect replaces only the matching connector, and releasing one connector drains it without removing its peers. |
 | **Apex cert fails to issue/renew** | Startup check + `/healthz` per-cert `NotAfter` | Public traffic keeps working on the wildcard while **no agent can connect** — so `ngstoned` refuses to accept on :4443 without a loadable apex cert and exits loudly rather than failing mysteriously (§4). |
-| **Token leak** | Anomalous auth source IPs in edge logs (every auth logged with IP + result) | Blast radius (§9): attacker can bind tunnels and serve content under your wildcard — no shell, no data. Recovery: set new `token_sha256`, restart — every session dies at reconnect-auth. Auth attempts per-IP rate-limited (5/min). |
-| **Abusive public traffic** | Limiter counters on `expvar` | Layered: unknown-host fast-404 → per-IP token bucket `429` → global in-flight cap 512 → header/body/time limits. Volumetric DoS is the VPS provider's problem (accepted). Optional `--allow-cidr` flips a tunnel to allowlist-only. |
+| **Credential leak or revocation** | Auth result logs plus credential status; live sessions rechecked on the 15 s heartbeat | A scoped credential can bind only its exact subdomain or TCP port and expires automatically. Revoke its ID to disconnect that tunnel on the next heartbeat. A legacy shared-token leak still permits any non-denylisted subdomain and requires rotating `token_sha256`. Auth attempts are rate-limited (5/min). |
+| **Abusive public traffic** | Limiter counters on `expvar` | Layered: unknown-host fast-404 → per-IP token bucket `429` → global in-flight cap 512 → header/body/time limits. Volumetric DoS is the VPS provider's problem (accepted). Optional `--allow-cidr` flips a tunnel to allowlist-only; an HTTP `--policy-file` is evaluated before a request stream is opened and can return `403` without touching the agent. |
 
 ---
 
@@ -482,15 +545,15 @@ func (s *Store) Subscribe(ctx context.Context) <-chan *Exchange
 
 1. **Anonymous attacker with the public URL** — is exactly an anonymous HTTP client of the exposed local app, nothing more. They cannot reach the inspector (it's a terminal UI attached to the operator's own process, not a network service — there's no port to reach at all), other localhost ports (only the configured target is dialed), or the control plane (token-gated). Residual risk is *inherent to tunneling*: if the local app is a debug server with RCE, the tunnel exposes it. Mitigations: fast-404 non-enumeration, per-IP rate limiting, and loud docs.
 2. **Subdomain enumeration** — unknown and offline hosts return byte-identical 404s. The wildcard cert means individual tunnel names never appear in CT logs (a real advantage of DNS-01 wildcard over per-name issuance).
-3. **Leaked token** — grants: bind any non-denylisted subdomain, receive that traffic, serve phishing under your domain. Does **not** grant: reading other tunnels' traffic in flight, edge shell access, cert/DNS control. Rotation is a config change + restart. Tokens never appear in logs (redacted at the slog layer); only the hash lives on the VPS.
-4. **MITM agent↔edge** — TLS 1.3 with WebPKI validation (+ optional SPKI pin); token only ever sent inside the tunnel TLS.
+3. **Leaked credential** — a scoped credential grants only its exact tunnel scope until its TTL or independent revocation. It does **not** grant: reading other tunnels' traffic in flight, edge shell access, cert/DNS control, or access to the credential file. The legacy shared token remains a migration fallback with a larger blast radius. Plaintext credentials never appear in logs or the edge file; only hashes live on the VPS.
+4. **MITM agent↔edge** — TLS 1.3 with WebPKI validation (+ optional SPKI pin); the scoped bearer credential is only sent inside the tunnel TLS.
 5. **Header spoofing** — inbound `Forwarded`/`X-Forwarded-*` are stripped by `Rewrite` and replaced by `SetXForwarded` at the edge; `X-Real-IP` is stripped explicitly (it is not in the stdlib delete set). The local app can trust them **only if the agent-side proxy preserves them** — see §6, where the same stdlib behavior silently deletes them if you use `Rewrite` on the agent.
 6. **Malicious web page attacking the inspector (CSRF / DNS rebinding)** — not applicable as shipped. The original design's `127.0.0.1:4040` API would have needed the `X-Ngstone` header + Origin/Host checks described in earlier drafts of this document, but the inspector shipped as a terminal UI instead (§6): there is no listening port, no HTTP API, and therefore nothing for a browser tab to reach or rebind to.
 7. **Resource exhaustion** — every buffer has a stated cap, *including the yamux receive windows* (§5 table) that an earlier draft omitted while claiming completeness; no code path buffers an entire body. The unauthenticated surface on :4443 is separately capped (concurrent handshakes, unauthenticated sessions) so a stranger cannot hoard control-plane resources for the cost of a TCP connect.
 
 Out of scope, accepted for a single-user v1:
 
-- **Native gRPC and h2c backends.** The tunnel carries raw HTTP/1.1 bytes inside each stream, so gRPC's trailers and full-duplex h2 semantics cannot survive it — this is a structural protocol limitation, not a tuning problem, and supporting it later costs an h2-capable data path, not just a new `StreamOpen.Kind`. (§11 previously listed "gRPC-web that stalls" as a debugging smell, which badly understated this.)
+- **WebSocket over h2 extended CONNECT.** Native gRPC and h2c backends use the explicit HTTP/2 bind mode, but WebSocket clients should use the existing HTTP/1.1 upgrade path; RFC 8441 extended CONNECT is not enabled.
 - Volumetric DDoS beyond the VPS's capacity.
 - Compromise of the VPS itself (it terminates TLS and sees plaintext — treat it as trusted infrastructure).
 - OAuth-grade auth in front of tunnels (v1.1 candidate: edge-enforced basic auth per tunnel via a `Bind` option — the `Data` envelope permits it additively).
