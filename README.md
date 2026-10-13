@@ -93,6 +93,7 @@ the others keep running.
 ngstone service install          # systemd user unit on Linux, launchd agent on macOS
 ngstone service status
 ngstone service uninstall
+ngstone ps                       # tunnels of every running ngstone process, with their URLs
 ```
 
 The service runs `ngstone start --no-tui` with the tunnels file you point it
