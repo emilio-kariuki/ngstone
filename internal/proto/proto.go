@@ -5,9 +5,9 @@ import (
 	"sync/atomic"
 )
 
-const ProtoVersion = 2
+const ProtoVersion = 3
 
-var SupportedVersions = []int{2, 1}
+var SupportedVersions = []int{3, 2, 1}
 
 const (
 	TypeAuth       = "auth"
@@ -24,6 +24,19 @@ const (
 	TypePong       = "pong"
 	TypeGoodbye    = "goodbye"
 	TypeStreamOpen = "stream_open"
+
+	// Protocol v3: temporary sharing of a local TCP service with a peer that
+	// holds a share link instead of the operator token.
+	TypeShare       = "share"
+	TypeShareOK     = "share_ok"
+	TypeShareErr    = "share_err"
+	TypeUnshare     = "unshare"
+	TypeUnshareOK   = "unshare_ok"
+	TypeConnect     = "connect"
+	TypeConnectOK   = "connect_ok"
+	TypeConnectErr  = "connect_err"
+	TypeShareEvent  = "share_event"
+	TypeShareClosed = "share_closed"
 )
 
 const (
@@ -39,11 +52,51 @@ const (
 	CodePortUnavailable  = "port_unavailable"
 	CodeTooManyBinds     = "too_many_binds"
 	CodeInvalidAccess    = "invalid_access"
+
+	// v3 share codes.
+	CodeBadShare           = "bad_share"           // AuthErr: unknown, expired or revoked share secret
+	CodeInvalidShare       = "invalid_share"       // ShareErr: malformed share request
+	CodeShareTTLTooLong    = "share_ttl_too_long"  // ShareErr: expires_at beyond the edge's -max-share-ttl
+	CodeTooManyShares      = "too_many_shares"     // ShareErr: per-session share cap reached
+	CodeShareTaken         = "share_taken"         // ShareErr: same secret registered by another instance
+	CodeShareNotFound      = "share_not_found"     // UnshareErr/ConnectErr: no such live share
+	CodeShareFull          = "share_full"          // ConnectErr: max_connectors reached
+	CodeShareLocked        = "share_locked"        // ConnectErr: single-use share locked to another connector
+	CodeForbidden          = "forbidden"           // Error: message not allowed for this session's scope
+	CodeForbiddenCIDR      = "forbidden_cidr"      // ConnectErr: connector address outside allow_cidrs
+	CodeFeatureUnsupported = "feature_unsupported" // ShareErr: edge negotiated a protocol without sharing
+)
+
+// Session scopes reported in AuthOK.Scope.
+const (
+	ScopeOperator  = "operator"
+	ScopeConnector = "connector"
+)
+
+// Share lifecycle reasons carried by ShareClosed.Reason and ShareEvent.Reason.
+const (
+	ShareReasonExpired      = "expired"
+	ShareReasonRevoked      = "revoked"
+	ShareReasonSharerGone   = "sharer_gone"
+	ShareReasonEdgeShutdown = "edge_shutdown"
+)
+
+// ShareEvent.Event values.
+const (
+	ShareEventConnectorJoined = "connector_joined"
+	ShareEventConnectorLeft   = "connector_left"
+	ShareEventConnOpen        = "conn_open"
+	ShareEventConnClose       = "conn_close"
+	ShareEventConnRejected    = "conn_rejected"
+	ShareEventClosed          = "closed"
 )
 
 const (
 	KindHTTP = "http"
 	KindTCP  = "tcp"
+	// KindShare marks a data stream a connector opens toward the edge; the
+	// edge relays it to the sharer as a KindTCP stream.
+	KindShare = "share"
 )
 
 type Msg struct {
@@ -52,8 +105,12 @@ type Msg struct {
 	Data json.RawMessage `json:"data,omitempty"`
 }
 
+// Auth carries exactly one of Token (operator scope) or ShareSecret
+// (connector scope, v3). ShareSecret is the base64url secret from a share
+// link; the edge hashes it and looks the share up by hash.
 type Auth struct {
-	Token         string `json:"token"`
+	Token         string `json:"token,omitempty"`
+	ShareSecret   string `json:"share_secret,omitempty"`
 	InstanceID    string `json:"instance_id"`
 	ClientVersion string `json:"client_version"`
 	ProtoVersions []int  `json:"proto_versions"`
@@ -63,6 +120,9 @@ type AuthOK struct {
 	ProtoVersion  int    `json:"proto_version"`
 	SessionID     string `json:"session_id"`
 	ServerVersion string `json:"server_version"`
+	// Scope is "operator" for token auth and "connector" for share-secret
+	// auth. Empty means operator (edges older than v3).
+	Scope string `json:"scope,omitempty"`
 }
 
 type AuthErr struct {
@@ -128,6 +188,86 @@ type StreamOpen struct {
 	Host       string `json:"host"`
 	ReqID      string `json:"req_id"`
 	ClientAddr string `json:"client_addr"`
+	// ShareID is set on streams that belong to a share (v3), in both
+	// directions: connector -> edge (Kind "share") and edge -> sharer
+	// (Kind "tcp").
+	ShareID string `json:"share_id,omitempty"`
+}
+
+// ---- v3: sharer -> edge ----
+
+// Share registers a share. The sharer mints the secret and sends only its
+// SHA-256 (hex); the plaintext secret lives in the link and on the sharer.
+type Share struct {
+	Kind          string   `json:"kind"`
+	SecretSHA256  string   `json:"secret_sha256"`
+	Label         string   `json:"label,omitempty"`
+	Preset        string   `json:"preset,omitempty"`
+	DefaultPort   int      `json:"default_port"`
+	ExpiresAtMS   int64    `json:"expires_at_unix_ms"`
+	MaxConns      int      `json:"max_conns,omitempty"`
+	MaxConnectors int      `json:"max_connectors,omitempty"`
+	SingleUse     bool     `json:"single_use,omitempty"`
+	AllowCIDRs    []string `json:"allow_cidrs,omitempty"`
+}
+
+type ShareOK struct {
+	ShareID     string `json:"share_id"`
+	ExpiresAtMS int64  `json:"expires_at_unix_ms"`
+}
+
+type ShareErr struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type Unshare struct {
+	ShareID string `json:"share_id"`
+}
+
+type UnshareOK struct {
+	ShareID string `json:"share_id"`
+}
+
+// ---- v3: connector -> edge ----
+
+// Connect joins the share whose secret authenticated this session.
+type Connect struct{}
+
+type ConnectOK struct {
+	ShareID     string `json:"share_id"`
+	ConnectorID string `json:"connector_id"`
+	Label       string `json:"label"`
+	Preset      string `json:"preset"`
+	DefaultPort int    `json:"default_port"`
+	ExpiresAtMS int64  `json:"expires_at_unix_ms"`
+}
+
+type ConnectErr struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// ---- v3: edge -> sharer (audit) ----
+
+type ShareEvent struct {
+	ShareID     string `json:"share_id"`
+	Event       string `json:"event"`
+	AtMS        int64  `json:"at_unix_ms"`
+	ConnectorID string `json:"connector_id,omitempty"`
+	ConnID      int    `json:"conn_id,omitempty"`
+	ClientAddr  string `json:"client_addr,omitempty"`
+	DurationMS  int64  `json:"duration_ms,omitempty"`
+	BytesUp     int64  `json:"bytes_up,omitempty"`
+	BytesDown   int64  `json:"bytes_down,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+// ---- v3: edge -> connector ----
+
+type ShareClosed struct {
+	ShareID string `json:"share_id"`
+	Reason  string `json:"reason"`
 }
 
 var knownTypes = map[string]bool{
@@ -145,6 +285,17 @@ var knownTypes = map[string]bool{
 	TypePong:       true,
 	TypeGoodbye:    true,
 	TypeStreamOpen: true,
+
+	TypeShare:       true,
+	TypeShareOK:     true,
+	TypeShareErr:    true,
+	TypeUnshare:     true,
+	TypeUnshareOK:   true,
+	TypeConnect:     true,
+	TypeConnectOK:   true,
+	TypeConnectErr:  true,
+	TypeShareEvent:  true,
+	TypeShareClosed: true,
 }
 
 func KnownType(t string) bool {

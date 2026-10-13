@@ -17,6 +17,8 @@ const TOC: TocItem[] = [
   { id: "ngstone-auth", title: "ngstone auth" },
   { id: "ngstone-port", title: "ngstone port" },
   { id: "ngstone-tcp", title: "ngstone tcp" },
+  { id: "ngstone-share", title: "ngstone share" },
+  { id: "ngstone-connect", title: "ngstone connect" },
   { id: "ngstone-config", title: "ngstone config" },
   { id: "ngstone-logout", title: "ngstone logout" },
   { id: "ngstone-version", title: "ngstone version" },
@@ -33,9 +35,9 @@ export default function CliPage() {
       <p>
         The <code>ngstone</code> command is built on the stdlib{" "}
         <code>flag</code> package — no cobra, no subcommand framework. There
-        are six verbs: <code>auth</code>, <code>port</code>,{" "}
-        <code>tcp</code>, <code>config</code>, <code>logout</code>, and{" "}
-        <code>version</code>.
+        are eight verbs: <code>auth</code>, <code>port</code>,{" "}
+        <code>tcp</code>, <code>share</code>, <code>connect</code>,{" "}
+        <code>config</code>, <code>logout</code>, and <code>version</code>.
       </p>
 
       <Anchor id="overview">Overview</Anchor>
@@ -47,6 +49,8 @@ Commands:
   auth <token>            verify and save an auth token
   port <port|url>         expose a local port or URL through the tunnel
   tcp <port|host:port>    expose a raw TCP service through the tunnel
+  share <preset> [target] share a local database with teammates via a link
+  connect <link>          connect to a shared database through a link
   config                  view or set local configuration
   logout                  remove the saved auth token
   version                 print the ngstone version`}
@@ -256,6 +260,89 @@ $ ngstone tcp db.local:5432 --remote-port 15432`}
         reverse proxy</a> and{" "}
         <a href="/docs/guides/access-control">Access control</a>.
       </Callout>
+
+      <Anchor id="ngstone-share">ngstone share</Anchor>
+      <p>
+        Shares a local database, or any TCP service, through a link that
+        expires. Unlike <code>tcp</code> it opens no public port: the only
+        way in is <code>ngstone connect</code> with the link. See{" "}
+        <a href="/docs/guides/database-sharing">Sharing a database</a>.
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone share postgres --expires 2h --label "staging replica"
+$ ngstone share mysql db.local:3306 --allow-cidr 10.0.0.0/8
+$ ngstone share tcp 9000 --single-use --audit-log share.jsonl`}
+      />
+      <p>
+        The first argument is a preset (<code>postgres</code>,{" "}
+        <code>mysql</code>, <code>redis</code>) or <code>tcp</code>; the
+        optional second argument is a port or <code>host:port</code>{" "}
+        target, required for <code>tcp</code>.
+      </p>
+      <ParamTable>
+        <Property name="--expires" type="duration" defaultValue="1h">
+          Share lifetime, capped by the edge&apos;s{" "}
+          <code>-max-share-ttl</code>.
+        </Property>
+        <Property name="--label" type="string">
+          Label shown to connectors. Defaults to the preset name.
+        </Property>
+        <Property name="--allow-cidr" type="string">
+          Comma-separated CIDRs connectors must come from.
+        </Property>
+        <Property name="--max-conns" type="int" defaultValue="16">
+          Concurrent relayed connections across all connectors.
+        </Property>
+        <Property name="--max-connectors" type="int" defaultValue="8">
+          Concurrent connector agents.
+        </Property>
+        <Property name="--single-use" type="bool" defaultValue="false">
+          Lock the link to the first connector agent that uses it.
+        </Property>
+        <Property name="--audit-log" type="string">
+          Append every audit event to this file as JSON Lines.
+        </Property>
+        <Property name="--server, --token, --insecure, --server-name, --pin" type="various">
+          As for <code>ngstone tcp</code>. With <code>--insecure</code> the
+          printed hint tells connectors to pass it too.
+        </Property>
+      </ParamTable>
+
+      <Anchor id="ngstone-connect">ngstone connect</Anchor>
+      <p>
+        Joins a share and serves it on the loopback interface. Needs no
+        token and no config file: the link carries the edge address and
+        the secret.
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone connect ngstone://example.com:4443/s/N7kq...Vb0Q
+$ ngstone connect - < link.txt
+$ NGSTONE_SHARE_LINK=ngstone://... ngstone connect --port 15432`}
+      />
+      <ParamTable>
+        <Property name="--port, -p" type="int" defaultValue="0">
+          Local port to listen on. <code>0</code> means the share&apos;s
+          preset port, or a free port when that is busy.
+        </Property>
+        <Property name="--insecure" type="bool" defaultValue="false">
+          Dial the edge in plaintext; only for links from an edge running
+          with <code>-insecure</code>.
+        </Property>
+        <Property name="--server-name" type="string">
+          TLS <code>ServerName</code>/SNI override. Defaults to the host in
+          the link.
+        </Property>
+        <Property name="--pin" type="string">
+          Optional SPKI pin, checked in addition to chain validation.
+        </Property>
+      </ParamTable>
+      <p>
+        Exit status is <code>0</code> on Ctrl-C, <code>3</code> when the
+        share expired or was revoked, and <code>1</code> when the link is
+        invalid or the share&apos;s policy refused this connector.
+      </p>
 
       <Anchor id="ngstone-config">ngstone config</Anchor>
       <p>Read or change the local config file without hand-editing JSON.</p>

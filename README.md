@@ -59,6 +59,31 @@ not installed by this script; it's server infrastructure, not something to
 curl-pipe onto a box. There's no `ngstone token` command — the token is a
 plain shell one-liner, shown in the next section.
 
+## Share a database temporarily
+
+`ngstone share` exposes a local Postgres, MySQL or Redis (or any TCP
+service) to teammates through a link, without opening a public port. Both
+sides dial out to the edge; the edge joins the two sessions and copies
+bytes. Shares expire, carry a policy, and show every connection in the
+sharer's terminal:
+
+```
+ngstone share postgres --expires 2h --label "staging replica"
+# prints a link: ngstone://example.com:4443/s/...
+```
+
+A teammate runs the link, and gets the database on their own loopback:
+
+```
+ngstone connect ngstone://example.com:4443/s/...
+# listening  127.0.0.1:5432  ->  psql "postgres://127.0.0.1:5432/"
+```
+
+Ctrl-C on the sharer revokes the link and connectors are told within a
+second. `--allow-cidr`, `--max-conns`, `--max-connectors` and
+`--single-use` set the policy; `--audit-log` writes every event as JSON
+Lines. The full design is in [docs/SHARE-DESIGN.md](docs/SHARE-DESIGN.md).
+
 ## Run it locally, no TLS
 
 You don't need a VPS or a domain to try ngstone. This runs both binaries on

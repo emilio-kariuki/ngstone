@@ -28,6 +28,7 @@ func main() {
 	publicScheme := flag.String("public-scheme", "https", "scheme advertised in BindOK.URL (http or https)")
 	tcpPortRange := flag.String("tcp-ports", "", "port range for raw TCP tunnels, e.g. \"10000-10999\"; empty disables TCP tunnels. These ports are exposed directly to the internet (not behind a reverse proxy) and must be opened in the firewall.")
 	tcpBindAddr := flag.String("tcp-bind", "0.0.0.0", "interface address the TCP tunnel port range binds on")
+	maxShareTTL := flag.Duration("max-share-ttl", edge.DefaultMaxShareTTL, "longest lifetime an agent may request for a share link (ngstone share --expires)")
 
 	proxyProtocol := flag.Bool("proxy-protocol", false, "require a PROXY protocol v1/v2 header on every connection to the public listener, and use the address it carries as the client address; enable this only when the public port is reachable solely from a trusted TCP proxy (see deploy/README.md), and enable it on both sides at once")
 	proxyProtocolTrusted := flag.String("proxy-protocol-trusted", "", "comma-separated CIDRs trusted to originate PROXY protocol headers on the public listener (only meaningful with -proxy-protocol); connections from any other peer are closed immediately. If empty, PROXY headers are accepted from any peer and --allow-cidr per-tunnel checks cannot be trusted unless the public port is firewalled to the proxy")
@@ -129,6 +130,7 @@ func main() {
 		PublicScheme: *publicScheme,
 		TCPPortRange: *tcpPortRange,
 		TCPBindAddr:  *tcpBindAddr,
+		MaxShareTTL:  *maxShareTTL,
 
 		Insecure:             *insecure,
 		ProxyProtocol:        *proxyProtocol,
