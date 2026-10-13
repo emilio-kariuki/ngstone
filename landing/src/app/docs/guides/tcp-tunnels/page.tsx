@@ -127,7 +127,9 @@ tcp://amber-fox-42.example.com:14202 -> 127.0.0.1:5432`}
       <Anchor id="opt-in-per-edge">Opt-in per edge</Anchor>
       <p>
         TCP tunnels aren&apos;t available unless the edge operator turns
-        them on. See{" "}
+        them on with <code>-tcp-ports</code> — with the installer, rerun{" "}
+        <code>sudo ./deploy/install-edge.sh --tcp-ports 10000-10100</code>,
+        which also opens the range in UFW. See{" "}
         <a href="/docs/guides/edge-vps#tcp-tunnels">TCP tunnels</a> in the
         edge runbook for how that&apos;s configured.
       </p>

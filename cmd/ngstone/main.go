@@ -210,7 +210,7 @@ func cmdAuth(args []string) int {
 	fs := flag.NewFlagSet("auth", flag.ContinueOnError)
 	serverFlag := fs.String("server", "", "edge control plane address to verify against (defaults to config or "+defaultServer+")")
 	insecure := fs.Bool("insecure", false, "dial the control plane in plaintext (dev/test only)")
-	serverName := fs.String("server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
+	serverName := fs.String("server-name", "", "TLS ServerName/SNI to verify against; defaults to the host in the server address (ignored with -insecure)")
 	pin := fs.String("pin", "", "optional \"sha256/BASE64\" SPKI pin")
 	positionals, err := parsePermissive(fs, args)
 	if err != nil {
@@ -344,7 +344,7 @@ func newPortFlagSet() (*flag.FlagSet, *portFlags) {
 	fs.StringVar(&pf.token, "token", "", "auth token override (defaults to NGSTONE_TOKEN or the saved config)")
 	fs.StringVar(&pf.instanceID, "instance-id", "", "internal/undocumented: force a specific instance id (testing only)")
 	fs.BoolVar(&pf.insecure, "insecure", false, "dial the control plane in plaintext (dev/test only, no certificates involved)")
-	fs.StringVar(&pf.serverName, "server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
+	fs.StringVar(&pf.serverName, "server-name", "", "TLS ServerName/SNI to verify against; defaults to the host in the server address (ignored with -insecure)")
 	fs.StringVar(&pf.pin, "pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation")
 	fs.StringVar(&pf.hostHeader, "host-header", "", "Host header sent to the local app (empty = preserve the public host)")
 	fs.BoolVar(&pf.noTUI, "no-tui", false, "disable the terminal inspector UI and log plain text to stderr")
@@ -555,7 +555,7 @@ func newTCPFlagSet() (*flag.FlagSet, *tcpFlags) {
 	fs.StringVar(&tf.token, "token", "", "auth token override (defaults to NGSTONE_TOKEN or the saved config)")
 	fs.StringVar(&tf.instanceID, "instance-id", "", "internal/undocumented: force a specific instance id (testing only)")
 	fs.BoolVar(&tf.insecure, "insecure", false, "dial the control plane in plaintext (dev/test only, no certificates involved)")
-	fs.StringVar(&tf.serverName, "server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
+	fs.StringVar(&tf.serverName, "server-name", "", "TLS ServerName/SNI to verify against; defaults to the host in the server address (ignored with -insecure)")
 	fs.StringVar(&tf.pin, "pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation")
 	fs.StringVar(&tf.allowCIDR, "allow-cidr", "", "comma-separated CIDRs allowed to reach the tunnel (empty = allow all)")
 	return fs, tf
@@ -880,7 +880,7 @@ func legacyMain() {
 	instanceID := flag.String("instance-id", "", "internal/undocumented: force a specific instance id (testing only)")
 
 	insecure := flag.Bool("insecure", false, "dial the control plane in plaintext (dev/test only, no certificates involved)")
-	serverName := flag.String("server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
+	serverName := flag.String("server-name", "", "TLS ServerName/SNI to verify against; defaults to the host in the server address (ignored with -insecure)")
 	pin := flag.String("pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation (off by default)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	noTUI := flag.Bool("no-tui", false, "disable the terminal inspector UI (this legacy flag form is always plain output)")

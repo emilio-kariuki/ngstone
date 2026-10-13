@@ -25,6 +25,10 @@ var (
 	metricRejectedUnauthorized  = expvar.NewInt("ngstoned_rejected_unauthorized_total")
 
 	metricRejectedUpgradeCap = expvar.NewInt("ngstoned_rejected_upgrade_cap_total")
+
+	metricRejectedPerIPCap   = expvar.NewInt("ngstoned_rejected_per_ip_cap_total")
+	metricRejectedClientIdle = expvar.NewInt("ngstoned_rejected_client_idle_total")
+	metricTCPClosedIdle      = expvar.NewInt("ngstoned_tcp_closed_idle_total")
 	metricActiveUpgrades     = expvar.NewInt("ngstoned_active_upgrades")
 )
 

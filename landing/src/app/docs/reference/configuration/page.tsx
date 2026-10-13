@@ -61,9 +61,10 @@ export default function ConfigurationPage() {
 
       <Anchor id="edge-config">Edge (ngstoned)</Anchor>
       <ParamTable>
-        <Property name="-domain" type="string" defaultValue="ngstone.site">
+        <Property name="-domain" type="string" required>
           Base domain used to build tunnel hostnames and the two managed
-          certificates.
+          certificates, for example <code>example.com</code>. There is no
+          default.
         </Property>
         <Property name="-public" type="string" defaultValue=":443">
           Public HTTPS listen address.
@@ -106,10 +107,20 @@ export default function ConfigurationPage() {
           <code>certmagic.FileStorage</code> path; must match the systemd{" "}
           <code>StateDirectory</code>.
         </Property>
-        <Property name="-cf-api-token" type="string" required>
-          Cloudflare API token scoped to <code>Zone:DNS:Edit</code> on the
-          one zone. Required unless <code>-insecure</code>. Defaults to{" "}
-          <code>$NGSTONE_CF_API_TOKEN</code>.
+        <Property name="-dns-provider" type="string" defaultValue="cloudflare">
+          DNS provider used for the DNS-01 certificate challenges:{" "}
+          <code>cloudflare</code>, <code>route53</code>,{" "}
+          <code>digitalocean</code>, <code>hetzner</code>,{" "}
+          <code>vultr</code>, <code>ovh</code>, <code>desec</code>, or{" "}
+          <code>bunny</code>. Its credentials are read from the environment
+          only — see below. <code>-dns-provider help</code> prints the
+          providers and the variables each reads, then exits.
+        </Property>
+        <Property name="-cf-api-token" type="string">
+          Legacy flag for the Cloudflare API token, used only with{" "}
+          <code>-dns-provider cloudflare</code> when{" "}
+          <code>$NGSTONE_CF_API_TOKEN</code> is unset. Prefer the
+          environment variable.
         </Property>
       </ParamTable>
       <p>
@@ -122,7 +133,9 @@ export default function ConfigurationPage() {
         <code>-per-ip-lru</code>, <code>-global-inflight</code>,{" "}
         <code>-per-session-inflight</code>, <code>-upgrade-inflight</code>,{" "}
         <code>-per-session-upgrade</code>,{" "}
-        <code>-handshake-concurrency</code>, <code>-unauth-sessions</code>).
+        <code>-handshake-concurrency</code>, <code>-unauth-sessions</code>,{" "}
+        <code>-per-ip-inflight</code>, <code>-client-idle-timeout</code>,{" "}
+        <code>-tcp-idle-timeout</code>).
         See{" "}
         <a href="/docs/reference/limits-timeouts">Limits &amp; timeouts</a>{" "}
         for the full set and their defaults.
@@ -139,10 +152,58 @@ export default function ConfigurationPage() {
           instead of <code>-token-sha256</code>.
         </Property>
         <Property name="NGSTONE_CF_API_TOKEN" type="edge env">
-          Preferred way to pass the Cloudflare token to{" "}
-          <code>ngstoned</code> instead of <code>-cf-api-token</code>.
+          <code>-dns-provider cloudflare</code>: API token with{" "}
+          <code>Zone</code> / <code>DNS</code> / <code>Edit</code> on the
+          zone only. Preferred over <code>-cf-api-token</code>.
+        </Property>
+        <Property
+          name="NGSTONE_AWS_REGION, NGSTONE_AWS_ACCESS_KEY_ID, NGSTONE_AWS_SECRET_ACCESS_KEY"
+          type="edge env"
+        >
+          <code>-dns-provider route53</code>: region and the keys of an IAM
+          user allowed <code>route53:ListHostedZonesByName</code>,{" "}
+          <code>ListResourceRecordSets</code>,{" "}
+          <code>ChangeResourceRecordSets</code>, and <code>GetChange</code>.
+        </Property>
+        <Property name="NGSTONE_DO_API_TOKEN" type="edge env">
+          <code>-dns-provider digitalocean</code>: personal access token
+          with domain read and write.
+        </Property>
+        <Property name="NGSTONE_HETZNER_API_TOKEN" type="edge env">
+          <code>-dns-provider hetzner</code>: read and write API token of
+          the Hetzner Console project holding the zone. Zones on the
+          deprecated <code>dns.hetzner.com</code> must be migrated first.
+        </Property>
+        <Property name="NGSTONE_VULTR_API_KEY" type="edge env">
+          <code>-dns-provider vultr</code>: API key, with the VPS&apos;s IP
+          allowed in its access control.
+        </Property>
+        <Property
+          name="NGSTONE_OVH_ENDPOINT, NGSTONE_OVH_APPLICATION_KEY, NGSTONE_OVH_APPLICATION_SECRET, NGSTONE_OVH_CONSUMER_KEY"
+          type="edge env"
+        >
+          <code>-dns-provider ovh</code>: endpoint <code>ovh-eu</code>,{" "}
+          <code>ovh-ca</code>, or <code>ovh-us</code>, plus a consumer key
+          limited to <code>GET</code>, <code>POST</code>, and{" "}
+          <code>DELETE</code> on <code>/domain/zone/*</code>.
+        </Property>
+        <Property name="NGSTONE_DESEC_TOKEN" type="edge env">
+          <code>-dns-provider desec</code>: API token. deSEC&apos;s 3600 s
+          minimum TTL and rate limits can make issuance take a few minutes.
+        </Property>
+        <Property name="NGSTONE_BUNNY_API_KEY" type="edge env">
+          <code>-dns-provider bunny</code>: account API key.
         </Property>
       </ParamTable>
+      <p>
+        Only providers whose <code>libdns</code> module adds and removes
+        individual TXT values are supported, because the apex and wildcard
+        certificates publish challenges at the same name concurrently.
+        GoDaddy, Namecheap, Porkbun, IONOS, Azure, DNSimple, and netcup are
+        not; move the zone&apos;s DNS hosting to a supported provider
+        instead. See{" "}
+        <a href="/docs/guides/edge-vps#dns-provider">Choosing a DNS provider</a>.
+      </p>
       <Callout variant="danger" title="Never pass secrets as flags">
         <code>/proc/&lt;pid&gt;/cmdline</code> is world-readable on stock
         Linux, so anything passed as an <code>ExecStart</code> flag is
@@ -151,7 +212,7 @@ export default function ConfigurationPage() {
       </Callout>
 
       <Anchor id="precedence">Precedence</Anchor>
-      <p>On the edge, an explicit flag always wins over its environment fallback; anything left unset falls back to its documented default.</p>
+      <p>On the edge, <code>$NGSTONE_TOKEN_SHA256</code> and <code>$NGSTONE_CF_API_TOKEN</code> win over <code>-token-sha256</code> and <code>-cf-api-token</code> when both are set, and other DNS provider credentials come from the environment only. Every other setting is a flag that falls back to its documented default when unset.</p>
       <p>On the agent, resolving the token or server address for <code>ngstone port</code> follows this chain:</p>
       <ParamTable>
         <Property name="1. Flag" type="highest precedence">
