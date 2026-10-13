@@ -41,7 +41,6 @@ export default function CliPage() {
         <code>tcp</code>, <code>serve</code>, <code>start</code>,{" "}
         <code>service</code>, <code>ps</code>, <code>config</code>,{" "}
         <code>logout</code>, and <code>version</code>.
-        <code>version</code>.
       </p>
 
       <Anchor id="overview">Overview</Anchor>
