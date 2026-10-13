@@ -10,14 +10,17 @@ ENV_PATH="${ENV_DIR}/env"
 VERSION="${NGSTONE_VERSION:-}"
 DOMAIN="${NGSTONE_DOMAIN:-}"
 EMAIL="${NGSTONE_CERT_EMAIL:-}"
-CF_API_TOKEN="${NGSTONE_CF_API_TOKEN:-}"
+DNS_PROVIDER="${NGSTONE_DNS_PROVIDER:-}"
+TCP_PORTS="${NGSTONE_TCP_PORTS:-}"
 AUTH_TOKEN="${NGSTONE_AUTH_TOKEN:-}"
 ACME_CA="${NGSTONE_ACME_CA:-}"
 BINARY_PATH="${NGSTONE_EDGE_BINARY:-}"
 SSH_PORT="${NGSTONE_SSH_PORT:-22}"
 SKIP_FIREWALL=0
 SKIP_DNS_CHECK=0
+FROM_SOURCE=0
 TEMP_DIR=""
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
 
 if [[ -r /dev/tty ]]; then
   if { exec 3</dev/tty; } 2>/dev/null; then
@@ -42,14 +45,56 @@ fail() {
   exit 1
 }
 
+# dns-providers:begin
+# One line per provider: name, then each credential as VAR:secret or
+# VAR:plain. Keep in sync with internal/edge/dnsprovider.go (a Go test
+# checks this table against it).
+DNS_PROVIDER_TABLE='
+cloudflare NGSTONE_CF_API_TOKEN:secret
+route53 NGSTONE_AWS_REGION:plain NGSTONE_AWS_ACCESS_KEY_ID:plain NGSTONE_AWS_SECRET_ACCESS_KEY:secret
+digitalocean NGSTONE_DO_API_TOKEN:secret
+hetzner NGSTONE_HETZNER_API_TOKEN:secret
+vultr NGSTONE_VULTR_API_KEY:secret
+ovh NGSTONE_OVH_ENDPOINT:plain NGSTONE_OVH_APPLICATION_KEY:plain NGSTONE_OVH_APPLICATION_SECRET:secret NGSTONE_OVH_CONSUMER_KEY:secret
+desec NGSTONE_DESEC_TOKEN:secret
+bunny NGSTONE_BUNNY_API_KEY:secret
+'
+# dns-providers:end
+
+provider_credentials() {
+  local name="$1" line
+  while read -r line; do
+    [[ -n "$line" ]] || continue
+    if [[ "${line%% *}" == "$name" ]]; then
+      printf '%s\n' "${line#* }"
+      return 0
+    fi
+  done <<<"$DNS_PROVIDER_TABLE"
+  return 1
+}
+
+provider_names() {
+  awk 'NF { print $1 }' <<<"$DNS_PROVIDER_TABLE" | paste -sd ' ' -
+}
+
 usage() {
-  cat <<'EOF'
+  local help_lines line
+  help_lines="$(while read -r line; do
+    [[ -n "$line" ]] || continue
+    printf '  %-14s' "${line%% *}"
+    for credential in ${line#* }; do printf ' %s' "${credential%%:*}"; done
+    printf '\n'
+  done <<<"$DNS_PROVIDER_TABLE")"
+  cat <<'EOF' | awk -v help="$help_lines" '{ if ($0 == "__NGSTONE_PROVIDER_HELP__") print help; else print }'
 Usage: install-edge.sh [options]
 
 Options:
   --domain DOMAIN           public base domain
   --email ADDRESS           Let's Encrypt account email
+  --dns-provider NAME       DNS host for certificate challenges (default: cloudflare)
+  --tcp-ports MIN-MAX       enable raw TCP tunnels on this port range; "off" disables
   --version VERSION         release version, for example v0.3.2
+  --from-source             build ngstoned from this checkout (needs Go) instead of downloading
   --acme-ca staging|production
   --ssh-port PORT           SSH port to preserve in UFW (default: 22)
   --binary PATH             use a local ngstoned binary instead of downloading
@@ -57,9 +102,12 @@ Options:
   --skip-dns-check          do not verify apex and wildcard DNS first
   -h, --help                show this help
 
-The Cloudflare token is read from NGSTONE_CF_API_TOKEN or prompted for
-without echoing it. The auth token is generated automatically unless
-NGSTONE_AUTH_TOKEN is provided or an existing installation is detected.
+DNS providers and the credentials each needs:
+__NGSTONE_PROVIDER_HELP__
+Credentials are read from the environment variables above or prompted for
+without echoing them, and are stored only in the root-only /etc/ngstoned/env.
+The auth token is generated automatically unless NGSTONE_AUTH_TOKEN is
+provided or an existing installation is detected.
 EOF
 }
 
@@ -77,6 +125,20 @@ while [[ $# -gt 0 ]]; do
     [[ $# -ge 2 ]] || fail "--domain requires a value"
     DOMAIN="$2"
     shift 2
+    ;;
+  --dns-provider)
+    [[ $# -ge 2 ]] || fail "--dns-provider requires a value; one of: $(provider_names)"
+    DNS_PROVIDER="$2"
+    shift 2
+    ;;
+  --tcp-ports)
+    [[ $# -ge 2 ]] || fail "--tcp-ports requires MIN-MAX or off"
+    TCP_PORTS="$2"
+    shift 2
+    ;;
+  --from-source)
+    FROM_SOURCE=1
+    shift
     ;;
   --email|--cert-email)
     [[ $# -ge 2 ]] || fail "$1 requires a value"
@@ -158,7 +220,7 @@ if command -v apt-get >/dev/null 2>&1; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl dnsutils openssl ufw
 fi
 
-for command_name in awk curl dig install openssl sha256sum systemctl tar; do
+for command_name in awk curl dig install openssl paste sha256sum systemctl tar; do
   command -v "$command_name" >/dev/null 2>&1 || fail "required command not found: $command_name"
 done
 
@@ -208,22 +270,70 @@ prompt_secret() {
 }
 
 EXISTING_HASH="$(get_env_value NGSTONE_TOKEN_SHA256)"
-EXISTING_CF_API_TOKEN="$(get_env_value NGSTONE_CF_API_TOKEN)"
 EXISTING_EMAIL="$(get_env_value NGSTONE_CERT_EMAIL)"
 EXISTING_DOMAIN="$(get_service_value -domain)"
 EXISTING_ACME_CA="$(get_service_value -acme-ca)"
+EXISTING_DNS_PROVIDER="$(get_service_value -dns-provider)"
+EXISTING_TCP_PORTS="$(get_service_value -tcp-ports)"
+if [[ -z "$EXISTING_DNS_PROVIDER" && -f "$SERVICE_PATH" ]]; then
+  EXISTING_DNS_PROVIDER=cloudflare
+fi
 
+# On a rerun, keep the existing domain and email unless new ones are given.
+DOMAIN="${DOMAIN:-$EXISTING_DOMAIN}"
+EMAIL="${EMAIL:-$EXISTING_EMAIL}"
 if [[ -z "$DOMAIN" ]]; then
-  prompt_value "Public domain" "$EXISTING_DOMAIN" DOMAIN
+  prompt_value "Public domain" "" DOMAIN
 fi
 if [[ -z "$EMAIL" ]]; then
-  prompt_value "Let's Encrypt email" "$EXISTING_EMAIL" EMAIL
+  prompt_value "Let's Encrypt email" "" EMAIL
 fi
-if [[ -z "$CF_API_TOKEN" ]]; then
-  CF_API_TOKEN="$EXISTING_CF_API_TOKEN"
+if [[ -z "$DNS_PROVIDER" ]]; then
+  DNS_PROVIDER="${EXISTING_DNS_PROVIDER:-cloudflare}"
 fi
-if [[ -z "$CF_API_TOKEN" ]]; then
-  prompt_secret "Cloudflare API token: " CF_API_TOKEN
+DNS_PROVIDER="${DNS_PROVIDER,,}"
+PROVIDER_CREDENTIALS="$(provider_credentials "$DNS_PROVIDER")" \
+  || fail "unsupported DNS provider: ${DNS_PROVIDER}; supported: $(provider_names)"
+
+# Each credential comes from the environment, then the existing env file
+# (only when the provider is unchanged), then an interactive prompt.
+declare -A CREDENTIAL_VALUES=()
+for credential in $PROVIDER_CREDENTIALS; do
+  credential_name="${credential%%:*}"
+  credential_kind="${credential#*:}"
+  value="${!credential_name:-}"
+  if [[ -z "$value" && "$DNS_PROVIDER" == "$EXISTING_DNS_PROVIDER" ]]; then
+    value="$(get_env_value "$credential_name")"
+  fi
+  if [[ -z "$value" ]]; then
+    [[ -t 3 ]] || fail "${credential_name} is required for --dns-provider ${DNS_PROVIDER}; set it in the environment when running non-interactively"
+    if [[ "$credential_kind" == secret ]]; then
+      prompt_secret "${DNS_PROVIDER} credential ${credential_name}: " value
+    else
+      prompt_value "${DNS_PROVIDER} credential ${credential_name}" "" value
+    fi
+  fi
+  [[ -n "$value" ]] || fail "${credential_name} is required for --dns-provider ${DNS_PROVIDER}"
+  [[ "$value" != *$'\n'* ]] || fail "${credential_name} must be a single line"
+  CREDENTIAL_VALUES["$credential_name"]="$value"
+done
+
+if [[ -z "$TCP_PORTS" ]]; then
+  TCP_PORTS="$EXISTING_TCP_PORTS"
+fi
+if [[ "${TCP_PORTS,,}" == off ]]; then
+  TCP_PORTS=""
+fi
+if [[ -n "$TCP_PORTS" ]]; then
+  [[ "$TCP_PORTS" =~ ^([0-9]+)-([0-9]+)$ ]] || fail "--tcp-ports must look like 10000-10100"
+  TCP_LO="${BASH_REMATCH[1]}"
+  TCP_HI="${BASH_REMATCH[2]}"
+  if ((TCP_LO < 1024 || TCP_HI > 65535 || TCP_LO > TCP_HI)); then
+    fail "--tcp-ports must be an ascending range within 1024-65535"
+  fi
+  if ((TCP_LO <= 4443 && 4443 <= TCP_HI)); then
+    fail "--tcp-ports must not include the control port 4443"
+  fi
 fi
 
 if [[ -z "$ACME_CA" ]]; then
@@ -246,9 +356,6 @@ fi
 if [[ "$ACME_CA" != staging && "$ACME_CA" != production ]]; then
   fail "ACME CA must be staging or production"
 fi
-if [[ -z "$CF_API_TOKEN" ]]; then
-  fail "Cloudflare API token is required"
-fi
 
 if [[ -n "$AUTH_TOKEN" ]]; then
   TOKEN_HASH="$(printf '%s' "$AUTH_TOKEN" | sha256sum | awk '{print $1}')"
@@ -269,10 +376,41 @@ resolve_version() {
   printf '%s' "$latest"
 }
 
+build_from_source() {
+  local repo_root build_version
+  repo_root="$(cd "${SCRIPT_DIR}/.." 2>/dev/null && pwd || true)"
+  [[ -n "$repo_root" && -f "${repo_root}/go.mod" && -d "${repo_root}/cmd/ngstoned" ]] \
+    || fail "--from-source must be run from a clone of the repository (deploy/install-edge.sh)"
+  command -v go >/dev/null 2>&1 || fail "--from-source needs Go; install it from https://go.dev/dl/ first"
+  TEMP_DIR="$(mktemp -d)"
+  build_version="$(git -C "$repo_root" describe --tags --always --dirty 2>/dev/null || echo dev)"
+  info "building ngstoned ${build_version} from ${repo_root}"
+  ( cd "$repo_root" && CGO_ENABLED=0 go build -trimpath \
+      -ldflags "-s -w -X ngstone/internal/version.Version=${build_version}" \
+      -o "${TEMP_DIR}/ngstoned" ./cmd/ngstoned )
+  BINARY_PATH="${TEMP_DIR}/ngstoned"
+}
+
+# Checked before the binary replaces the installed one, so a rerun with an
+# unsupported provider leaves a working installation untouched.
+check_binary_supports_provider() {
+  local candidate="$1"
+  if [[ "$DNS_PROVIDER" == cloudflare ]]; then
+    return
+  fi
+  if ! "$candidate" -dns-provider help 2>/dev/null | awk '{ print $1 }' | grep -qx "$DNS_PROVIDER"; then
+    fail "this ngstoned build does not support --dns-provider ${DNS_PROVIDER}; use --from-source or a newer --version"
+  fi
+}
+
 install_binary() {
   local architecture archive checksum_line download_base
+  if [[ "$FROM_SOURCE" -eq 1 && -z "$BINARY_PATH" ]]; then
+    build_from_source
+  fi
   if [[ -n "$BINARY_PATH" ]]; then
     [[ -f "$BINARY_PATH" ]] || fail "edge binary not found: $BINARY_PATH"
+    check_binary_supports_provider "$BINARY_PATH"
     install -o root -g root -m 0755 "$BINARY_PATH" "$INSTALL_PATH"
     return
   fi
@@ -303,6 +441,7 @@ install_binary() {
   ( cd "$TEMP_DIR" && printf '%s\n' "$checksum_line" | sha256sum -c - )
   tar -xzf "${TEMP_DIR}/${archive}" -C "$TEMP_DIR"
   [[ -f "${TEMP_DIR}/ngstoned" ]] || fail "release archive did not contain ngstoned"
+  check_binary_supports_provider "${TEMP_DIR}/ngstoned"
   install -o root -g root -m 0755 "${TEMP_DIR}/ngstoned" "$INSTALL_PATH"
 }
 
@@ -322,7 +461,7 @@ check_dns() {
 
 configure_firewall() {
   if [[ "$SKIP_FIREWALL" -eq 1 ]]; then
-    warn "skipping UFW configuration; open SSH, 80/tcp, 443/tcp, and 4443/tcp manually"
+    warn "skipping UFW configuration; open SSH, 80/tcp, 443/tcp, and 4443/tcp${TCP_PORTS:+, and ${TCP_PORTS}/tcp} manually"
     return
   fi
   ufw default deny incoming
@@ -331,8 +470,11 @@ configure_firewall() {
   ufw allow 80/tcp
   ufw allow 443/tcp
   ufw allow 4443/tcp
+  if [[ -n "$TCP_PORTS" ]]; then
+    ufw allow "${TCP_LO}:${TCP_HI}/tcp"
+  fi
   ufw --force enable
-  info "UFW allows SSH port ${SSH_PORT}, 80/tcp, 443/tcp, and 4443/tcp"
+  info "UFW allows SSH port ${SSH_PORT}, 80/tcp, 443/tcp, and 4443/tcp${TCP_PORTS:+, and ${TCP_LO}-${TCP_HI}/tcp for TCP tunnels}"
 }
 
 write_env() {
@@ -341,7 +483,9 @@ write_env() {
   temporary="$(mktemp "${ENV_DIR}/.env.XXXXXX")"
   printf 'NGSTONE_TOKEN_SHA256=%s\n' "$TOKEN_HASH" > "$temporary"
   printf 'NGSTONE_CERT_EMAIL=%s\n' "$EMAIL" >> "$temporary"
-  printf 'NGSTONE_CF_API_TOKEN=%s\n' "$CF_API_TOKEN" >> "$temporary"
+  for credential_name in "${!CREDENTIAL_VALUES[@]}"; do
+    printf '%s=%s\n' "$credential_name" "${CREDENTIAL_VALUES[$credential_name]}" >> "$temporary"
+  done
   chown root:root "$temporary"
   chmod 600 "$temporary"
   mv -f "$temporary" "$ENV_PATH"
@@ -361,6 +505,8 @@ Type=simple
 EnvironmentFile=/etc/ngstoned/env
 ExecStart=/usr/local/bin/ngstoned \
     -domain __NGSTONE_DOMAIN__ \
+    __NGSTONE_DNS_PROVIDER_LINE__ \
+    __NGSTONE_TCP_PORTS_LINE__ \
     -cert-email ${NGSTONE_CERT_EMAIL} \
     -acme-ca __NGSTONE_ACME_CA__ \
     -cert-storage ${STATE_DIRECTORY}/certs
@@ -391,6 +537,18 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 EOF
   sed -i "s/__NGSTONE_DOMAIN__/${DOMAIN}/g; s/__NGSTONE_ACME_CA__/${ACME_CA}/g" "$temporary"
+  # Omit -dns-provider for cloudflare so the unit also works with releases
+  # that predate the flag.
+  if [[ "$DNS_PROVIDER" == cloudflare ]]; then
+    sed -i '/__NGSTONE_DNS_PROVIDER_LINE__/d' "$temporary"
+  else
+    sed -i "s/__NGSTONE_DNS_PROVIDER_LINE__/-dns-provider ${DNS_PROVIDER}/" "$temporary"
+  fi
+  if [[ -n "$TCP_PORTS" ]]; then
+    sed -i "s/__NGSTONE_TCP_PORTS_LINE__/-tcp-ports ${TCP_PORTS}/" "$temporary"
+  else
+    sed -i '/__NGSTONE_TCP_PORTS_LINE__/d' "$temporary"
+  fi
   chown root:root "$temporary"
   chmod 644 "$temporary"
   mv -f "$temporary" "$SERVICE_PATH"
@@ -435,8 +593,10 @@ info "starting ngstoned"
 start_service
 wait_for_health
 
-CONTROL_HOST="edge.${DOMAIN}"
-printf '\nngstoned is running for %s using %s certificates.\n' "$DOMAIN" "$ACME_CA"
+# The control port serves the apex certificate, so agents connect to the
+# bare domain.
+CONTROL_HOST="${DOMAIN}"
+printf '\nngstoned is running for %s using %s certificates (DNS: %s).\n' "$DOMAIN" "$ACME_CA" "$DNS_PROVIDER"
 printf 'Health endpoint: http://127.0.0.1:4041/healthz\n'
 if [[ -n "$AUTH_TOKEN" ]]; then
   printf '\nSave this auth token now; it is not written to the VPS:\n%s\n' "$AUTH_TOKEN"
@@ -446,6 +606,10 @@ if [[ -n "$AUTH_TOKEN" ]]; then
 else
   printf '\nThe existing auth token hash was preserved. Use the original token on the laptop.\n'
 fi
+if [[ -n "$TCP_PORTS" ]]; then
+  printf 'TCP tunnels: ngstone tcp 5432 --server %s:4443 --server-name %s\n' "$CONTROL_HOST" "$CONTROL_HOST"
+fi
 if [[ "$ACME_CA" == staging ]]; then
-  printf '\nAfter staging health checks pass, rerun with --acme-ca production.\n'
+  printf '\nStaging certificates are not trusted by browsers or the ngstone agent.\n'
+  printf 'After the health check above shows both certificates, rerun with --acme-ca production.\n'
 fi

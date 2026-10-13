@@ -17,10 +17,10 @@ import (
 
 func TestApexStartupCheckFailsWithoutLoadableCert(t *testing.T) {
 	mgr, err := NewTLSManager(TLSConfig{
-		Domain:             "apex-check.invalid",
-		CloudflareAPIToken: "unused-in-this-test",
-		ACMEEmail:          "ops@apex-check.invalid",
-		StoragePath:        t.TempDir(),
+		Domain:      "apex-check.invalid",
+		DNSProvider: fakeDNSProvider{},
+		ACMEEmail:   "ops@apex-check.invalid",
+		StoragePath: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("NewTLSManager: %v", err)
@@ -36,11 +36,11 @@ func TestApexStartupCheckFailsWithoutLoadableCert(t *testing.T) {
 
 func TestNewTLSManagerRejectsUnknownACMECA(t *testing.T) {
 	_, err := NewTLSManager(TLSConfig{
-		Domain:             "bad-ca.invalid",
-		CloudflareAPIToken: "tok",
-		ACMEEmail:          "ops@bad-ca.invalid",
-		StoragePath:        t.TempDir(),
-		ACMECA:             "not-a-real-ca",
+		Domain:      "bad-ca.invalid",
+		DNSProvider: fakeDNSProvider{},
+		ACMEEmail:   "ops@bad-ca.invalid",
+		StoragePath: t.TempDir(),
+		ACMECA:      "not-a-real-ca",
 	})
 	if err == nil {
 		t.Fatalf("expected an error for an unrecognized -acme-ca value")
@@ -52,11 +52,11 @@ func TestNewTLSManagerDefaultsToStaging(t *testing.T) {
 		t.Fatalf("sanity: staging/production constants must be distinct non-empty values")
 	}
 	_, err := NewTLSManager(TLSConfig{
-		Domain:             "default-ca.invalid",
-		CloudflareAPIToken: "tok",
-		ACMEEmail:          "ops@default-ca.invalid",
-		StoragePath:        t.TempDir(),
-		ACMECA:             "",
+		Domain:      "default-ca.invalid",
+		DNSProvider: fakeDNSProvider{},
+		ACMEEmail:   "ops@default-ca.invalid",
+		StoragePath: t.TempDir(),
+		ACMECA:      "",
 	})
 	if err != nil {
 		t.Fatalf("NewTLSManager with empty ACMECA should default to staging, got error: %v", err)
@@ -76,11 +76,11 @@ func TestNewTLSManagerResolvesCAURL(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			mgr, err := NewTLSManager(TLSConfig{
-				Domain:             "ca-url.invalid",
-				CloudflareAPIToken: "tok",
-				ACMEEmail:          "ops@ca-url.invalid",
-				StoragePath:        t.TempDir(),
-				ACMECA:             c.acmeCA,
+				Domain:      "ca-url.invalid",
+				DNSProvider: fakeDNSProvider{},
+				ACMEEmail:   "ops@ca-url.invalid",
+				StoragePath: t.TempDir(),
+				ACMECA:      c.acmeCA,
 			})
 			if err != nil {
 				t.Fatalf("NewTLSManager(ACMECA=%q): %v", c.acmeCA, err)
@@ -120,10 +120,10 @@ func newTestLeafCert(t *testing.T, domain string, notAfter time.Time) tls.Certif
 func newTestApexManager(t *testing.T, domain string) *TLSManager {
 	t.Helper()
 	mgr, err := NewTLSManager(TLSConfig{
-		Domain:             domain,
-		CloudflareAPIToken: "unused-in-this-test",
-		ACMEEmail:          "ops@" + domain,
-		StoragePath:        t.TempDir(),
+		Domain:      domain,
+		DNSProvider: fakeDNSProvider{},
+		ACMEEmail:   "ops@" + domain,
+		StoragePath: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("NewTLSManager: %v", err)
