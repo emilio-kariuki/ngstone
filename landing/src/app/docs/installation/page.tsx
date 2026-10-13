@@ -28,8 +28,8 @@ export default function InstallationPage() {
         ngstone is one Go module producing two binaries with different
         install stories. The agent (<code>ngstone</code>) has prebuilt
         installs for macOS and Linux. The edge (<code>ngstoned</code>) is
-        server infrastructure you build and deploy deliberately — it is
-        not something to curl-pipe onto a box.
+        server infrastructure you deploy deliberately, with a reviewed
+        installer or by hand.
       </p>
 
       <Anchor id="requirements">Requirements</Anchor>
@@ -88,12 +88,24 @@ $ brew install ngstone`}
 
       <Anchor id="installing-the-edge">Installing the edge (VPS)</Anchor>
       <p>
-        <code>ngstoned</code> isn&apos;t distributed as a release binary or
-        a package — it&apos;s built and copied to the VPS deliberately.
-        Cross-compile it for <code>linux/amd64</code> and copy it over, or
-        build directly on the VPS if you&apos;d rather not cross-compile.
-        It has no install-time dependencies beyond the binary itself and a
-        place to keep its certificate cache. See{" "}
+        On an Ubuntu or Debian VPS, <code>deploy/install-edge.sh</code>{" "}
+        from a checkout downloads the release binary, verifies its
+        checksum, and sets up the systemd unit, secrets, and firewall — see{" "}
+        <a href="/docs/guides/edge-vps#fast-path">Fast path installer</a>.
+        Its <code>--from-source</code> option builds <code>ngstoned</code>{" "}
+        from the checkout with Go instead, which DNS providers other than
+        Cloudflare need until a release that includes them is published.
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ sudo ./deploy/install-edge.sh --domain example.com --email you@example.com \\
+    --dns-provider digitalocean --from-source --acme-ca staging`}
+      />
+      <p>
+        To install by hand, cross-compile it for <code>linux/amd64</code>{" "}
+        and copy it over, or build directly on the VPS if you&apos;d rather
+        not cross-compile. It has no install-time dependencies beyond the
+        binary itself and a place to keep its certificate cache. See{" "}
         <a href="/docs/operations/deployment-systemd">
           Deployment &amp; systemd
         </a>{" "}

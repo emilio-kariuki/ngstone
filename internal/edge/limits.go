@@ -29,6 +29,17 @@ const (
 
 	DefaultHandshakeConcurrency = 16
 	DefaultUnauthSessions       = 32
+
+	// DefaultPerIPInFlight caps how many HTTP requests and TCP tunnel
+	// connections one client address can have in flight at once, so a
+	// single client cannot take every per-session or global slot.
+	DefaultPerIPInFlight = 32
+	// DefaultClientIdleTimeout bounds how long one read of a request body,
+	// or one write of a response, may wait on the public client.
+	DefaultClientIdleTimeout = 60 * time.Second
+	// DefaultTCPIdleTimeout closes a TCP tunnel connection that has carried
+	// no bytes in either direction for this long.
+	DefaultTCPIdleTimeout = 30 * time.Minute
 )
 
 type LimitsConfig struct {
@@ -50,6 +61,10 @@ type LimitsConfig struct {
 
 	HandshakeConcurrency int
 	UnauthSessions       int
+
+	PerIPInFlight     int
+	ClientIdleTimeout time.Duration
+	TCPIdleTimeout    time.Duration
 }
 
 func (l LimitsConfig) withDefaults() (LimitsConfig, error) {
@@ -137,6 +152,24 @@ func (l LimitsConfig) withDefaults() (LimitsConfig, error) {
 	if l.UnauthSessions == 0 {
 		l.UnauthSessions = DefaultUnauthSessions
 	}
+	if l.PerIPInFlight < 0 {
+		return l, fmt.Errorf("edge: per-ip-inflight must not be negative, got %d", l.PerIPInFlight)
+	}
+	if l.PerIPInFlight == 0 {
+		l.PerIPInFlight = DefaultPerIPInFlight
+	}
+	if l.ClientIdleTimeout < 0 {
+		return l, fmt.Errorf("edge: client-idle-timeout must not be negative, got %s", l.ClientIdleTimeout)
+	}
+	if l.ClientIdleTimeout == 0 {
+		l.ClientIdleTimeout = DefaultClientIdleTimeout
+	}
+	if l.TCPIdleTimeout < 0 {
+		return l, fmt.Errorf("edge: tcp-idle-timeout must not be negative, got %s", l.TCPIdleTimeout)
+	}
+	if l.TCPIdleTimeout == 0 {
+		l.TCPIdleTimeout = DefaultTCPIdleTimeout
+	}
 	return l, nil
 }
 
@@ -168,6 +201,56 @@ func (p *perIPLimiter) allow(ip string) bool {
 	}
 	p.mu.Unlock()
 	return lim.Allow()
+}
+
+// perIPInflight caps concurrent HTTP requests and TCP tunnel connections
+// per client address. Addresses are keyed like the rate limiter (IPv6 by
+// /48), and an entry exists only while that client has something in
+// flight, so the map is bounded by the edge's own concurrency.
+type perIPInflight struct {
+	max int
+
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func newPerIPInflight(max int) *perIPInflight {
+	return &perIPInflight{max: max, counts: make(map[string]int)}
+}
+
+// acquire takes a slot for ip. When ok is true the caller must call
+// release exactly once; release is safe to call more than once.
+func (p *perIPInflight) acquire(ip string) (release func(), ok bool) {
+	if p == nil {
+		return func() {}, true
+	}
+	key := rateLimitKey(ip)
+	p.mu.Lock()
+	if p.counts[key] >= p.max {
+		p.mu.Unlock()
+		return nil, false
+	}
+	p.counts[key]++
+	p.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			p.mu.Lock()
+			if p.counts[key] <= 1 {
+				delete(p.counts, key)
+			} else {
+				p.counts[key]--
+			}
+			p.mu.Unlock()
+		})
+	}, true
+}
+
+func (p *perIPInflight) inUse(ip string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.counts[rateLimitKey(ip)]
 }
 
 type globalSemaphore struct {
