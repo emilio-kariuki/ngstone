@@ -55,6 +55,51 @@ jobs:
           path: ngstone_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
           if-no-files-found: error
 
+  docker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Dockerfile cross-compiles on the build platform, so no QEMU.
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/ngstoned
+          # latest=auto tags latest for every non-prerelease semver tag.
+          flavor: |
+            latest=auto
+          tags: |
+            type=semver,pattern=v{{version}}
+            type=semver,pattern={{version}}
+
+      - id: build-info
+        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ steps.build-info.outputs.date }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   release:
     needs: build
     runs-on: ubuntu-latest
