@@ -52,6 +52,10 @@ func (e *authErr) Error() string {
 }
 
 type Config struct {
+	// Name identifies this tunnel when one process runs several; it tags
+	// status events and captured exchanges. Empty for a single tunnel.
+	Name string
+
 	ControlAddr string
 	Token       string
 	Subdomain   string
@@ -91,6 +95,7 @@ const (
 )
 
 type StatusEvent struct {
+	Tunnel   string
 	State    string
 	Hostname string
 	URL      string
@@ -159,6 +164,7 @@ func (a *Agent) emit(ev StatusEvent) {
 	if a.cfg.Events == nil {
 		return
 	}
+	ev.Tunnel = a.cfg.Name
 	select {
 	case a.cfg.Events <- ev:
 	default:

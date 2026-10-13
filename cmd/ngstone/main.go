@@ -34,6 +34,8 @@ var verbs = map[string]func([]string) int{
 	"auth":    cmdAuth,
 	"port":    cmdPort,
 	"tcp":     cmdTCP,
+	"start":   cmdStart,
+	"service": cmdService,
 	"config":  cmdConfig,
 	"logout":  cmdLogout,
 	"version": cmdVersion,
@@ -56,6 +58,8 @@ Commands:
   auth <token>            verify and save an auth token
   port <port|url>         expose a local port or URL through the tunnel
   tcp <port|host:port>    expose a raw TCP service through the tunnel
+  start [name ...]        start the tunnels defined in ngstone.yml
+  service install         run 'ngstone start' as a background service (systemd or launchd)
   config                  view or set local configuration
   logout                  remove the saved auth token
   version                 print the ngstone version
@@ -767,7 +771,7 @@ func bridgeStatus(ctx context.Context, in <-chan agent.StatusEvent, out chan<- t
 				err = errors.New(ev.Err)
 			}
 			select {
-			case out <- tui.StatusEvent{State: ev.State, Hostname: ev.Hostname, URL: ev.URL, Err: err}:
+			case out <- tui.StatusEvent{Tunnel: ev.Tunnel, State: ev.State, Hostname: ev.Hostname, URL: ev.URL, Err: err}:
 			case <-ctx.Done():
 				return
 			default:
