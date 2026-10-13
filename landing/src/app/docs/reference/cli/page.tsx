@@ -17,6 +17,8 @@ const TOC: TocItem[] = [
   { id: "ngstone-auth", title: "ngstone auth" },
   { id: "ngstone-port", title: "ngstone port" },
   { id: "ngstone-tcp", title: "ngstone tcp" },
+  { id: "ngstone-start", title: "ngstone start" },
+  { id: "ngstone-service", title: "ngstone service" },
   { id: "ngstone-config", title: "ngstone config" },
   { id: "ngstone-logout", title: "ngstone logout" },
   { id: "ngstone-version", title: "ngstone version" },
@@ -33,9 +35,9 @@ export default function CliPage() {
       <p>
         The <code>ngstone</code> command is built on the stdlib{" "}
         <code>flag</code> package — no cobra, no subcommand framework. There
-        are six verbs: <code>auth</code>, <code>port</code>,{" "}
-        <code>tcp</code>, <code>config</code>, <code>logout</code>, and{" "}
-        <code>version</code>.
+        are eight verbs: <code>auth</code>, <code>port</code>,{" "}
+        <code>tcp</code>, <code>start</code>, <code>service</code>,{" "}
+        <code>config</code>, <code>logout</code>, and <code>version</code>.
       </p>
 
       <Anchor id="overview">Overview</Anchor>
@@ -238,6 +240,100 @@ $ ngstone tcp db.local:5432 --remote-port 15432`}
         <a href="/docs/guides/edge-vps#behind-a-proxy">Behind an existing
         reverse proxy</a> and{" "}
         <a href="/docs/guides/access-control">Access control</a>.
+      </Callout>
+
+      <Anchor id="ngstone-start">ngstone start</Anchor>
+      <p>
+        Starts every tunnel described in a tunnels file, or only the ones
+        named on the command line, in one process. HTTP tunnels share one
+        terminal inspector: each row shows its tunnel, the header shows one
+        status line per tunnel, and replay goes to the app of the tunnel
+        that captured the request.
+      </p>
+      <CodeBlock
+        language="yaml"
+        code={`# ngstone.yml
+server: example.com:4443
+tunnels:
+  web:
+    port: 3000
+    subdomain: demo
+  api:
+    url: http://127.0.0.1:8080
+    basic_auth: ["user:pass"]
+    allow_cidr: ["203.0.113.0/24"]
+  db:
+    kind: tcp
+    port: 5432
+    remote_port: 15432`}
+      />
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone start
+$ ngstone start web api`}
+      />
+      <p>
+        HTTP tunnels take <code>port</code> or <code>url</code>, plus{" "}
+        <code>subdomain</code>, <code>host_header</code>,{" "}
+        <code>basic_auth</code> or <code>basic_auth_file</code>, and{" "}
+        <code>allow_cidr</code>. TCP tunnels (<code>kind: tcp</code>) take{" "}
+        <code>port</code> or <code>address</code>, plus{" "}
+        <code>remote_port</code> and <code>allow_cidr</code>. Unknown keys
+        are errors. Each tunnel is its own session, so one failing, for
+        example on a taken subdomain, does not stop the others.
+      </p>
+      <ParamTable>
+        <Property name="--config" type="string">
+          Tunnels file. Defaults to <code>./ngstone.yml</code>, then{" "}
+          <code>tunnels.yml</code> in the config directory.
+        </Property>
+        <Property name="--server" type="string">
+          Edge control-plane address. Defaults to the file&apos;s{" "}
+          <code>server</code>, then the config file, then{" "}
+          <code>ngstone.site:4443</code>.
+        </Property>
+        <Property name="--token, --insecure, --server-name, --pin" type="flags">
+          As for <code>ngstone port</code>, applied to every tunnel. The
+          file can also set <code>server_name</code>.
+        </Property>
+        <Property name="--no-tui" type="bool" defaultValue="false">
+          Print each tunnel&apos;s URL and log plain text to stderr instead
+          of opening the inspector.
+        </Property>
+      </ParamTable>
+
+      <Anchor id="ngstone-service">ngstone service</Anchor>
+      <p>
+        Runs <code>ngstone start --no-tui</code> as a background service: a
+        systemd user unit on Linux, a launchd agent on macOS. It restarts
+        on failure and uses the token saved by <code>ngstone auth</code>.
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone service install --config ~/work/ngstone.yml
+$ ngstone service status
+$ ngstone service uninstall`}
+      />
+      <ParamTable>
+        <Property name="install [--config FILE] [name ...]" type="command">
+          Checks the tunnels file, the names and the saved token, writes
+          the unit or plist, and starts it. A reinstall replaces and
+          restarts it. <code>--print</code> shows the definition without
+          installing.
+        </Property>
+        <Property name="status" type="command">
+          Runs <code>systemctl --user status</code> or{" "}
+          <code>launchctl print</code> for the service.
+        </Property>
+        <Property name="uninstall" type="command">
+          Stops the service and removes its definition.
+        </Property>
+      </ParamTable>
+      <Callout variant="note">
+        Logs go to <code>journalctl --user -u ngstone</code> on Linux and{" "}
+        <code>~/Library/Logs/ngstone.log</code> on macOS. On Linux, run{" "}
+        <code>sudo loginctl enable-linger $USER</code> once so the service
+        keeps running after you log out and starts at boot.
       </Callout>
 
       <Anchor id="ngstone-config">ngstone config</Anchor>
