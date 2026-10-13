@@ -170,6 +170,37 @@ To remove the edge later, run `sudo ./deploy/uninstall.sh` from the checkout.
 It keeps certificate state by default; see
 [deploy/README.md](deploy/README.md#uninstalling) for the cleanup options.
 
+### Run with Docker
+
+Instead of the installer, you can run the edge from the
+`ghcr.io/emilio-kariuki/ngstoned` image on any host with Docker and the
+Compose plugin. Steps 1 to 3 are the same: the two DNS records, a DNS
+provider credential, and ports `80`, `443` and `4443` open. Then:
+
+```
+mkdir ngstone && cd ngstone
+curl -fsSLO https://raw.githubusercontent.com/emilio-kariuki/ngstone/main/deploy/docker/compose.yaml
+curl -fsSL -o .env https://raw.githubusercontent.com/emilio-kariuki/ngstone/main/deploy/docker/.env.example
+chmod 600 .env
+$EDITOR .env    # domain, email, DNS provider and its credentials, token hash
+docker compose up -d
+docker compose ps    # STATUS turns "healthy" once both certificates load
+docker compose logs -f ngstoned
+```
+
+`.env` explains each variable, including how to generate the auth token and
+its hash on your laptop. When `docker compose ps` reports healthy, set
+`NGSTONE_ACME_CA=production` in `.env` and run `docker compose up -d` again;
+certificates live in the `ngstoned-data` volume and survive restarts and
+upgrades. Then connect from your laptop as in step 5.
+
+Docker's published ports keep the client's real IP address, so per-IP rate
+limits and `--allow-cidr` work without PROXY protocol. To keep certificates
+in a host directory instead of the named volume, make it writable by uid
+65532 first (`sudo chown 65532:65532 /srv/ngstoned`), since the edge runs as
+that non-root user. [deploy/README.md](deploy/README.md#run-with-docker) has
+the details, including raw TCP tunnels and an IPv6 caveat.
+
 ## Architecture, in brief
 
 The agent always dials out to the edge and never listens for inbound
