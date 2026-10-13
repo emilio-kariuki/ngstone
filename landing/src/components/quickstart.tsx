@@ -12,18 +12,19 @@ const STEPS = [
   {
     title: "Point DNS at your VPS, and start the edge",
     description:
-      "Add a wildcard A record for *.yourdomain.com pointing at your server, generate a token, then run the edge binary there.",
+      "Add A records for yourdomain.com and *.yourdomain.com pointing at your server, generate a token, then run the edge there with an API token for your DNS provider (Cloudflare by default, or set --dns-provider).",
     code: `$ TOKEN=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
 $ HASH=$(printf '%s' "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
+$ export NGSTONE_CF_API_TOKEN=...
 $ ngstoned --domain yourdomain.com --cert-email you@yourdomain.com \\
-    --cf-api-token "$CF_API_TOKEN" --token-sha256 "$HASH"`,
+    --token-sha256 "$HASH"`,
   },
   {
     title: "Install the agent, and authenticate",
     description:
       "Install the agent on your dev machine, then verify the plaintext token from step one against your edge.",
     code: `$ brew install emilio-kariuki/tap/ngstone
-$ ngstone auth "$TOKEN"`,
+$ ngstone auth "$TOKEN" --server yourdomain.com:4443`,
   },
   {
     title: "Start tunneling",

@@ -72,7 +72,9 @@ verified against ngstone.site:4443 and saved`} />
           certificate validation happens at all.
         </Property>
         <Property name="--server-name" type="string">
-          TLS <code>ServerName</code>/SNI to verify against. Ignored with{" "}
+          TLS <code>ServerName</code>/SNI to verify against. Defaults to the
+          host in the server address, so <code>example.com:4443</code>{" "}
+          verifies <code>example.com</code>. Ignored with{" "}
           <code>--insecure</code>.
         </Property>
         <Property name="--pin" type="string">
@@ -81,8 +83,19 @@ verified against ngstone.site:4443 and saved`} />
         </Property>
       </ParamTable>
       <p>
+        For a self-hosted edge, pass its bare domain; the server address is
+        saved, so later commands need no flags:
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone auth <token> --server example.com:4443
+verified against example.com:4443 and saved`}
+      />
+      <p>
         A bad token or an unreachable server exits non-zero with a
-        specific, actionable message rather than a generic failure.
+        specific, actionable message rather than a generic failure. Agent
+        releases older than the <code>--server-name</code> default need{" "}
+        <code>--server-name example.com</code> on every command.
       </p>
 
       <Anchor id="ngstone-port">ngstone port</Anchor>
@@ -131,7 +144,9 @@ $ ngstone port 3000 --host-header demo.localhost:3000`}
           certificates involved).
         </Property>
         <Property name="--server-name" type="string">
-          TLS <code>ServerName</code>/SNI to verify against. Ignored with{" "}
+          TLS <code>ServerName</code>/SNI to verify against. Defaults to the
+          host in the server address, so <code>example.com:4443</code>{" "}
+          verifies <code>example.com</code>. Ignored with{" "}
           <code>--insecure</code>.
         </Property>
         <Property name="--pin" type="string">
@@ -207,7 +222,9 @@ $ ngstone tcp db.local:5432 --remote-port 15432`}
           certificates involved).
         </Property>
         <Property name="--server-name" type="string">
-          TLS <code>ServerName</code>/SNI to verify against. Ignored with{" "}
+          TLS <code>ServerName</code>/SNI to verify against. Defaults to the
+          host in the server address, so <code>example.com:4443</code>{" "}
+          verifies <code>example.com</code>. Ignored with{" "}
           <code>--insecure</code>.
         </Property>
         <Property name="--pin" type="string">
@@ -244,12 +261,12 @@ $ ngstone tcp db.local:5432 --remote-port 15432`}
       <p>Read or change the local config file without hand-editing JSON.</p>
       <CodeBlock
         language="bash"
-        code={`$ ngstone config set server ngstone.site:4443
-server set to ngstone.site:4443
+        code={`$ ngstone config set server example.com:4443
+server set to example.com:4443
 
 $ ngstone config get
 token: nst_a1b2…9f3d
-server: ngstone.site:4443
+server: example.com:4443
 
 $ ngstone config get token
 nst_a1b2…9f3d
@@ -379,7 +396,8 @@ HASH=$(printf '%s' "$TOKEN" | shasum -a 256 | cut -d' ' -f1)   # sha256sum on Li
           Dial the control plane in plaintext (dev/test only).
         </Property>
         <Property name="-server-name" type="string">
-          TLS ServerName/SNI to verify against.
+          TLS ServerName/SNI to verify against. Defaults to the host part
+          of <code>-control</code>.
         </Property>
         <Property name="-pin" type="string">
           Optional SPKI pin.
