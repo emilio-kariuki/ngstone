@@ -21,6 +21,9 @@ const TOC: TocItem[] = [
   { id: "ngstone-start", title: "ngstone start" },
   { id: "ngstone-service", title: "ngstone service" },
   { id: "ngstone-ps", title: "ngstone ps" },
+  { id: "ngstone-share", title: "ngstone share" },
+  { id: "ngstone-connect", title: "ngstone connect" },
+  { id: "ngstone-shares", title: "ngstone shares, unshare, extend, kick" },
   { id: "ngstone-config", title: "ngstone config" },
   { id: "ngstone-logout", title: "ngstone logout" },
   { id: "ngstone-version", title: "ngstone version" },
@@ -36,11 +39,13 @@ export default function CliPage() {
       <h1>CLI</h1>
       <p>
         The <code>ngstone</code> command is built on the stdlib{" "}
-        <code>flag</code> package — no cobra, no subcommand framework. There
-        are ten verbs: <code>auth</code>, <code>port</code>,{" "}
-        <code>tcp</code>, <code>serve</code>, <code>start</code>,{" "}
-        <code>service</code>, <code>ps</code>, <code>config</code>,{" "}
-        <code>logout</code>, and <code>version</code>.
+        <code>flag</code> package — no cobra, no subcommand framework. The
+        verbs are <code>auth</code>, <code>port</code>, <code>tcp</code>,{" "}
+        <code>serve</code>, <code>start</code>, <code>service</code>,{" "}
+        <code>ps</code>, <code>share</code>, <code>connect</code>,{" "}
+        <code>shares</code>, <code>unshare</code>, <code>extend</code>,{" "}
+        <code>kick</code>, <code>config</code>, <code>logout</code>, and{" "}
+        <code>version</code>.
       </p>
 
       <Anchor id="overview">Overview</Anchor>
@@ -52,6 +57,12 @@ Commands:
   auth <token>            verify and save an auth token
   port <port|url>         expose a local port or URL through the tunnel
   tcp <port|host:port>    expose a raw TCP service through the tunnel
+  share <preset>...       share local databases with teammates via a link
+  connect <link>          connect to a shared database through a link
+  shares                  list live shares on the edge (--watch tails their events)
+  unshare <id>            revoke a share
+  extend <id> <duration>  move a share's expiry
+  kick <id> <connector>   remove one connector from a share
   config                  view or set local configuration
   logout                  remove the saved auth token
   version                 print the ngstone version`}
@@ -409,6 +420,157 @@ PID    COMMAND  TUNNEL  KIND  STATE   URL                        TARGET         
         <code>$XDG_RUNTIME_DIR/ngstone/</code>, or <code>run/</code> next
         to the config file when that variable is unset. Sockets left by a
         crashed process are removed on the next <code>ps</code>.
+      <Anchor id="ngstone-share">ngstone share</Anchor>
+      <p>
+        Shares local databases, or any TCP services, through a link that
+        expires. Unlike <code>tcp</code> it opens no public port: the only
+        way in is <code>ngstone connect</code> with the link. See{" "}
+        <a href="/docs/guides/database-sharing">Sharing a database</a>.
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone share postgres --expires 2h --label "staging replica"
+$ ngstone share postgres redis:6380 --approve --passphrase hunter2 --user readonly
+$ ngstone share mysql db.local:3306 --allow-cidr 10.0.0.0/8 --max-uses 3
+$ ngstone share tcp:9000 --single-use --idle 30m --audit-log share.jsonl`}
+      />
+      <p>
+        Each positional argument is a target: a preset (<code>postgres</code>,{" "}
+        <code>mysql</code>, <code>redis</code>, <code>http</code>) with an
+        optional <code>:port</code> or <code>:host:port</code>, or{" "}
+        <code>tcp:port</code> / <code>tcp:host:port</code>. Connectors get
+        one local listener per target. The older two-argument form{" "}
+        <code>share postgres 5433</code> still works for a single target.
+        Lines typed into the sharing terminal are commands:{" "}
+        <code>y &lt;id&gt;</code> / <code>n &lt;id&gt;</code> answer
+        approval requests, <code>kick &lt;id&gt;</code>,{" "}
+        <code>extend 1h</code>, <code>q</code>.
+      </p>
+      <ParamTable>
+        <Property name="--expires" type="duration" defaultValue="1h">
+          Share lifetime, capped by the edge&apos;s{" "}
+          <code>-max-share-ttl</code>.
+        </Property>
+        <Property name="--label" type="string">
+          Label shown to connectors and in listings. Defaults to the first
+          preset.
+        </Property>
+        <Property name="--allow-cidr" type="string">
+          Comma-separated CIDRs connectors must come from.
+        </Property>
+        <Property name="--max-conns" type="int" defaultValue="16">
+          Concurrent relayed connections across all connectors.
+        </Property>
+        <Property name="--max-connectors" type="int" defaultValue="8">
+          Concurrent connector agents.
+        </Property>
+        <Property name="--max-uses" type="int" defaultValue="0">
+          How many connector agents may ever join; <code>0</code> is
+          unlimited and <code>1</code> is the same as{" "}
+          <code>--single-use</code>.
+        </Property>
+        <Property name="--single-use" type="bool" defaultValue="false">
+          Lock the link to the first connector agent that uses it.
+        </Property>
+        <Property name="--idle" type="duration" defaultValue="0">
+          Close the share after this long with no open connection. Minimum
+          30s; <code>0</code> never.
+        </Property>
+        <Property name="--approve" type="bool" defaultValue="false">
+          Ask in this terminal before each connector is admitted. The
+          connector waits up to 60s for a <code>y</code> or <code>n</code>.
+        </Property>
+        <Property name="--passphrase" type="string">
+          Require connectors to present this passphrase too. Prefer{" "}
+          <code>NGSTONE_SHARE_PASSPHRASE</code>, since flags show in{" "}
+          <code>ps</code>.
+        </Property>
+        <Property name="--user" type="string">
+          Database user to put in the connection hint connectors see, for
+          pointing them at a read-only role.
+        </Property>
+        <Property name="--secret-file" type="string">
+          Reuse the secret stored in this file so the link stays the same
+          across runs; created with mode 0600 if missing.{" "}
+          <code>NGSTONE_SHARE_SECRET</code> also works.
+        </Property>
+        <Property name="--audit-log" type="string">
+          Append every audit event to this file as JSON Lines.
+        </Property>
+        <Property name="--server, --token, --insecure, --server-name, --pin" type="various">
+          As for <code>ngstone tcp</code>. With <code>--insecure</code> the
+          printed hint tells connectors to pass it too.
+        </Property>
+      </ParamTable>
+
+      <Anchor id="ngstone-connect">ngstone connect</Anchor>
+      <p>
+        Joins a share and serves its targets on the loopback interface.
+        Needs no token and no config file: the link carries the edge address
+        and the secret.
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone connect ngstone://example.com:4443/s/N7kq...Vb0Q --as alice
+$ ngstone connect - < link.txt
+$ NGSTONE_SHARE_LINK=ngstone://... ngstone connect --port 15432 --port redis=6380`}
+      />
+      <ParamTable>
+        <Property name="--as" type="string">
+          Name the sharer sees for this connector (letters, digits,{" "}
+          <code>.</code> <code>_</code> <code>-</code>). Default{" "}
+          <code>c1</code>, <code>c2</code>, ...; a taken name gets{" "}
+          <code>-2</code> appended.
+        </Property>
+        <Property name="--port, -p" type="string">
+          Local port: <code>N</code> for the first target, or{" "}
+          <code>preset=N</code> / <code>t2=N</code> per target; repeatable.
+          Default is each preset&apos;s port, or a free port when busy.
+        </Property>
+        <Property name="--passphrase" type="string">
+          Passphrase the share requires. Prompted for when stdin is a
+          terminal; <code>NGSTONE_SHARE_PASSPHRASE</code> also works.
+        </Property>
+        <Property name="--insecure" type="bool" defaultValue="false">
+          Dial the edge in plaintext; only for links from an edge running
+          with <code>-insecure</code>.
+        </Property>
+        <Property name="--server-name" type="string">
+          TLS <code>ServerName</code>/SNI override. Defaults to the host in
+          the link.
+        </Property>
+        <Property name="--pin" type="string">
+          Optional SPKI pin, checked in addition to chain validation.
+        </Property>
+      </ParamTable>
+      <p>
+        Exit status is <code>0</code> on Ctrl-C, <code>3</code> when the
+        share expired, was revoked, idled out or this connector was kicked,
+        and <code>1</code> when the link is invalid, the passphrase could
+        not be supplied, or the share&apos;s policy or the sharer refused
+        this connector.
+      </p>
+
+      <Anchor id="ngstone-shares">ngstone shares, unshare, extend, kick</Anchor>
+      <p>
+        Manage shares from any terminal that holds the token. Each opens a
+        fresh operator session, does one thing, and exits.
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone shares                 # every live share, its policy and connectors
+$ ngstone shares --json
+$ ngstone shares --watch         # every share's audit lines, live, until Ctrl-C
+$ ngstone extend sh_7f3a... 2h   # expire two hours from now
+$ ngstone kick sh_7f3a... alice  # drop one connector
+$ ngstone unshare sh_7f3a...     # revoke`}
+      />
+      <p>
+        All take <code>--server</code>, <code>--token</code>,{" "}
+        <code>--insecure</code>, <code>--server-name</code> and{" "}
+        <code>--pin</code> like the other verbs. A revoked sharer&apos;s
+        terminal says <code>share revoked by another terminal</code> and
+        exits 0.
       </p>
 
       <Anchor id="ngstone-config">ngstone config</Anchor>

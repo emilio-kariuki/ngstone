@@ -12,12 +12,14 @@ import (
 	"net/netip"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 
 	"ngstone/internal/proto"
 	"ngstone/internal/tunnel"
+	"ngstone/internal/version"
 )
 
 var (
@@ -36,10 +38,25 @@ type AgentSession struct {
 	Remote            netip.AddrPort
 	IDGen             *proto.IDGen
 	NegotiatedVersion int
+	// Scope is proto.ScopeOperator for token auth and proto.ScopeConnector
+	// for share-secret auth. A connector may only connect, ping and say
+	// goodbye; every other control message is forbidden.
+	Scope string
 
 	inflight         inflightTracker
 	streamSem        *globalSemaphore
 	upgradeStreamSem *globalSemaphore
+
+	// pendingShare is the share whose secret authenticated a connector
+	// session; share is set once Connect admits it. connectorID is the id
+	// the sharer sees in audit events.
+	pendingShare *share
+	share        atomic.Pointer[share]
+	connectorID  string
+}
+
+func (a *AgentSession) isConnector() bool {
+	return a.Scope == proto.ScopeConnector
 }
 
 func (a *AgentSession) Done() <-chan struct{} {
@@ -292,19 +309,47 @@ func (s *Server) authenticate(sess tunnel.Session, ip string, remote netip.AddrP
 		return nil, err
 	}
 
-	sum := sha256.Sum256([]byte(auth.Token))
-	if subtle.ConstantTimeCompare(sum[:], s.cfg.TokenSHA256) != 1 {
-		s.authLimiter.recordFailure(ip)
-		ctrl.Write(proto.TypeAuthErr, msg.ID, proto.AuthErr{Code: proto.CodeBadToken, Message: "bad token"})
-		slog.Warn("edge: auth attempt", "ip", ip, "result", "bad_token")
-		return nil, errors.New("edge: bad token")
+	if auth.Token != "" && auth.ShareSecret != "" {
+		ctrl.Write(proto.TypeError, msg.ID, proto.Error{Code: proto.CodeMalformed, Message: "auth carries both token and share_secret"})
+		slog.Warn("edge: auth attempt", "ip", ip, "result", "malformed", "err", "both token and share_secret")
+		return nil, errors.New("edge: auth carries both token and share_secret")
 	}
 
-	version, ok := negotiateVersion(auth.ProtoVersions)
+	scope := proto.ScopeOperator
+	var pending *share
+	if auth.ShareSecret != "" {
+		scope = proto.ScopeConnector
+		// Hashing attacker-controlled input and looking the digest up leaks
+		// nothing usable about the secret; the per-IP auth limiter above
+		// applies to share-secret failures exactly as it does to tokens.
+		sh, ok := s.shares.lookup(auth.ShareSecret)
+		if !ok {
+			s.authLimiter.recordFailure(ip)
+			ctrl.Write(proto.TypeAuthErr, msg.ID, proto.AuthErr{Code: proto.CodeBadShare, Message: "unknown, expired or revoked share link"})
+			slog.Warn("edge: auth attempt", "ip", ip, "result", "bad_share")
+			return nil, errors.New("edge: bad share secret")
+		}
+		pending = sh
+	} else {
+		sum := sha256.Sum256([]byte(auth.Token))
+		if subtle.ConstantTimeCompare(sum[:], s.cfg.TokenSHA256) != 1 {
+			s.authLimiter.recordFailure(ip)
+			ctrl.Write(proto.TypeAuthErr, msg.ID, proto.AuthErr{Code: proto.CodeBadToken, Message: "bad token"})
+			slog.Warn("edge: auth attempt", "ip", ip, "result", "bad_token")
+			return nil, errors.New("edge: bad token")
+		}
+	}
+
+	negotiated, ok := negotiateVersion(auth.ProtoVersions)
 	if !ok {
 		ctrl.Write(proto.TypeAuthErr, msg.ID, proto.AuthErr{Code: proto.CodeNoCommonVersion, Message: "no common protocol version"})
 		slog.Warn("edge: auth attempt", "ip", ip, "result", "no_common_version", "offered", auth.ProtoVersions)
 		return nil, errors.New("edge: no common protocol version")
+	}
+	if scope == proto.ScopeConnector && negotiated < 3 {
+		ctrl.Write(proto.TypeAuthErr, msg.ID, proto.AuthErr{Code: proto.CodeNoCommonVersion, Message: "share links require protocol v3"})
+		slog.Warn("edge: auth attempt", "ip", ip, "result", "no_common_version", "offered", auth.ProtoVersions, "scope", scope)
+		return nil, errors.New("edge: connector offered no v3")
 	}
 
 	as := &AgentSession{
@@ -313,15 +358,18 @@ func (s *Server) authenticate(sess tunnel.Session, ip string, remote netip.AddrP
 		Sess:              sess,
 		Remote:            remote,
 		IDGen:             proto.NewEdgeIDGen(),
-		NegotiatedVersion: version,
+		NegotiatedVersion: negotiated,
+		Scope:             scope,
 		streamSem:         newGlobalSemaphore(s.limitsOrDefault().PerSessionInFlight),
 		upgradeStreamSem:  newGlobalSemaphore(s.limitsOrDefault().PerSessionUpgradeInFlight),
+		pendingShare:      pending,
 	}
 
 	if err := ctrl.Write(proto.TypeAuthOK, msg.ID, proto.AuthOK{
-		ProtoVersion:  version,
+		ProtoVersion:  negotiated,
 		SessionID:     as.ID,
-		ServerVersion: "ngstoned/m2",
+		ServerVersion: "ngstoned/" + version.Version,
+		Scope:         scope,
 	}); err != nil {
 		return nil, err
 	}
@@ -330,7 +378,7 @@ func (s *Server) authenticate(sess tunnel.Session, ip string, remote netip.AddrP
 		return nil, err
 	}
 
-	slog.Info("edge: auth attempt", "ip", ip, "result", "ok", "instance_id", auth.InstanceID, "session_id", as.ID)
+	slog.Info("edge: auth attempt", "ip", ip, "result", "ok", "scope", scope, "instance_id", auth.InstanceID, "session_id", as.ID)
 	return as, nil
 }
 
@@ -338,12 +386,24 @@ func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 	defer func() {
 		s.registry.ReleaseSession(as)
 		s.releaseTCP(as)
+		s.releaseShares(as, proto.ShareReasonSharerGone)
 		as.Sess.Close("control loop exited")
 		metricActiveSessions.Add(-1)
 	}()
 
 	ctrl := as.Sess.Control()
 	idgen := as.IDGen
+
+	// Data streams opened by the peer: a connector's are relayed to its
+	// sharer, an operator's are closed, since only the edge opens streams
+	// toward an operator agent. Either loop ends with the session.
+	acceptCtx, cancelAccept := context.WithCancel(ctx)
+	defer cancelAccept()
+	if as.isConnector() {
+		go s.serveConnectorStreams(acceptCtx, as)
+	} else {
+		go s.rejectStreams(acceptCtx, as)
+	}
 
 	type readResult struct {
 		msg proto.Msg
@@ -383,6 +443,11 @@ func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 				return
 			}
 			m := rr.msg
+			if as.isConnector() && !connectorMaySend(m.Type) {
+				ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeForbidden, Message: fmt.Sprintf("%q is not allowed on a connector session", m.Type)})
+				slog.Warn("edge: connector sent a forbidden message", "session_id", as.ID, "type", m.Type)
+				return
+			}
 			switch m.Type {
 			case proto.TypeBind:
 				bind, err := proto.Decode[proto.Bind](m)
@@ -391,6 +456,52 @@ func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 					return
 				}
 				s.handleBind(as, ctrl, m.ID, bind)
+			case proto.TypeShare:
+				req, err := proto.Decode[proto.Share](m)
+				if err != nil {
+					ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeMalformed, Message: "malformed share"})
+					return
+				}
+				s.handleShare(as, ctrl, m.ID, req)
+			case proto.TypeUnshare:
+				req, err := proto.Decode[proto.Unshare](m)
+				if err != nil {
+					ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeMalformed, Message: "malformed unshare"})
+					return
+				}
+				s.handleUnshare(as, ctrl, m.ID, req)
+			case proto.TypeConnect:
+				if !as.isConnector() {
+					ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeForbidden, Message: "connect requires a share-link session"})
+					return
+				}
+				req, _ := proto.Decode[proto.Connect](m) // an empty payload is a plain connect
+				s.handleConnect(as, ctrl, m.ID, req)
+			case proto.TypeShareUpdate:
+				req, err := proto.Decode[proto.ShareUpdate](m)
+				if err != nil {
+					ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeMalformed, Message: "malformed share_update"})
+					return
+				}
+				s.handleShareUpdate(as, ctrl, m.ID, req)
+			case proto.TypeKick:
+				req, err := proto.Decode[proto.Kick](m)
+				if err != nil {
+					ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeMalformed, Message: "malformed kick"})
+					return
+				}
+				s.handleKick(as, ctrl, m.ID, req)
+			case proto.TypeApprove:
+				req, err := proto.Decode[proto.Approve](m)
+				if err != nil {
+					ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeMalformed, Message: "malformed approve"})
+					return
+				}
+				s.handleApprove(as, ctrl, m.ID, req)
+			case proto.TypeListShares:
+				s.handleListShares(as, ctrl, m.ID)
+			case proto.TypeWatchShares:
+				s.handleWatchShares(as, ctrl, m.ID)
 			case proto.TypeUnbind:
 				ub, err := proto.Decode[proto.Unbind](m)
 				if err != nil {
@@ -433,10 +544,23 @@ func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 	}
 }
 
+// connectorMaySend lists the control messages a share-link session may send.
+func connectorMaySend(typ string) bool {
+	switch typ {
+	case proto.TypeConnect, proto.TypePing, proto.TypePong, proto.TypeGoodbye:
+		return true
+	}
+	return false
+}
+
 func (s *Server) handleGoodbye(as *AgentSession, gb proto.Goodbye) {
 	slog.Info("edge: agent goodbye", "session_id", as.ID, "reason", gb.Reason)
 	s.registry.ReleaseSession(as)
 	s.releaseTCP(as)
+	// A sharer that says goodbye is revoking on purpose (Ctrl-C), so its
+	// connectors are told "revoked" and stop, rather than "sharer_gone" and
+	// retry.
+	s.releaseShares(as, proto.ShareReasonRevoked)
 	s.waitInflight(as)
 }
 
@@ -454,6 +578,7 @@ func (s *Server) drainOnShutdown(as *AgentSession, ctrl *proto.Conn) {
 	})
 	s.registry.ReleaseSession(as)
 	s.releaseTCP(as)
+	s.releaseShares(as, proto.ShareReasonEdgeShutdown)
 	s.waitInflight(as)
 }
 

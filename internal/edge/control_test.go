@@ -51,12 +51,19 @@ func newRawSessionPair(t *testing.T) (client, server tunnel.Session, cleanup fun
 
 func newTestServer(token string) *Server {
 	sum := sha256.Sum256([]byte(token))
-	return &Server{
-		cfg:         Config{Domain: "example.com", TokenSHA256: sum[:], PublicScheme: "https"},
+	limits, _ := LimitsConfig{}.withDefaults()
+	s := &Server{
+		cfg:         Config{Domain: "example.com", TokenSHA256: sum[:], PublicScheme: "https", Limits: limits},
 		registry:    NewRegistry(),
 		authLimiter: newAuthRateLimiter(),
 		randomName:  randomSubdomain,
+		perIP:       newPerIPInflight(limits.PerIPInFlight),
+		shares:      newShareRegistry(0),
+		shareSem:    newGlobalSemaphore(maxGlobalShareConns),
 	}
+	s.shares.onExpire = func(sh *share) { s.closeShare(sh, proto.ShareReasonExpired) }
+	s.shares.onIdle = func(sh *share) { s.closeShare(sh, proto.ShareReasonIdle) }
+	return s
 }
 
 func TestAuthWrongTokenRejected(t *testing.T) {
@@ -227,8 +234,11 @@ func TestNegotiateVersion(t *testing.T) {
 	if v, ok := negotiateVersion([]int{1}); !ok || v != 1 {
 		t.Fatalf("negotiateVersion([1]) = (%d,%v), want (1,true)", v, ok)
 	}
-	if v, ok := negotiateVersion([]int{2, 3}); !ok || v != 2 {
-		t.Fatalf("negotiateVersion([2,3]) = (%d,%v), want (2,true)", v, ok)
+	if v, ok := negotiateVersion([]int{2, 3}); !ok || v != 3 {
+		t.Fatalf("negotiateVersion([2,3]) = (%d,%v), want (3,true)", v, ok)
+	}
+	if v, ok := negotiateVersion([]int{3, 4}); !ok || v != 3 {
+		t.Fatalf("negotiateVersion([3,4]) = (%d,%v), want (3,true)", v, ok)
 	}
 	if v, ok := negotiateVersion([]int{2, 1}); !ok || v != 2 {
 		t.Fatalf("negotiateVersion([2,1]) = (%d,%v), want (2,true)", v, ok)
@@ -236,8 +246,8 @@ func TestNegotiateVersion(t *testing.T) {
 	if v, ok := negotiateVersion([]int{1, 2}); !ok || v != 2 {
 		t.Fatalf("negotiateVersion([1,2]) = (%d,%v), want (2,true) (order-independent)", v, ok)
 	}
-	if _, ok := negotiateVersion([]int{3, 4}); ok {
-		t.Fatalf("negotiateVersion([3,4]) should report no common version")
+	if _, ok := negotiateVersion([]int{4, 5}); ok {
+		t.Fatalf("negotiateVersion([4,5]) should report no common version")
 	}
 	if _, ok := negotiateVersion([]int{}); ok {
 		t.Fatalf("negotiateVersion([]) should report no common version")

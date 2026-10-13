@@ -135,7 +135,8 @@ export default function ConfigurationPage() {
         <code>-per-session-upgrade</code>,{" "}
         <code>-handshake-concurrency</code>, <code>-unauth-sessions</code>,{" "}
         <code>-per-ip-inflight</code>, <code>-client-idle-timeout</code>,{" "}
-        <code>-tcp-idle-timeout</code>).
+        <code>-tcp-idle-timeout</code>, <code>-max-share-ttl</code>,{" "}
+        <code>-share-audit-log</code>).
         See{" "}
         <a href="/docs/reference/limits-timeouts">Limits &amp; timeouts</a>{" "}
         for the full set and their defaults.
