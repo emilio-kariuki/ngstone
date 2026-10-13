@@ -57,6 +57,8 @@ type Model struct {
 	listHeight int
 
 	status      StatusEvent
+	tunnels     []Tunnel
+	statuses    map[string]StatusEvent
 	lastLatency time.Duration
 	totalSeen   int
 
@@ -101,6 +103,8 @@ func New(opts Options) Model {
 		detailVP:    viewport.New(0, 0),
 		replaying:   make(map[string]struct{}),
 		editForm:    newEditForm(),
+		tunnels:     opts.Tunnels,
+		statuses:    make(map[string]StatusEvent),
 	}
 
 	m.all = opts.Store.List()
@@ -177,8 +181,30 @@ func (m *Model) reconcileCursor() {
 	m.selectedID = m.rows[m.cursor].ID
 }
 
+// headerLines is the header's height: three lines for one tunnel, or two
+// plus one per tunnel when several run in one process.
+func (m Model) headerLines() int {
+	if len(m.tunnels) > 0 {
+		return 2 + len(m.tunnels)
+	}
+	return headerHeight
+}
+
+// replayTarget picks where an exchange is replayed: the target of the
+// tunnel that captured it, or the single tunnel's target.
+func (m Model) replayTarget(ex *inspect.Exchange) (*url.URL, http.RoundTripper) {
+	if ex != nil && ex.Tunnel != "" {
+		for _, t := range m.tunnels {
+			if t.Name == ex.Tunnel {
+				return t.Target, t.RT
+			}
+		}
+	}
+	return m.target, m.rt
+}
+
 func (m *Model) recomputeLayout() {
-	avail := m.height - headerHeight - footerHeight
+	avail := m.height - m.headerLines() - footerHeight
 	if avail < 0 {
 		avail = 0
 	}
@@ -219,7 +245,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case subClosedMsg:
 		return m, nil
 	case statusMsg:
-		m.status = msg.ev
+		if msg.ev.Tunnel != "" {
+			m.statuses[msg.ev.Tunnel] = msg.ev
+		} else {
+			m.status = msg.ev
+		}
 		return m, waitForStatus(m.statusCh)
 	case reconcileMsg:
 		m.all = m.store.List()
@@ -351,7 +381,8 @@ func (m Model) handleReplayKey() (Model, tea.Cmd) {
 		return m, nil
 	}
 	m.replaying[ex.ID] = struct{}{}
-	return m, replayCmd(m.store, m.target, m.rt, ex.ID, nil)
+	target, rt := m.replayTarget(ex)
+	return m, replayCmd(m.store, target, rt, ex.ID, nil)
 }
 
 func (m Model) handleFilterKey(msg tea.KeyMsg) (Model, tea.Cmd) {
@@ -380,7 +411,9 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		ov := m.editForm.overrides()
 		m.editing = false
 		m.replaying[sourceID] = struct{}{}
-		return m, replayCmd(m.store, m.target, m.rt, sourceID, ov)
+		source, _ := m.store.Get(sourceID)
+		target, rt := m.replayTarget(source)
+		return m, replayCmd(m.store, target, rt, sourceID, ov)
 	}
 	var cmd tea.Cmd
 	m.editForm, cmd = m.editForm.Update(msg)
@@ -457,9 +490,50 @@ func (m Model) renderHeader() string {
 		}
 	}
 
+	if len(m.tunnels) > 0 {
+		return m.renderTunnelsHeader(line1, inFlight)
+	}
+
 	line3 := fmt.Sprintf("Forwarding %s -> %s   %d total · %d in-flight", fwdURL, target, m.totalSeen, inFlight)
 
 	return lipgloss.JoinVertical(lipgloss.Left, line1, line2, line3)
+}
+
+func (m Model) renderTunnelsHeader(line1 string, inFlight int) string {
+	online := 0
+	nameWidth := 0
+	for _, t := range m.tunnels {
+		if m.statuses[t.Name].State == "online" {
+			online++
+		}
+		nameWidth = max(nameWidth, len(t.Name))
+	}
+	lines := []string{
+		line1,
+		fmt.Sprintf("%d of %d tunnels online   Latency %s   %d total · %d in-flight",
+			online, len(m.tunnels), m.lastLatency.Round(time.Millisecond), m.totalSeen, inFlight),
+	}
+	for _, t := range m.tunnels {
+		st := m.statuses[t.Name]
+		state := st.State
+		if state == "" {
+			state = "connecting"
+		}
+		fwd := st.URL
+		if fwd == "" {
+			fwd = "…"
+		}
+		target := ""
+		if t.Target != nil {
+			target = t.Target.String()
+		}
+		line := fmt.Sprintf("%-*s  %s  %s -> %s", nameWidth, t.Name, stateStyle(state).Render(fmt.Sprintf("%-12s", state)), fwd, target)
+		if st.Err != nil && state != "online" {
+			line += "  " + st.Err.Error()
+		}
+		lines = append(lines, line)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
 
 func (m Model) renderFooter() string {
