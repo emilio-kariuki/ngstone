@@ -584,6 +584,15 @@ $ sudo ufw enable`}
         language="bash"
         code={`$ sudo ufw allow 10000:10999/tcp`}
       />
+      <p>
+        <a href="/docs/guides/database-sharing">Database sharing</a> needs
+        none of this: shares ride the control port and open no listener.
+        The edge knobs for it are <code>-max-share-ttl</code> (default{" "}
+        <code>24h</code>), the longest lifetime <code>ngstone share
+        --expires</code> may ask for, and <code>-share-audit-log PATH</code>,
+        which appends every share&apos;s audit events to a JSON Lines file
+        on the VPS.
+      </p>
 
       <Anchor id="behind-a-proxy">Behind an existing reverse proxy</Anchor>
       <p>

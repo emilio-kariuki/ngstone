@@ -23,9 +23,15 @@ type tcpConnPair struct {
 	local  net.Conn
 }
 
+// targetResolver picks the local address for an accepted stream. The
+// sharer uses it to route a share stream to the target named in its
+// preamble; plain TCP tunnels have a fixed target and no resolver.
+type targetResolver func(stream net.Conn) (string, error)
+
 type tcpServer struct {
-	target string
-	dialer net.Dialer
+	target  string
+	resolve targetResolver
+	dialer  net.Dialer
 
 	mu     sync.Mutex
 	ln     net.Listener
@@ -152,9 +158,18 @@ func (s *tcpServer) handle(pair *tcpConnPair) {
 		s.mu.Unlock()
 	}()
 
-	local, err := s.dialer.DialContext(s.ctx, "tcp", s.target)
+	target := s.target
+	if s.resolve != nil {
+		t, err := s.resolve(stream)
+		if err != nil {
+			slog.Warn("agent: stream refused", "err", err)
+			return
+		}
+		target = t
+	}
+	local, err := s.dialer.DialContext(s.ctx, "tcp", target)
 	if err != nil {
-		slog.Warn("agent: tcp dial failed", "target", s.target, "err", err)
+		slog.Warn("agent: tcp dial failed", "target", target, "err", err)
 		return
 	}
 	defer local.Close()
