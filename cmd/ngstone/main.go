@@ -35,6 +35,7 @@ var verbs = map[string]func([]string) int{
 	"port":    cmdPort,
 	"tcp":     cmdTCP,
 	"start":   cmdStart,
+	"service": cmdService,
 	"config":  cmdConfig,
 	"logout":  cmdLogout,
 	"version": cmdVersion,
@@ -58,6 +59,7 @@ Commands:
   port <port|url>         expose a local port or URL through the tunnel
   tcp <port|host:port>    expose a raw TCP service through the tunnel
   start [name ...]        start the tunnels defined in ngstone.yml
+  service install         run 'ngstone start' as a background service (systemd or launchd)
   config                  view or set local configuration
   logout                  remove the saved auth token
   version                 print the ngstone version
