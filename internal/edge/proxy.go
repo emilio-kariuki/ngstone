@@ -4,12 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
 	"net/url"
+	"os"
+	"sync/atomic"
+	"time"
 )
 
 type ctxKey int
@@ -18,12 +22,31 @@ const (
 	ctxKeyClientAddr ctxKey = iota
 	ctxKeyReqID
 	ctxKeyReqSlot
+	ctxKeyIdleBody
 )
 
+// statusRecorder records the response status and size. When idle is set,
+// each write and flush to the public client must finish within idle: a
+// client that stops reading its response cannot hold a request slot
+// forever. The deadline is armed only while a write is blocked, so long
+// quiet streams such as SSE are unaffected.
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
 	bytes  int64
+	idle   time.Duration
+}
+
+func (r *statusRecorder) armWrite() {
+	if r.idle > 0 {
+		_ = http.NewResponseController(r.ResponseWriter).SetWriteDeadline(time.Now().Add(r.idle))
+	}
+}
+
+func (r *statusRecorder) disarmWrite() {
+	if r.idle > 0 {
+		_ = http.NewResponseController(r.ResponseWriter).SetWriteDeadline(time.Time{})
+	}
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
@@ -37,10 +60,23 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 	if r.status == 0 {
 		r.status = http.StatusOK
 	}
+	r.armWrite()
 	n, err := r.ResponseWriter.Write(b)
+	r.disarmWrite()
 	r.bytes += int64(n)
 	return n, err
 }
+
+// FlushError is what http.ResponseController and ReverseProxy call; the
+// flush is where a write to a slow client actually blocks.
+func (r *statusRecorder) FlushError() error {
+	r.armWrite()
+	err := http.NewResponseController(r.ResponseWriter).Flush()
+	r.disarmWrite()
+	return err
+}
+
+func (r *statusRecorder) Flush() { _ = r.FlushError() }
 
 func (r *statusRecorder) Unwrap() http.ResponseWriter {
 	return r.ResponseWriter
@@ -58,7 +94,8 @@ func recordRequestMetrics(rec *statusRecorder) {
 }
 
 func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
-	rec := &statusRecorder{ResponseWriter: w}
+	limits := s.limitsOrDefault()
+	rec := &statusRecorder{ResponseWriter: w, idle: limits.ClientIdleTimeout}
 	defer recordRequestMetrics(rec)
 
 	host := stripPort(r.Host)
@@ -99,6 +136,14 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		r.Header.Del("Authorization")
 	}
 
+	releaseIP, ok := s.perIP.acquire(ip)
+	if !ok {
+		metricRejectedPerIPCap.Add(1)
+		writeTooManyRequests(rec)
+		return
+	}
+	defer releaseIP()
+
 	if !s.globalSem.tryAcquire() {
 		metricRejectedGlobalCap.Add(1)
 		writeTooManyRequests(rec)
@@ -115,20 +160,75 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	slot := newReqSlot(s, b.Sess)
 	defer slot.release()
 
-	limits := s.limitsOrDefault()
 	if r.ContentLength > limits.MaxBodyBytes {
 		metricRejected413.Add(1)
 		http.Error(rec, "request entity too large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, limits.MaxBodyBytes)
+	ctx := r.Context()
+	if r.Body != nil && r.Body != http.NoBody {
+		body := &idleBody{
+			ReadCloser: http.MaxBytesReader(w, r.Body, limits.MaxBodyBytes),
+			rc:         http.NewResponseController(w),
+			idle:       limits.ClientIdleTimeout,
+		}
+		r.Body = body
+		ctx = context.WithValue(ctx, ctxKeyIdleBody, body)
+	}
 
 	reqID := randomHex(8)
-	ctx := context.WithValue(r.Context(), ctxKeyClientAddr, r.RemoteAddr)
+	ctx = context.WithValue(ctx, ctxKeyClientAddr, r.RemoteAddr)
 	ctx = context.WithValue(ctx, ctxKeyReqID, reqID)
 	ctx = context.WithValue(ctx, ctxKeyReqSlot, slot)
 
 	b.proxy.ServeHTTP(rec, r.WithContext(ctx))
+}
+
+// errClientIdle reports that the public client stopped sending its request
+// body for longer than the client idle timeout.
+var errClientIdle = errors.New("edge: client stopped sending the request body")
+
+// idleBody bounds each read of a request body by idle, so a client that
+// sends headers and then trickles or stops the body cannot hold a request
+// slot indefinitely. The deadline is armed only for the duration of a Read
+// or Close: net/http's background read after the body is consumed must not
+// see a stale deadline, or it would cancel the request mid-response.
+type idleBody struct {
+	io.ReadCloser
+	rc      *http.ResponseController
+	idle    time.Duration
+	stalled atomic.Bool
+}
+
+func (b *idleBody) Read(p []byte) (int, error) {
+	if b.idle <= 0 {
+		return b.ReadCloser.Read(p)
+	}
+	_ = b.rc.SetReadDeadline(time.Now().Add(b.idle))
+	n, err := b.ReadCloser.Read(p)
+	_ = b.rc.SetReadDeadline(time.Time{})
+	if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
+		b.stalled.Store(true)
+		return n, fmt.Errorf("%w: %w", errClientIdle, err)
+	}
+	return n, err
+}
+
+// Close is bounded too: closing an unread body makes net/http drain up to
+// 256 KiB from the client, which would block forever on a stalled client.
+// Once the client is known to have stalled, the drain fails immediately.
+func (b *idleBody) Close() error {
+	if b.idle <= 0 {
+		return b.ReadCloser.Close()
+	}
+	deadline := time.Now().Add(b.idle)
+	if b.stalled.Load() {
+		deadline = time.Now()
+	}
+	_ = b.rc.SetReadDeadline(deadline)
+	err := b.ReadCloser.Close()
+	_ = b.rc.SetReadDeadline(time.Time{})
+	return err
 }
 
 func newBindingProxy(transport *http.Transport) *httputil.ReverseProxy {
@@ -182,6 +282,17 @@ func isLongLivedResponse(resp *http.Response) bool {
 func proxyErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, errUpgradeCapExceeded) {
 		writeError(w, http.StatusServiceUnavailable)
+		return
+	}
+
+	// A stalled body usually surfaces as "context canceled": failing the
+	// drain breaks the client connection, which cancels the request, and
+	// the transport reports the cancellation in preference to the body
+	// error. Ask the body itself.
+	body, _ := r.Context().Value(ctxKeyIdleBody).(*idleBody)
+	if errors.Is(err, errClientIdle) || (body != nil && body.stalled.Load()) {
+		metricRejectedClientIdle.Add(1)
+		writeError(w, http.StatusRequestTimeout)
 		return
 	}
 

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/caddyserver/certmagic"
+
 	"ngstone/internal/edge"
 	"ngstone/internal/version"
 )
@@ -22,7 +24,7 @@ func main() {
 	httpAddr := flag.String("http", ":80", "HTTP redirect listen address (unused with -insecure)")
 	opsAddr := flag.String("ops", "127.0.0.1:4041", "loopback ops endpoint address (expvar, /healthz, pprof); empty disables it")
 	tokenSHA256Hex := flag.String("token-sha256", "", "hex-encoded SHA-256 of the shared auth token (defaults to $NGSTONE_TOKEN_SHA256; avoid passing this flag on a shared host, since ps auxww exposes flags but not the environment)")
-	domain := flag.String("domain", "ngstone.site", "base domain used to build tunnel hostnames and the two managed certificates")
+	domain := flag.String("domain", "", "base domain used to build tunnel hostnames and the two managed certificates (required), for example example.com")
 	publicScheme := flag.String("public-scheme", "https", "scheme advertised in BindOK.URL (http or https)")
 	tcpPortRange := flag.String("tcp-ports", "", "port range for raw TCP tunnels, e.g. \"10000-10999\"; empty disables TCP tunnels. These ports are exposed directly to the internet (not behind a reverse proxy) and must be opened in the firewall.")
 	tcpBindAddr := flag.String("tcp-bind", "0.0.0.0", "interface address the TCP tunnel port range binds on")
@@ -34,7 +36,8 @@ func main() {
 	acmeCA := flag.String("acme-ca", edge.ACMECAStaging, "ACME CA to use: \"staging\" (default) or \"production\"; a config mistake against production can rate-limit the domain for a week")
 	certEmail := flag.String("cert-email", "", "ACME account email (required unless -insecure)")
 	certStorage := flag.String("cert-storage", edge.DefaultCertStoragePath, "certmagic FileStorage path; must match the systemd StateDirectory (see deploy/)")
-	cfAPIToken := flag.String("cf-api-token", "", "Cloudflare API token scoped to Zone:DNS:Edit on the one zone (required unless -insecure; defaults to $NGSTONE_CF_API_TOKEN; avoid passing this flag on a shared host, since ps auxww exposes flags but not the environment)")
+	dnsProvider := flag.String("dns-provider", edge.DefaultDNSProvider, "DNS provider used for the DNS-01 certificate challenges; its credentials are read from the environment. Use -dns-provider help to list providers and their variables")
+	cfAPIToken := flag.String("cf-api-token", "", "Cloudflare API token, for -dns-provider cloudflare (prefer $NGSTONE_CF_API_TOKEN; ps auxww exposes flags but not the environment)")
 
 	readHeaderTimeout := flag.Duration("read-header-timeout", edge.DefaultReadHeaderTimeout, "public listener ReadHeaderTimeout")
 	idleTimeout := flag.Duration("idle-timeout", edge.DefaultIdleTimeout, "public listener IdleTimeout")
@@ -50,6 +53,9 @@ func main() {
 	perSessionUpgrade := flag.Int64("per-session-upgrade", 0, "per-session concurrent upgraded (websocket/SSE) stream cap; 0 uses the built-in default")
 	handshakeConcurrency := flag.Int("handshake-concurrency", edge.DefaultHandshakeConcurrency, ":4443 concurrent TLS handshake cap")
 	unauthSessions := flag.Int("unauth-sessions", edge.DefaultUnauthSessions, ":4443 unauthenticated-session cap")
+	perIPInFlight := flag.Int("per-ip-inflight", edge.DefaultPerIPInFlight, "max HTTP requests plus TCP tunnel connections one client address can have in flight (IPv6 grouped by /48)")
+	clientIdleTimeout := flag.Duration("client-idle-timeout", edge.DefaultClientIdleTimeout, "max time one read of a request body, or one write of a response, may wait on the public client; a stalled upload gets 408")
+	tcpIdleTimeout := flag.Duration("tcp-idle-timeout", edge.DefaultTCPIdleTimeout, "close a TCP tunnel connection after this long with no bytes in either direction")
 
 	showVersion := flag.Bool("version", false, "print version and exit")
 
@@ -57,6 +63,10 @@ func main() {
 
 	if *showVersion {
 		fmt.Println("ngstoned " + version.String())
+		return
+	}
+	if *dnsProvider == "help" {
+		fmt.Print("Supported -dns-provider values and the environment variables each reads:\n\n" + edge.DescribeDNSProviders())
 		return
 	}
 
@@ -77,21 +87,26 @@ func main() {
 		os.Exit(1)
 	}
 	if *domain == "" {
-		logger.Error("ngstoned: -domain is required")
+		logger.Error("ngstoned: -domain is required, for example -domain example.com")
 		os.Exit(1)
 	}
 
-	cfToken := os.Getenv("NGSTONE_CF_API_TOKEN")
-	if cfToken == "" {
-		cfToken = *cfAPIToken
-	}
+	var provider certmagic.DNSProvider
 	if !*insecure {
 		if *certEmail == "" {
 			logger.Error("ngstoned: -cert-email is required unless -insecure")
 			os.Exit(1)
 		}
-		if cfToken == "" {
-			logger.Error("ngstoned: -cf-api-token (or $NGSTONE_CF_API_TOKEN) is required unless -insecure")
+		getenv := func(key string) string {
+			v := os.Getenv(key)
+			if v == "" && key == "NGSTONE_CF_API_TOKEN" {
+				v = *cfAPIToken
+			}
+			return v
+		}
+		provider, err = edge.NewDNSProvider(*dnsProvider, getenv)
+		if err != nil {
+			logger.Error("ngstoned: DNS provider setup failed; run ngstoned -dns-provider help to list providers and their variables", "err", err)
 			os.Exit(1)
 		}
 	}
@@ -121,7 +136,7 @@ func main() {
 		ACMECA:               *acmeCA,
 		ACMEEmail:            *certEmail,
 		CertStoragePath:      *certStorage,
-		CloudflareAPIToken:   cfToken,
+		DNSProvider:          provider,
 
 		Limits: edge.LimitsConfig{
 			ReadHeaderTimeout:         *readHeaderTimeout,
@@ -138,6 +153,9 @@ func main() {
 			PerSessionUpgradeInFlight: *perSessionUpgrade,
 			HandshakeConcurrency:      *handshakeConcurrency,
 			UnauthSessions:            *unauthSessions,
+			PerIPInFlight:             *perIPInFlight,
+			ClientIdleTimeout:         *clientIdleTimeout,
+			TCPIdleTimeout:            *tcpIdleTimeout,
 		},
 	})
 	if err != nil {
@@ -145,7 +163,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA, "proxy-protocol", *proxyProtocol)
+	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA, "dns-provider", *dnsProvider, "proxy-protocol", *proxyProtocol)
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("ngstoned: exited with error", "err", err)
 		os.Exit(1)

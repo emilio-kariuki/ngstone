@@ -68,9 +68,9 @@ kicking the tires:
 ```
 TOKEN=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
 HASH=$(printf '%s' "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
-go run ./cmd/ngstoned -insecure -public 127.0.0.1:8443 -control 127.0.0.1:7443 -ops "" -public-scheme http -token-sha256 "$HASH"
+go run ./cmd/ngstoned -insecure -domain localhost -public 127.0.0.1:8443 -control 127.0.0.1:7443 -ops "" -public-scheme http -token-sha256 "$HASH"
 NGSTONE_TOKEN="$TOKEN" go run ./cmd/ngstone -insecure -control 127.0.0.1:7443 -target http://127.0.0.1:3001 -subdomain demo
-curl -H 'Host: demo.ngstone.site' http://127.0.0.1:8443/
+curl -H 'Host: demo.localhost' http://127.0.0.1:8443/
 ```
 
 The first two lines generate a random auth token and its SHA-256 hash — there
@@ -84,47 +84,91 @@ production this would be the real hostname, resolved via DNS).
 
 ## Self-hosting
 
-For the easiest Ubuntu/Debian setup, create the apex and wildcard DNS records,
-then run the installer on the VPS:
+You need a Linux VPS with a public IP, a domain, and that domain's DNS hosted
+on one of the supported providers below. The installer supports Ubuntu and
+Debian; [deploy/README.md](deploy/README.md) covers the manual systemd path.
+
+**1. Point DNS at the VPS.** Create two records with the VPS's public IP:
+
+| Type | Name | Value |
+| --- | --- | --- |
+| A (or AAAA) | `example.com` | VPS IP |
+| A (or AAAA) | `*.example.com` | VPS IP |
+
+On Cloudflare, **both records must be "DNS only" (grey cloud), not
+proxied.** Cloudflare's proxy does not forward `:4443`, the port agents dial,
+so an orange-cloud record breaks every agent connection even though `:443`
+looks fine.
+
+**2. Create an API credential for your DNS provider.** The edge uses it to
+publish the DNS-01 challenge records that prove you own the domain, which is
+how it gets the wildcard certificate.
+
+| `--dns-provider` | Credential to create | Variables |
+| --- | --- | --- |
+| `cloudflare` (default) | API token with Zone / DNS / Edit on this zone only | `NGSTONE_CF_API_TOKEN` |
+| `route53` | IAM user allowed to change the hosted zone | `NGSTONE_AWS_REGION`, `NGSTONE_AWS_ACCESS_KEY_ID`, `NGSTONE_AWS_SECRET_ACCESS_KEY` |
+| `digitalocean` | Personal access token with domain read and write | `NGSTONE_DO_API_TOKEN` |
+| `hetzner` | Hetzner Console project API token, read and write | `NGSTONE_HETZNER_API_TOKEN` |
+| `vultr` | API key, with the VPS's IP allowed | `NGSTONE_VULTR_API_KEY` |
+| `ovh` | Application key, application secret and consumer key | `NGSTONE_OVH_ENDPOINT`, `NGSTONE_OVH_APPLICATION_KEY`, `NGSTONE_OVH_APPLICATION_SECRET`, `NGSTONE_OVH_CONSUMER_KEY` |
+| `desec` | Token from desec.io | `NGSTONE_DESEC_TOKEN` |
+| `bunny` | Account API key | `NGSTONE_BUNNY_API_KEY` |
+
+If your domain's DNS is at GoDaddy, Namecheap, Porkbun or another registrar
+not listed, move just the DNS hosting to a supported provider by changing the
+nameservers; Cloudflare and deSEC are free. Those registrars' APIs replace or
+delete every challenge record at once, which breaks issuing the two
+certificates side by side. `ngstoned -dns-provider help` lists the providers
+and variables of the binary you have.
+
+**3. Open the ports** in your VPS provider's firewall: SSH, `80`, `443` and
+`4443`, plus any TCP tunnel range you plan to use. The installer configures
+UFW on the machine itself.
+
+**4. Run the installer on the VPS.** It prompts for the credential without
+echoing it, installs a hardened systemd unit, obtains the certificates and
+prints the commands for your laptop. Start with Let's Encrypt staging:
 
 ```
 git clone https://github.com/emilio-kariuki/ngstone.git /opt/ngstone
 cd /opt/ngstone
-sudo ./deploy/install-edge.sh --domain example.com --email you@example.com --acme-ca production
+sudo ./deploy/install-edge.sh --domain example.com --email you@example.com \
+  --dns-provider digitalocean --acme-ca staging
 ```
 
-It installs `ngstoned`, configures systemd and UFW, obtains the certificates,
-and prints the agent authentication command. The full manual systemd path is
-in [deploy/README.md](deploy/README.md).
+Save the auth token it prints; only its hash is stored on the VPS. When the
+health output shows both certificates, switch to trusted certificates. The
+token and credentials are kept:
 
-To remove the edge later, run this from the VPS checkout:
+```
+sudo ./deploy/install-edge.sh --acme-ca production
+```
 
-~~~
-sudo ./deploy/uninstall.sh
-~~~
+Useful options:
 
-This removes the service, binary, and secrets while preserving certificate
-state by default. See [deploy/README.md](deploy/README.md#uninstalling) for
-the optional state and firewall cleanup flags.
+- `--tcp-ports 10000-10100` enables raw TCP tunnels on that range and opens
+  it in UFW.
+- `--from-source` builds `ngstoned` from the checkout instead of downloading
+  a release. It needs Go, and is required for providers other than
+  Cloudflare until a release that includes them is published.
+- To pass credentials without a prompt, put them on the sudo command line,
+  for example `sudo NGSTONE_DO_API_TOKEN=... ./deploy/install-edge.sh ...`.
+  Plain `sudo` drops variables exported in your shell.
 
-Running your own edge (`ngstoned`) requires:
+**5. Connect from your laptop.**
 
-- A VPS with a public IP (any cheap Linux box works — see
-  [deploy/README.md](deploy/README.md) for a systemd unit).
-- A domain you control.
-- Two DNS records pointed at the VPS's IP: the apex (`example.com`) and the
-  wildcard (`*.example.com`).
+```
+ngstone auth '<token>' --server example.com:4443
+ngstone port 3000 --subdomain demo
+```
 
-If you're using Cloudflare, **both records must be "DNS only" (grey cloud),
-not proxied.** Cloudflare's proxy only forwards a fixed set of ports and does
-not forward `:4443` (the control-plane port the agent dials), so an
-orange-cloud record will break the agent's connection to the edge even though
-`:443` traffic looks fine. This is the single most common way to get this
-setup wrong.
+Your app is now at `https://demo.example.com`. Agents released before this
+version also need `--server-name example.com` on each command.
 
-Full setup instructions — DNS, the Cloudflare API token scoped for DNS-01,
-the systemd unit, staging-vs-production ACME, and deploying new builds — are
-in [deploy/README.md](deploy/README.md).
+To remove the edge later, run `sudo ./deploy/uninstall.sh` from the checkout.
+It keeps certificate state by default; see
+[deploy/README.md](deploy/README.md#uninstalling) for the cleanup options.
 
 ## Architecture, in brief
 

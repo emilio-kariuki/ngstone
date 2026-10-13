@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caddyserver/certmagic"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -35,10 +36,10 @@ type Config struct {
 	TCPPortRange string
 	TCPBindAddr  string
 
-	CertStoragePath    string
-	ACMEEmail          string
-	ACMECA             string
-	CloudflareAPIToken string
+	CertStoragePath string
+	ACMEEmail       string
+	ACMECA          string
+	DNSProvider     certmagic.DNSProvider
 
 	Limits LimitsConfig
 }
@@ -51,6 +52,7 @@ type Server struct {
 	randomName  func() string
 
 	perIPLimiter *perIPLimiter
+	perIP        *perIPInflight
 	globalSem    *globalSemaphore
 	upgradeSem   *globalSemaphore
 	handshakeSem *globalSemaphore
@@ -96,6 +98,12 @@ func New(cfg Config) (*Server, error) {
 			bindAddr = "0.0.0.0"
 		}
 		tcpMgr = newTCPManager(lo, hi, bindAddr, newPerIPLimiter(limits.PerIPRate, limits.PerIPBurst, limits.PerIPLRU))
+		tcpMgr.idleTimeout = limits.TCPIdleTimeout
+	}
+	perIP := newPerIPInflight(limits.PerIPInFlight)
+	if tcpMgr != nil {
+		// One budget per client across HTTP requests and TCP connections.
+		tcpMgr.perIP = perIP
 	}
 
 	var trustedPrefixes []netip.Prefix
@@ -120,6 +128,7 @@ func New(cfg Config) (*Server, error) {
 		authLimiter:       newAuthRateLimiter(),
 		randomName:        randomSubdomain,
 		perIPLimiter:      newPerIPLimiter(limits.PerIPRate, limits.PerIPBurst, limits.PerIPLRU),
+		perIP:             perIP,
 		globalSem:         newGlobalSemaphore(limits.GlobalInFlight),
 		upgradeSem:        newGlobalSemaphore(limits.UpgradeInFlight),
 		handshakeSem:      newGlobalSemaphore(int64(limits.HandshakeConcurrency)),
@@ -143,11 +152,11 @@ func (s *Server) Run(ctx context.Context) error {
 
 	if !s.cfg.Insecure {
 		mgr, err := NewTLSManager(TLSConfig{
-			Domain:             s.cfg.Domain,
-			CloudflareAPIToken: s.cfg.CloudflareAPIToken,
-			ACMEEmail:          s.cfg.ACMEEmail,
-			ACMECA:             s.cfg.ACMECA,
-			StoragePath:        s.cfg.CertStoragePath,
+			Domain:      s.cfg.Domain,
+			DNSProvider: s.cfg.DNSProvider,
+			ACMEEmail:   s.cfg.ACMEEmail,
+			ACMECA:      s.cfg.ACMECA,
+			StoragePath: s.cfg.CertStoragePath,
 		})
 		if err != nil {
 			return fmt.Errorf("edge: tls setup: %w", err)
