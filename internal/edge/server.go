@@ -52,6 +52,7 @@ type Server struct {
 	randomName  func() string
 
 	perIPLimiter *perIPLimiter
+	perIP        *perIPInflight
 	globalSem    *globalSemaphore
 	upgradeSem   *globalSemaphore
 	handshakeSem *globalSemaphore
@@ -97,6 +98,12 @@ func New(cfg Config) (*Server, error) {
 			bindAddr = "0.0.0.0"
 		}
 		tcpMgr = newTCPManager(lo, hi, bindAddr, newPerIPLimiter(limits.PerIPRate, limits.PerIPBurst, limits.PerIPLRU))
+		tcpMgr.idleTimeout = limits.TCPIdleTimeout
+	}
+	perIP := newPerIPInflight(limits.PerIPInFlight)
+	if tcpMgr != nil {
+		// One budget per client across HTTP requests and TCP connections.
+		tcpMgr.perIP = perIP
 	}
 
 	var trustedPrefixes []netip.Prefix
@@ -121,6 +128,7 @@ func New(cfg Config) (*Server, error) {
 		authLimiter:       newAuthRateLimiter(),
 		randomName:        randomSubdomain,
 		perIPLimiter:      newPerIPLimiter(limits.PerIPRate, limits.PerIPBurst, limits.PerIPLRU),
+		perIP:             perIP,
 		globalSem:         newGlobalSemaphore(limits.GlobalInFlight),
 		upgradeSem:        newGlobalSemaphore(limits.UpgradeInFlight),
 		handshakeSem:      newGlobalSemaphore(int64(limits.HandshakeConcurrency)),
