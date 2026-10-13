@@ -62,7 +62,8 @@ sudo ./deploy/uninstall.sh --remove-state --remove-firewall-rules
 ```
 
 `--remove-firewall-rules` removes matching allow rules for only `80/tcp`,
-`443/tcp`, and `4443/tcp`; it leaves SSH rules alone. If another service
+`443/tcp`, `4443/tcp` and the TCP tunnel range, if one was configured; it
+leaves SSH rules alone. If another service
 uses the same allow rule, review it before selecting this option. The source
 checkout is never removed. Use `--yes` only when running the uninstall
 non-interactively.
