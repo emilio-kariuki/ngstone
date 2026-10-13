@@ -68,9 +68,9 @@ kicking the tires:
 ```
 TOKEN=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')
 HASH=$(printf '%s' "$TOKEN" | shasum -a 256 | cut -d' ' -f1)
-go run ./cmd/ngstoned -insecure -public 127.0.0.1:8443 -control 127.0.0.1:7443 -ops "" -public-scheme http -token-sha256 "$HASH"
+go run ./cmd/ngstoned -insecure -domain localhost -public 127.0.0.1:8443 -control 127.0.0.1:7443 -ops "" -public-scheme http -token-sha256 "$HASH"
 NGSTONE_TOKEN="$TOKEN" go run ./cmd/ngstone -insecure -control 127.0.0.1:7443 -target http://127.0.0.1:3001 -subdomain demo
-curl -H 'Host: demo.ngstone.site' http://127.0.0.1:8443/
+curl -H 'Host: demo.localhost' http://127.0.0.1:8443/
 ```
 
 The first two lines generate a random auth token and its SHA-256 hash — there
