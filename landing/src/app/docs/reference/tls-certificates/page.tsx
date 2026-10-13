@@ -32,21 +32,34 @@ export default function TlsCertificatesPage() {
 
       <Anchor id="certmagic-dns01">certmagic + DNS-01</Anchor>
       <p>
-        Wildcard certificates for <code>*.ngstone.site</code> are only
+        Wildcard certificates for <code>*.example.com</code> are only
         issuable via the DNS-01 challenge type — HTTP-01 and TLS-ALPN-01
         can&apos;t issue wildcards at all. DNS-01 also means individual tunnel
         names never touch a Certificate Transparency log, since one wildcard
         cert covers every tunnel forever.
       </p>
       <p>
-        The DNS provider is <code>github.com/libdns/cloudflare</code>, using a
-        scoped API token with <code>Zone:DNS:Edit</code> on the single zone —
-        the only pluggable seam in the TLS stack; any other{" "}
-        <code>libdns</code> provider is a one-line swap.
+        The DNS provider is chosen with <code>-dns-provider</code> — the only
+        pluggable seam in the TLS stack. The default is{" "}
+        <code>cloudflare</code> (<code>github.com/libdns/cloudflare</code>,
+        with a scoped API token holding <code>Zone:DNS:Edit</code> on the
+        single zone); <code>route53</code>, <code>digitalocean</code>,{" "}
+        <code>hetzner</code>, <code>vultr</code>, <code>ovh</code>,{" "}
+        <code>desec</code>, and <code>bunny</code> are also built in.
+        Credentials come from the environment only. See{" "}
+        <a href="/docs/guides/edge-vps#dns-provider">Choosing a DNS provider</a>{" "}
+        for each provider&apos;s variables.
+      </p>
+      <p>
+        A provider is admitted only if its <code>libdns</code> module appends
+        TXT values without replacing others at the same name and deletes by
+        value, because the two certificates below publish their challenges
+        at the same name concurrently. GoDaddy, Namecheap, Porkbun, IONOS,
+        Azure, DNSimple, and netcup fail that test and are not supported.
       </p>
       <Callout variant="danger" title="Pin these dependencies">
-        Pin <code>certmagic</code> and <code>libdns/cloudflare</code> to exact
-        versions. The <code>libdns</code> v1 interface migration is a live,
+        Pin <code>certmagic</code> and every <code>libdns</code> provider to
+        exact versions. The <code>libdns</code> v1 interface migration is a live,
         recurring source of &quot;it compiled last month&quot; breakage — this
         is the one dependency pair in the project where a <code>go get -u</code>{" "}
         can take the edge down.
@@ -55,12 +68,12 @@ export default function TlsCertificatesPage() {
       <Anchor id="two-certificates">Two certificates</Anchor>
       <p>
         Calling <code>certmagic.ManageSync</code> with both{" "}
-        <code>*.ngstone.site</code> and <code>ngstone.site</code> reads like
+        <code>*.example.com</code> and <code>example.com</code> reads like
         one multi-SAN certificate. It isn&apos;t — certmagic does not obtain
         multi-SAN certificates, so that call places two independent ACME
         orders producing two certificates with two independent renewal
         schedules. This is forced anyway: a wildcard cert does not match SNI{" "}
-        <code>ngstone.site</code>, so the apex needs its own certificate
+        <code>example.com</code>, so the apex needs its own certificate
         regardless.
       </p>
       <Callout variant="warning" title="The apex can fail independently">
@@ -72,24 +85,30 @@ export default function TlsCertificatesPage() {
         loudly rather than listening with a cert it can&apos;t serve.{" "}
         <code>/healthz</code> reports both certs&apos; <code>NotAfter</code>{" "}
         separately. Both names also validate through the same{" "}
-        <code>_acme-challenge.ngstone.site</code> TXT record, so stagger their
-        renewal windows to avoid one order&apos;s cleanup deleting the
-        other&apos;s in-flight record.
+        <code>_acme-challenge.example.com</code> TXT record. Only providers
+        that delete by value are supported, so one order&apos;s cleanup
+        cannot remove the other&apos;s in-flight record; staggering their
+        renewal windows further reduces the overlap.
       </Callout>
 
       <Anchor id="control-plane-tls">Control-plane TLS</Anchor>
       <p>
         Port <code>:4443</code>, the control plane agents dial into, is
-        served by the <strong>apex</strong> certificate (<code>ngstone.site</code>),
+        served by the <strong>apex</strong> certificate (<code>example.com</code>),
         a different certificate from the public wildcard, via{" "}
-        <code>tls.Config.GetCertificate</code>. Agents connect to{" "}
-        <code>ngstone.site:4443</code>.
+        <code>tls.Config.GetCertificate</code>. Agents connect to the bare
+        domain, <code>example.com:4443</code> — not a subdomain such as{" "}
+        <code>edge.example.com</code>, which the apex certificate does not
+        cover.
       </p>
 
       <Anchor id="agent-verification">Agent verification & pinning</Anchor>
       <p>
-        The agent performs standard WebPKI validation — <code>ServerName:
-        &quot;ngstone.site&quot;</code>, system roots. An optional SPKI pin (
+        The agent performs standard WebPKI validation against system roots.
+        The <code>ServerName</code> it verifies defaults to the host part of{" "}
+        <code>--server</code>, so <code>--server example.com:4443</code>{" "}
+        verifies <code>example.com</code>; <code>--server-name</code>{" "}
+        overrides it. An optional SPKI pin (
         <code>--pin sha256/BASE64</code>) is checked in{" "}
         <code>VerifyPeerCertificate</code> in addition to chain validation. It
         is off by default, since pins combined with auto-renewing certs is a

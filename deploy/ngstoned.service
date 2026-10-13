@@ -5,8 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Set -domain to your zone. For a DNS host other than Cloudflare add
+# -dns-provider NAME and put its variables in the env file
+# (ngstoned -dns-provider help lists them). For raw TCP tunnels add
+# -tcp-ports MIN-MAX and open that range in the firewall.
 ExecStart=/usr/local/bin/ngstoned \
-    -domain ngstone.site \
+    -domain example.com \
     -cert-email ${NGSTONE_CERT_EMAIL} \
     -acme-ca staging \
     -cert-storage ${STATE_DIRECTORY}/certs
