@@ -16,6 +16,8 @@ import (
 
 	"github.com/caddyserver/certmagic"
 	"golang.org/x/sync/errgroup"
+
+	"ngstone/internal/proto"
 )
 
 type Config struct {
@@ -35,6 +37,10 @@ type Config struct {
 
 	TCPPortRange string
 	TCPBindAddr  string
+
+	// MaxShareTTL caps how far in the future a share may expire; 0 means
+	// DefaultMaxShareTTL.
+	MaxShareTTL time.Duration
 
 	CertStoragePath string
 	ACMEEmail       string
@@ -60,6 +66,9 @@ type Server struct {
 
 	tlsMgr *TLSManager
 	tcpMgr *tcpManager
+
+	shares   *shareRegistry
+	shareSem *globalSemaphore
 
 	proxyProtoTrusted []netip.Prefix
 
@@ -122,7 +131,11 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("edge: -proxy-protocol-trusted contains no valid CIDRs")
 	}
 
-	return &Server{
+	if cfg.MaxShareTTL < 0 {
+		return nil, fmt.Errorf("edge: -max-share-ttl must not be negative, got %s", cfg.MaxShareTTL)
+	}
+
+	srv := &Server{
 		cfg:               cfg,
 		registry:          registry,
 		authLimiter:       newAuthRateLimiter(),
@@ -135,7 +148,11 @@ func New(cfg Config) (*Server, error) {
 		unauthSem:         newGlobalSemaphore(int64(limits.UnauthSessions)),
 		tcpMgr:            tcpMgr,
 		proxyProtoTrusted: trustedPrefixes,
-	}, nil
+		shares:            newShareRegistry(cfg.MaxShareTTL),
+		shareSem:          newGlobalSemaphore(maxGlobalShareConns),
+	}
+	srv.shares.onExpire = func(sh *share) { srv.closeShare(sh, proto.ShareReasonExpired) }
+	return srv, nil
 }
 
 func (s *Server) limitsOrDefault() LimitsConfig {

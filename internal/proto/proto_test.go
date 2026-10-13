@@ -33,6 +33,11 @@ func TestRoundTripMessages(t *testing.T) {
 		{"pong", TypePong, 16, Pong{TS: 1234}},
 		{"goodbye", TypeGoodbye, 17, Goodbye{Reason: "shutdown", DrainMS: 15000}},
 		{"stream_open", TypeStreamOpen, 18, StreamOpen{Kind: KindHTTP, Host: "foo.example.com", ReqID: "01ABC", ClientAddr: "1.2.3.4:5678"}},
+		{"share", TypeShare, 19, Share{Kind: KindTCP, SecretSHA256: "ab", Label: "l", Preset: "postgres", DefaultPort: 5432, ExpiresAtMS: 1, MaxConns: 2, SingleUse: true, AllowCIDRs: []string{"10.0.0.0/8"}}},
+		{"share_ok", TypeShareOK, 20, ShareOK{ShareID: "sh_1", ExpiresAtMS: 1}},
+		{"connect_ok", TypeConnectOK, 21, ConnectOK{ShareID: "sh_1", ConnectorID: "c1", Label: "l", Preset: "postgres", DefaultPort: 5432, ExpiresAtMS: 1}},
+		{"share_event", TypeShareEvent, 22, ShareEvent{ShareID: "sh_1", Event: ShareEventConnClose, AtMS: 1, ConnectorID: "c1", ConnID: 2, ClientAddr: "1.2.3.4:5", DurationMS: 6, BytesUp: 7, BytesDown: 8}},
+		{"share_closed", TypeShareClosed, 23, ShareClosed{ShareID: "sh_1", Reason: ShareReasonRevoked}},
 	}
 
 	for _, tc := range cases {
@@ -94,6 +99,21 @@ func TestRoundTripMessages(t *testing.T) {
 				checkEqual(t, got, v, err)
 			case StreamOpen:
 				got, err := Decode[StreamOpen](out)
+				checkEqual(t, got, v, err)
+			case Share:
+				got, err := Decode[Share](out)
+				checkDeepEqual(t, got, v, err)
+			case ShareOK:
+				got, err := Decode[ShareOK](out)
+				checkEqual(t, got, v, err)
+			case ConnectOK:
+				got, err := Decode[ConnectOK](out)
+				checkEqual(t, got, v, err)
+			case ShareEvent:
+				got, err := Decode[ShareEvent](out)
+				checkEqual(t, got, v, err)
+			case ShareClosed:
+				got, err := Decode[ShareClosed](out)
 				checkEqual(t, got, v, err)
 			}
 		})

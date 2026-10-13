@@ -34,6 +34,8 @@ var verbs = map[string]func([]string) int{
 	"auth":    cmdAuth,
 	"port":    cmdPort,
 	"tcp":     cmdTCP,
+	"share":   cmdShare,
+	"connect": cmdConnect,
 	"config":  cmdConfig,
 	"logout":  cmdLogout,
 	"version": cmdVersion,
@@ -56,6 +58,8 @@ Commands:
   auth <token>            verify and save an auth token
   port <port|url>         expose a local port or URL through the tunnel
   tcp <port|host:port>    expose a raw TCP service through the tunnel
+  share <preset> [target] share a local database with teammates via a link
+  connect <link>          connect to a shared database through a link
   config                  view or set local configuration
   logout                  remove the saved auth token
   version                 print the ngstone version
@@ -67,6 +71,9 @@ Examples:
   ngstone port 3000 --host-header demo.localhost:3000
   ngstone tcp 5432
   ngstone tcp db.local:5432 --remote-port 15432
+  ngstone share postgres --expires 2h --label "staging replica"
+  ngstone share tcp 9000 --single-use
+  ngstone connect ngstone://example.com:4443/s/...
 `
 
 func printUsage(w *os.File) {
