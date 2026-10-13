@@ -291,7 +291,7 @@ func TestTCPIdleTimeoutClosesQuietConnections(t *testing.T) {
 	defer fx.cleanup()
 	fx.mgr.idleTimeout = 300 * time.Millisecond
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
+	port, _, err := fx.mgr.bind(fx.as, 0, "example.com", nil, false)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -340,7 +340,7 @@ func TestTCPPerIPCap(t *testing.T) {
 	defer fx.cleanup()
 	fx.mgr.perIP = newPerIPInflight(1)
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
+	port, _, err := fx.mgr.bind(fx.as, 0, "example.com", nil, false)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
