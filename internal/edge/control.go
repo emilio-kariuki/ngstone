@@ -37,7 +37,7 @@ type AgentSession struct {
 	IDGen             *proto.IDGen
 	NegotiatedVersion int
 
-	inflight         sync.WaitGroup
+	inflight         inflightTracker
 	streamSem        *globalSemaphore
 	upgradeStreamSem *globalSemaphore
 }
@@ -185,7 +185,9 @@ func (s *Server) acceptControl(ctx context.Context, ln net.Listener) error {
 			conn.Close()
 			continue
 		}
+		s.controlConns.Add(1)
 		go func() {
+			defer s.controlConns.Done()
 			var once sync.Once
 			release := func() { once.Do(s.unauthSem.release) }
 			defer release()
@@ -456,16 +458,7 @@ func (s *Server) drainOnShutdown(as *AgentSession, ctrl *proto.Conn) {
 }
 
 func (s *Server) waitInflight(as *AgentSession) {
-	done := make(chan struct{})
-	go func() {
-		as.inflight.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(drainTimeout):
-	}
+	as.inflight.waitTimeout(drainTimeout)
 }
 
 func bindHasAccessFields(bind proto.Bind) bool {

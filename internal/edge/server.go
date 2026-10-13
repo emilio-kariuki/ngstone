@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -59,7 +60,17 @@ type Server struct {
 	tcpMgr *tcpManager
 
 	proxyProtoTrusted []netip.Prefix
+
+	// controlConns tracks per-connection control goroutines so Run can wait
+	// for each session's Goodbye and drain before returning. Add happens only
+	// in acceptControl, which has returned before Run calls Wait.
+	controlConns sync.WaitGroup
 }
+
+// controlShutdownGrace bounds how long Run waits, after its listeners stop,
+// for agent sessions to send Goodbye and drain. A session drains for at most
+// drainTimeout plus the TCP release grace; the margin covers a slow peer.
+var controlShutdownGrace = drainTimeout + 15*time.Second
 
 func New(cfg Config) (*Server, error) {
 	if cfg.PublicScheme == "" {
@@ -286,7 +297,28 @@ func (s *Server) Run(ctx context.Context) error {
 
 	slog.Info("ngstoned: listeners up", "control", s.cfg.ControlAddr, "public", s.cfg.PublicAddr, "insecure", s.cfg.Insecure, "proxy_protocol", s.cfg.ProxyProtocol)
 
-	return g.Wait()
+	err = g.Wait()
+	s.waitControlSessions(controlShutdownGrace)
+	return err
+}
+
+// waitControlSessions waits for every control-connection goroutine to finish
+// its Goodbye/unroute/drain sequence, up to grace. Without it the process
+// exits as soon as the listeners close, cutting WebSocket and TCP tunnel
+// traffic (which http.Server.Shutdown does not wait for) mid-drain.
+func (s *Server) waitControlSessions(grace time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		s.controlConns.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		slog.Warn("edge: shutdown grace expired with agent sessions still draining", "grace", grace)
+	}
 }
 
 func (s *Server) redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
