@@ -49,9 +49,67 @@ ngstone port 3000 --subdomain demo   # request a specific name instead of a rand
 ngstone port 3000 --host-header demo.localhost:3000
 ```
 
+To share a folder of files without running a web server first:
+
+```
+ngstone serve ./dist --subdomain demo
+ngstone serve ./dist --spa          # serve index.html for client-side routes
+```
+
 By default, the local app receives the public tunnel hostname in `Host`. Use
 `--host-header` when it expects a tenant-specific local hostname; the public
 hostname remains available in `X-Forwarded-Host`.
+
+### Several tunnels at once
+
+Describe your tunnels in `ngstone.yml` and start them all with one command.
+They share one terminal inspector, which shows each request's tunnel and
+replays it to the right app.
+
+```yaml
+server: example.com:4443
+tunnels:
+  web:
+    port: 3000
+    subdomain: demo
+  api:
+    url: http://127.0.0.1:8080
+    basic_auth: ["user:pass"]
+  db:
+    kind: tcp
+    port: 5432
+```
+
+```
+ngstone start            # every tunnel in ./ngstone.yml
+ngstone start web api    # just these
+```
+
+`ngstone start` looks for `./ngstone.yml`, then `tunnels.yml` in the config
+directory (`~/.config/ngstone/`), or takes `--config FILE`. Each tunnel
+accepts the same options as `ngstone port` and `ngstone tcp`: `port` or
+`url`, `subdomain`, `host_header`, `basic_auth` or `basic_auth_file`, and
+`allow_cidr` for HTTP; `port` or `address`, `remote_port` and `allow_cidr`
+for `kind: tcp`. Unknown keys are errors, so a typo cannot silently drop a
+setting. If one tunnel fails, for example because its subdomain is taken,
+the others keep running.
+
+### Run tunnels in the background
+
+```
+ngstone service install          # systemd user unit on Linux, launchd agent on macOS
+ngstone service status
+ngstone service uninstall
+ngstone ps                       # tunnels of every running ngstone process, with their URLs
+```
+
+The service runs `ngstone start --no-tui` with the tunnels file you point it
+at (`--config`, or the same lookup as `start`), restarts it if it fails, and
+uses the token saved by `ngstone auth`. `--print` shows the unit or plist
+without installing it. Logs go to `journalctl --user -u ngstone` on Linux and
+`~/Library/Logs/ngstone.log` on macOS. On Linux, run
+`sudo loginctl enable-linger $USER` once to keep it running after you log out
+and start it at boot.
 
 This assumes you (or someone) already has `ngstoned` running on a VPS with a
 domain pointed at it — see [Self-hosting](#self-hosting) below. `ngstoned` is

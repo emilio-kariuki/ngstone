@@ -40,6 +40,10 @@ var verbs = map[string]func([]string) int{
 	"unshare": cmdUnshare,
 	"extend":  cmdExtend,
 	"kick":    cmdKick,
+	"serve":   cmdServe,
+	"start":   cmdStart,
+	"ps":      cmdPS,
+	"service": cmdService,
 	"config":  cmdConfig,
 	"logout":  cmdLogout,
 	"version": cmdVersion,
@@ -68,6 +72,10 @@ Commands:
   unshare <id>            revoke a share
   extend <id> <duration>  move a share's expiry
   kick <id> <connector>   remove one connector from a share
+  serve [dir]             share a directory of files through the tunnel
+  start [name ...]        start the tunnels defined in ngstone.yml
+  service install         run 'ngstone start' as a background service (systemd or launchd)
+  ps                      list the tunnels of every running ngstone process
   config                  view or set local configuration
   logout                  remove the saved auth token
   version                 print the ngstone version
@@ -77,6 +85,7 @@ Examples:
   ngstone port 3000
   ngstone port 3000 --subdomain demo
   ngstone port 3000 --host-header demo.localhost:3000
+  ngstone serve ./dist --subdomain demo
   ngstone tcp 5432
   ngstone tcp db.local:5432 --remote-port 15432
   ngstone share postgres --expires 2h --label "staging replica"
@@ -508,6 +517,7 @@ func runPortPlain(ctx context.Context, acfg agent.Config) int {
 	slog.SetDefault(logger)
 
 	a := agent.New(acfg)
+	defer publishStatus(ctx, "port", []agent.Config{acfg}, []*agent.Agent{a})()
 
 	logger.Info("ngstone: starting", "control", acfg.ControlAddr, "target", acfg.TargetURL, "insecure", acfg.Insecure)
 	if err := a.Run(ctx); err != nil {
@@ -639,6 +649,7 @@ func runTCPPlain(ctx context.Context, acfg agent.Config) int {
 	acfg.Events = events
 
 	a := agent.New(acfg)
+	defer publishStatus(ctx, "tcp", []agent.Config{acfg}, []*agent.Agent{a})()
 
 	go func() {
 		for {
@@ -674,6 +685,7 @@ func runPortTUI(ctx context.Context, acfg agent.Config) int {
 	acfg.Events = events
 
 	a := agent.New(acfg)
+	defer publishStatus(ctx, "port", []agent.Config{acfg}, []*agent.Agent{a})()
 
 	logger.Info("ngstone: starting", "control", acfg.ControlAddr, "target", acfg.TargetURL, "insecure", acfg.Insecure)
 
@@ -784,7 +796,7 @@ func bridgeStatus(ctx context.Context, in <-chan agent.StatusEvent, out chan<- t
 				err = errors.New(ev.Err)
 			}
 			select {
-			case out <- tui.StatusEvent{State: ev.State, Hostname: ev.Hostname, URL: ev.URL, Err: err}:
+			case out <- tui.StatusEvent{Tunnel: ev.Tunnel, State: ev.State, Hostname: ev.Hostname, URL: ev.URL, Err: err}:
 			case <-ctx.Done():
 				return
 			default:
