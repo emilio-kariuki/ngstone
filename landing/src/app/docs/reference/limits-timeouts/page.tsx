@@ -54,6 +54,22 @@ export default function LimitsTimeoutsPage() {
           Budget for opening the yamux stream and writing its preamble.
           Times out to <code>502</code> if the session is wedged.
         </Property>
+        <Property name="-client-idle-timeout" type="duration" defaultValue="60s">
+          How long one read of a request body, or one write of a response,
+          may wait on the public client. A client that stops sending its
+          upload gets <code>408</code>; one that stops reading its response
+          is disconnected. Either way its request slots are freed. The
+          deadline applies only while a read or write is blocked, so long
+          uploads, SSE streams and WebSockets that keep moving are
+          unaffected.
+        </Property>
+        <Property name="-tcp-idle-timeout" type="duration" defaultValue="30m">
+          Closes a TCP tunnel connection that has carried no bytes in either
+          direction for this long. A connection busy in only one direction,
+          such as a download, stays open. Raise it, or enable keepalives such
+          as SSH&apos;s <code>ServerAliveInterval</code>, for sessions that
+          sit idle longer.
+        </Property>
       </ParamTable>
 
       <Anchor id="body-limits">Body limits</Anchor>
@@ -100,6 +116,14 @@ export default function LimitsTimeoutsPage() {
         <Property name="Per-session concurrent streams" type="int" defaultValue="48">
           Its own semaphore, beneath the global one, so one tunnel can&apos;t
           monopolize the edge. Exceeding it returns <code>429</code>.
+        </Property>
+        <Property name="-per-ip-inflight" type="int" defaultValue="32">
+          In-flight HTTP requests plus TCP tunnel connections one client
+          address may hold at once, across every tunnel on the edge (IPv6 is
+          grouped by /48, like the rate limiter). Without it, one client
+          could take every per-session or global slot with slow or idle
+          connections. Exceeding it returns <code>429</code>, or closes the
+          TCP connection.
         </Property>
         <Property name="yamux AcceptBacklog" type="int" defaultValue="512">
           Deliberately set above both caps — see the callout below.
