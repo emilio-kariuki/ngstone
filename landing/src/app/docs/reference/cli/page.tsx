@@ -17,6 +17,7 @@ const TOC: TocItem[] = [
   { id: "ngstone-auth", title: "ngstone auth" },
   { id: "ngstone-port", title: "ngstone port" },
   { id: "ngstone-tcp", title: "ngstone tcp" },
+  { id: "ngstone-serve", title: "ngstone serve" },
   { id: "ngstone-start", title: "ngstone start" },
   { id: "ngstone-service", title: "ngstone service" },
   { id: "ngstone-config", title: "ngstone config" },
@@ -35,9 +36,10 @@ export default function CliPage() {
       <p>
         The <code>ngstone</code> command is built on the stdlib{" "}
         <code>flag</code> package — no cobra, no subcommand framework. There
-        are eight verbs: <code>auth</code>, <code>port</code>,{" "}
-        <code>tcp</code>, <code>start</code>, <code>service</code>,{" "}
-        <code>config</code>, <code>logout</code>, and <code>version</code>.
+        are nine verbs: <code>auth</code>, <code>port</code>,{" "}
+        <code>tcp</code>, <code>serve</code>, <code>start</code>,{" "}
+        <code>service</code>, <code>config</code>, <code>logout</code>, and{" "}
+        <code>version</code>.
       </p>
 
       <Anchor id="overview">Overview</Anchor>
@@ -258,6 +260,34 @@ $ ngstone tcp db.local:5432 --remote-port 15432`}
         reverse proxy</a> and{" "}
         <a href="/docs/guides/access-control">Access control</a>.
       </Callout>
+
+      <Anchor id="ngstone-serve">ngstone serve</Anchor>
+      <p>
+        Shares a directory of files: a built site, a folder of downloads, a
+        report. It starts a file server on a loopback port and tunnels it
+        exactly as <code>ngstone port</code> would, inspector included.
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone serve ./dist --subdomain demo
+$ ngstone serve ./dist --spa
+$ ngstone serve            # the current directory`}
+      />
+      <ParamTable>
+        <Property name="dir" type="positional" defaultValue=".">
+          The directory to share. Directory listings are shown for folders
+          without an <code>index.html</code>.
+        </Property>
+        <Property name="--spa" type="bool" defaultValue="false">
+          Single-page app mode: a path with no file and no extension gets{" "}
+          <code>index.html</code>, so client-side routes survive a reload.
+          Paths with an extension still return <code>404</code> when the
+          file is missing.
+        </Property>
+        <Property name="--subdomain, --basic-auth, --allow-cidr, …" type="flags">
+          Every <code>ngstone port</code> flag applies.
+        </Property>
+      </ParamTable>
 
       <Anchor id="ngstone-start">ngstone start</Anchor>
       <p>

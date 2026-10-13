@@ -34,6 +34,7 @@ var verbs = map[string]func([]string) int{
 	"auth":    cmdAuth,
 	"port":    cmdPort,
 	"tcp":     cmdTCP,
+	"serve":   cmdServe,
 	"start":   cmdStart,
 	"service": cmdService,
 	"config":  cmdConfig,
@@ -58,6 +59,7 @@ Commands:
   auth <token>            verify and save an auth token
   port <port|url>         expose a local port or URL through the tunnel
   tcp <port|host:port>    expose a raw TCP service through the tunnel
+  serve [dir]             share a directory of files through the tunnel
   start [name ...]        start the tunnels defined in ngstone.yml
   service install         run 'ngstone start' as a background service (systemd or launchd)
   config                  view or set local configuration
@@ -69,6 +71,7 @@ Examples:
   ngstone port 3000
   ngstone port 3000 --subdomain demo
   ngstone port 3000 --host-header demo.localhost:3000
+  ngstone serve ./dist --subdomain demo
   ngstone tcp 5432
   ngstone tcp db.local:5432 --remote-port 15432
 `
