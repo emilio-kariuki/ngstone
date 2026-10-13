@@ -38,10 +38,14 @@ type tcpConn struct {
 }
 
 type tcpTunnel struct {
-	port     int
-	hostname string
-	ln       net.Listener
+	port int
+	ln   net.Listener
+
+	// session, hostname and allow are guarded by tcpManager.mu: a takeover
+	// hands the tunnel (listener and all) to a new session while its accept
+	// loop keeps running, so the loop reads them per accepted connection.
 	session  *AgentSession
+	hostname string
 	allow    []netip.Prefix
 
 	acceptDone chan struct{}
@@ -99,13 +103,11 @@ func newTCPManager(lo, hi int, bindAddr string, limiter *perIPLimiter) *tcpManag
 	}
 }
 
-func (tm *tcpManager) register(as *AgentSession, tc *tcpConn) {
-	tm.mu.Lock()
+func (tm *tcpManager) registerLocked(as *AgentSession, tc *tcpConn) {
 	if tm.conns[as] == nil {
 		tm.conns[as] = make(map[*tcpConn]struct{})
 	}
 	tm.conns[as][tc] = struct{}{}
-	tm.mu.Unlock()
 }
 
 func (tm *tcpManager) deregister(as *AgentSession, tc *tcpConn) {
@@ -157,33 +159,91 @@ func (tm *tcpManager) registerTunnelLocked(as *AgentSession, port int, hostname 
 	return tt
 }
 
-func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string, allow []netip.Prefix) (int, error) {
+// claimHeldLocked resolves a bind for a port that a registered tunnel already
+// holds, using the same identity rules as Registry.Bind (ARCHITECTURE §3):
+// the holder's own session rebinding is idempotent; (a) the same non-empty
+// InstanceID takes the port over immediately, whether or not the holder
+// still looks alive; (b) a different InstanceID takes it over only when
+// takeover is requested and the holder's session is dead; (c) anything else
+// is errPortUnavailable. It returns the evicted session, if any.
+//
+// A takeover hands the existing listener and accept loop to the new session
+// instead of closing and re-listening, so no other process can grab the port
+// in between. Connections already relayed stay accounted to the old session
+// and are torn down when that session is released; the port no longer
+// appears under the old session, so releasing it leaves the port alone.
+func (tm *tcpManager) claimHeldLocked(as *AgentSession, tt *tcpTunnel, hostname string, allow []netip.Prefix, takeover bool) (*AgentSession, error) {
+	old := tt.session
+	switch {
+	case old == as:
+		tt.hostname = hostname
+		tt.allow = allow
+		return nil, nil
+	case as.InstanceID != "" && old.InstanceID == as.InstanceID:
+	case takeover && isSessionDead(old):
+	default:
+		return nil, errPortUnavailable
+	}
+
+	if len(tm.bySession[as]) >= maxBindsPerSession {
+		metricTCPRejectedBindCap.Add(1)
+		return nil, errTooManyBinds
+	}
+
+	if ports, ok := tm.bySession[old]; ok {
+		delete(ports, tt.port)
+	}
+	if tm.bySession[as] == nil {
+		tm.bySession[as] = make(map[int]struct{})
+	}
+	tm.bySession[as][tt.port] = struct{}{}
+	tt.session = as
+	tt.hostname = hostname
+	tt.allow = allow
+	return old, nil
+}
+
+// bind allocates a public port for as and starts accepting on it. requested
+// == 0 picks the first free port in range; otherwise that exact port is used,
+// and if a tunnel already holds it, claimHeldLocked decides whether as may
+// take it over. The returned session, when non-nil, lost the port to as and
+// should be told it was evicted.
+func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string, allow []netip.Prefix, takeover bool) (int, *AgentSession, error) {
 	tm.mu.Lock()
+	if tt, held := tm.byPort[requested]; held && requested != 0 {
+		evicted, err := tm.claimHeldLocked(as, tt, hostname, allow, takeover)
+		tm.mu.Unlock()
+		if err != nil {
+			return 0, nil, err
+		}
+		return requested, evicted, nil
+	}
+
 	if len(tm.bySession[as]) >= maxBindsPerSession {
 		tm.mu.Unlock()
 		metricTCPRejectedBindCap.Add(1)
-		return 0, errTooManyBinds
+		return 0, nil, errTooManyBinds
 	}
 
 	if requested != 0 {
 		port, err := tm.reserveLocked(requested)
 		if err != nil {
 			tm.mu.Unlock()
-			return 0, err
+			return 0, nil, err
 		}
 
 		ln, err := net.Listen("tcp", net.JoinHostPort(tm.bindAddr, strconv.Itoa(port)))
 		if err != nil {
 			delete(tm.allocated, port)
 			tm.mu.Unlock()
-			return 0, err
+			return 0, nil, err
 		}
 
 		tt := tm.registerTunnelLocked(as, port, hostname, ln, allow)
 		tm.mu.Unlock()
 
 		go tm.acceptLoop(tt)
-		return port, nil
+		return port, nil, nil
 	}
 	tm.mu.Unlock()
 
@@ -226,20 +286,20 @@ func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string, all
 	}
 	if !found {
 		tm.mu.Unlock()
-		return 0, errPortUnavailable
+		return 0, nil, errPortUnavailable
 	}
 	if len(tm.bySession[as]) >= maxBindsPerSession {
 		delete(tm.allocated, port)
 		tm.mu.Unlock()
 		ln.Close()
 		metricTCPRejectedBindCap.Add(1)
-		return 0, errTooManyBinds
+		return 0, nil, errTooManyBinds
 	}
 	tt := tm.registerTunnelLocked(as, port, hostname, ln, allow)
 	tm.mu.Unlock()
 
 	go tm.acceptLoop(tt)
-	return port, nil
+	return port, nil, nil
 }
 
 func (tm *tcpManager) acceptLoop(tt *tcpTunnel) {
@@ -269,10 +329,17 @@ func (tm *tcpManager) acceptLoop(tt *tcpTunnel) {
 		}
 		backoff = 5 * time.Millisecond
 
+		// Read the owner and account the connection to it in one critical
+		// section: a takeover may have moved the tunnel to a new session, and
+		// a connection registered to the old one before the move is drained
+		// by the old session's releaseSession.
 		tc := &tcpConn{client: c}
-		tt.session.inflight.Add(1)
-		tm.register(tt.session, tc)
-		go tm.handleConn(tt.session, tt.hostname, tt.allow, tc)
+		tm.mu.Lock()
+		as, hostname, allow := tt.session, tt.hostname, tt.allow
+		as.inflight.Add(1)
+		tm.registerLocked(as, tc)
+		tm.mu.Unlock()
+		go tm.handleConn(as, hostname, allow, tc)
 	}
 }
 

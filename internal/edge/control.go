@@ -529,7 +529,7 @@ func (s *Server) handleBindTCP(as *AgentSession, ctrl *proto.Conn, id uint64, bi
 		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInvalidAccess, Message: err.Error()})
 		return
 	}
-	port, err := s.tcpMgr.bind(as, bind.RemotePort, s.cfg.Domain, ac.prefixes())
+	port, evicted, err := s.tcpMgr.bind(as, bind.RemotePort, s.cfg.Domain, ac.prefixes(), bind.Takeover)
 	if err != nil {
 		if errors.Is(err, errTooManyBinds) {
 			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeTooManyBinds, Message: "too many tcp binds for this session"})
@@ -542,21 +542,30 @@ func (s *Server) handleBindTCP(as *AgentSession, ctrl *proto.Conn, id uint64, bi
 		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInternal, Message: err.Error()})
 		return
 	}
+	url := "tcp://" + s.cfg.Domain + ":" + strconv.Itoa(port)
+	evict(evicted, url)
 	ctrl.Write(proto.TypeBindOK, id, proto.BindOK{
 		Hostname: s.cfg.Domain,
-		URL:      "tcp://" + s.cfg.Domain + ":" + strconv.Itoa(port),
+		URL:      url,
 		Port:     port,
 	})
 }
 
-func (s *Server) finishBind(id uint64, ctrl *proto.Conn, hostname string, evicted *AgentSession) {
-	if evicted != nil {
-		evicted.Sess.Control().Write(proto.TypeEvicted, evicted.IDGen.Next(), proto.Evicted{
-			Hostname: hostname,
-			Reason:   "takeover",
-		})
-		evicted.Sess.Close("takeover")
+// evict tells a session that lost a tunnel to a takeover to stop advertising
+// it, then force-closes the session. A nil session is a no-op.
+func evict(evicted *AgentSession, hostname string) {
+	if evicted == nil {
+		return
 	}
+	evicted.Sess.Control().Write(proto.TypeEvicted, evicted.IDGen.Next(), proto.Evicted{
+		Hostname: hostname,
+		Reason:   "takeover",
+	})
+	evicted.Sess.Close("takeover")
+}
+
+func (s *Server) finishBind(id uint64, ctrl *proto.Conn, hostname string, evicted *AgentSession) {
+	evict(evicted, hostname)
 	ctrl.Write(proto.TypeBindOK, id, proto.BindOK{
 		Hostname: hostname,
 		URL:      s.cfg.PublicScheme + "://" + hostname,
