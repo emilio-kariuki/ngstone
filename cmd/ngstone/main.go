@@ -36,6 +36,10 @@ var verbs = map[string]func([]string) int{
 	"tcp":     cmdTCP,
 	"share":   cmdShare,
 	"connect": cmdConnect,
+	"shares":  cmdShares,
+	"unshare": cmdUnshare,
+	"extend":  cmdExtend,
+	"kick":    cmdKick,
 	"config":  cmdConfig,
 	"logout":  cmdLogout,
 	"version": cmdVersion,
@@ -58,8 +62,12 @@ Commands:
   auth <token>            verify and save an auth token
   port <port|url>         expose a local port or URL through the tunnel
   tcp <port|host:port>    expose a raw TCP service through the tunnel
-  share <preset> [target] share a local database with teammates via a link
+  share <preset>...       share local databases with teammates via a link
   connect <link>          connect to a shared database through a link
+  shares                  list live shares on the edge (--watch tails their events)
+  unshare <id>            revoke a share
+  extend <id> <duration>  move a share's expiry
+  kick <id> <connector>   remove one connector from a share
   config                  view or set local configuration
   logout                  remove the saved auth token
   version                 print the ngstone version
@@ -72,8 +80,10 @@ Examples:
   ngstone tcp 5432
   ngstone tcp db.local:5432 --remote-port 15432
   ngstone share postgres --expires 2h --label "staging replica"
-  ngstone share tcp 9000 --single-use
-  ngstone connect ngstone://example.com:4443/s/...
+  ngstone share postgres redis:6380 --approve --passphrase hunter2
+  ngstone share tcp:9000 --single-use --idle 30m
+  ngstone connect ngstone://example.com:4443/s/... --as alice
+  ngstone shares --watch
 `
 
 func printUsage(w *os.File) {

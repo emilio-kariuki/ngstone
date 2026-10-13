@@ -33,9 +33,15 @@ func TestRoundTripMessages(t *testing.T) {
 		{"pong", TypePong, 16, Pong{TS: 1234}},
 		{"goodbye", TypeGoodbye, 17, Goodbye{Reason: "shutdown", DrainMS: 15000}},
 		{"stream_open", TypeStreamOpen, 18, StreamOpen{Kind: KindHTTP, Host: "foo.example.com", ReqID: "01ABC", ClientAddr: "1.2.3.4:5678"}},
-		{"share", TypeShare, 19, Share{Kind: KindTCP, SecretSHA256: "ab", Label: "l", Preset: "postgres", DefaultPort: 5432, ExpiresAtMS: 1, MaxConns: 2, SingleUse: true, AllowCIDRs: []string{"10.0.0.0/8"}}},
+		{"share", TypeShare, 19, Share{Kind: KindTCP, SecretSHA256: "ab", Label: "l", Targets: []ShareTarget{{ID: "t1", Preset: "postgres", DefaultPort: 5432, User: "ro"}}, ExpiresAtMS: 1, MaxConns: 2, MaxUses: 3, SingleUse: true, AllowCIDRs: []string{"10.0.0.0/8"}, IdleTimeoutMS: 4, Approve: true, PassphraseSHA256: "cd", E2E: true}},
 		{"share_ok", TypeShareOK, 20, ShareOK{ShareID: "sh_1", ExpiresAtMS: 1}},
-		{"connect_ok", TypeConnectOK, 21, ConnectOK{ShareID: "sh_1", ConnectorID: "c1", Label: "l", Preset: "postgres", DefaultPort: 5432, ExpiresAtMS: 1}},
+		{"connect_ok", TypeConnectOK, 21, ConnectOK{ShareID: "sh_1", ConnectorID: "alice", Label: "l", Targets: []ShareTarget{{ID: "t1", Preset: "postgres", DefaultPort: 5432}}, ExpiresAtMS: 1, E2E: true}},
+		{"shares_ok", TypeSharesOK, 24, SharesOK{Shares: []ShareInfo{{ShareID: "sh_1", Label: "l", Targets: []ShareTarget{{ID: "t1", Preset: "redis", DefaultPort: 6379}}, ExpiresAtMS: 1, Mine: true, Uses: 2, Connectors: []ConnectorInfo{{ID: "c1", Addr: "1.2.3.4:5", JoinedMS: 6}}, OpenConns: 1}}}},
+		{"share_update", TypeShareUpdate, 25, ShareUpdate{ShareID: "sh_1", ExpiresAtMS: 9}},
+		{"kick", TypeKick, 26, Kick{ShareID: "sh_1", ConnectorID: "c1"}},
+		{"approve", TypeApprove, 27, Approve{ShareID: "sh_1", ConnectorID: "c1", Allow: true}},
+		{"share_updated", TypeShareUpdated, 28, ShareUpdated{ShareID: "sh_1", ExpiresAtMS: 9}},
+		{"connect", TypeConnect, 29, Connect{Name: "alice", Passphrase: "pw"}},
 		{"share_event", TypeShareEvent, 22, ShareEvent{ShareID: "sh_1", Event: ShareEventConnClose, AtMS: 1, ConnectorID: "c1", ConnID: 2, ClientAddr: "1.2.3.4:5", DurationMS: 6, BytesUp: 7, BytesDown: 8}},
 		{"share_closed", TypeShareClosed, 23, ShareClosed{ShareID: "sh_1", Reason: ShareReasonRevoked}},
 	}
@@ -108,6 +114,24 @@ func TestRoundTripMessages(t *testing.T) {
 				checkEqual(t, got, v, err)
 			case ConnectOK:
 				got, err := Decode[ConnectOK](out)
+				checkDeepEqual(t, got, v, err)
+			case SharesOK:
+				got, err := Decode[SharesOK](out)
+				checkDeepEqual(t, got, v, err)
+			case ShareUpdate:
+				got, err := Decode[ShareUpdate](out)
+				checkEqual(t, got, v, err)
+			case Kick:
+				got, err := Decode[Kick](out)
+				checkEqual(t, got, v, err)
+			case Approve:
+				got, err := Decode[Approve](out)
+				checkEqual(t, got, v, err)
+			case ShareUpdated:
+				got, err := Decode[ShareUpdated](out)
+				checkEqual(t, got, v, err)
+			case Connect:
+				got, err := Decode[Connect](out)
 				checkEqual(t, got, v, err)
 			case ShareEvent:
 				got, err := Decode[ShareEvent](out)

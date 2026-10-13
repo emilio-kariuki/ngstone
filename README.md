@@ -80,9 +80,14 @@ ngstone connect ngstone://example.com:4443/s/...
 ```
 
 Ctrl-C on the sharer revokes the link and connectors are told within a
-second. `--allow-cidr`, `--max-conns`, `--max-connectors` and
-`--single-use` set the policy; `--audit-log` writes every event as JSON
-Lines. The full design is in [docs/SHARE-DESIGN.md](docs/SHARE-DESIGN.md).
+second. `--allow-cidr`, `--max-conns`, `--max-connectors`, `--max-uses`,
+`--single-use`, `--idle`, `--approve` and `--passphrase` set the policy;
+`--audit-log` writes every event as JSON Lines. Several services go in one
+link (`ngstone share postgres redis:6380`), and connectors can name
+themselves (`--as alice`). From any terminal with the token, `ngstone
+shares` lists live shares (`--watch` tails their events), `ngstone extend`
+moves an expiry, `ngstone kick` drops a connector and `ngstone unshare`
+revokes. The full design is in [docs/SHARE-DESIGN.md](docs/SHARE-DESIGN.md).
 
 ## Run it locally, no TLS
 

@@ -41,6 +41,9 @@ type Config struct {
 	// MaxShareTTL caps how far in the future a share may expire; 0 means
 	// DefaultMaxShareTTL.
 	MaxShareTTL time.Duration
+	// ShareAuditLogPath appends every share audit event as JSON Lines to
+	// this file; empty disables it.
+	ShareAuditLogPath string
 
 	CertStoragePath string
 	ACMEEmail       string
@@ -67,8 +70,9 @@ type Server struct {
 	tlsMgr *TLSManager
 	tcpMgr *tcpManager
 
-	shares   *shareRegistry
-	shareSem *globalSemaphore
+	shares     *shareRegistry
+	shareSem   *globalSemaphore
+	shareAudit *shareAuditLog
 
 	proxyProtoTrusted []netip.Prefix
 
@@ -152,6 +156,18 @@ func New(cfg Config) (*Server, error) {
 		shareSem:          newGlobalSemaphore(maxGlobalShareConns),
 	}
 	srv.shares.onExpire = func(sh *share) { srv.closeShare(sh, proto.ShareReasonExpired) }
+	srv.shares.onIdle = func(sh *share) {
+		if srv.shares.idleNow(sh) {
+			srv.closeShare(sh, proto.ShareReasonIdle)
+		}
+	}
+	if cfg.ShareAuditLogPath != "" {
+		audit, err := openShareAuditLog(cfg.ShareAuditLogPath)
+		if err != nil {
+			return nil, fmt.Errorf("edge: -share-audit-log: %w", err)
+		}
+		srv.shareAudit = audit
+	}
 	return srv, nil
 }
 
@@ -325,6 +341,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	err = g.Wait()
 	s.waitControlSessions(controlShutdownGrace)
+	s.shareAudit.close()
 	return err
 }
 

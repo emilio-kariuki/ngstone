@@ -23,6 +23,7 @@ require (
 	github.com/libdns/ovh v1.1.0
 	github.com/libdns/route53 v1.6.2
 	github.com/libdns/vultr/v2 v2.0.4
+	golang.org/x/term v0.42.0
 	golang.org/x/time v0.14.0
 )
 

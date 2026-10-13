@@ -62,6 +62,7 @@ func newTestServer(token string) *Server {
 		shareSem:    newGlobalSemaphore(maxGlobalShareConns),
 	}
 	s.shares.onExpire = func(sh *share) { s.closeShare(sh, proto.ShareReasonExpired) }
+	s.shares.onIdle = func(sh *share) { s.closeShare(sh, proto.ShareReasonIdle) }
 	return s
 }
 

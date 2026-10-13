@@ -10,6 +10,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ngstone/internal/proto"
@@ -18,9 +19,9 @@ import (
 )
 
 // Connector is the receiving side of a share link (protocol v3). It
-// authenticates to the edge with the link's secret, joins the share, opens a
-// loopback listener, and relays every local connection through its own
-// tunnel stream. The edge pipes that stream to the sharer.
+// authenticates to the edge with the link's secret, joins the share, opens
+// one loopback listener per target, and relays every local connection
+// through its own tunnel stream. The edge pipes that stream to the sharer.
 
 const (
 	// connectReconnectBase is slower than the operator agent's so a connector
@@ -28,15 +29,25 @@ const (
 	// limit (five failures per IP per minute).
 	connectReconnectBase = 2 * time.Second
 	connectReconnectCap  = 30 * time.Second
+	// approvalWait bounds the connect reply when the share needs the
+	// sharer's approval; the edge gives the sharer 60 s.
+	approvalWait = 90 * time.Second
+	// approvalNotice is how long a silent connect waits before telling the
+	// user it is probably waiting on the sharer.
+	approvalNotice = 2 * time.Second
 )
 
 var (
 	// ErrShareClosed is returned by Connector.Run when the share ended for
-	// good: it expired or the sharer revoked it.
+	// good: it expired, was revoked, idled out, or this connector was kicked.
 	ErrShareClosed = errors.New("agent: share closed")
 	// ErrShareRejected is returned when the edge refuses this connector under
-	// the share's policy (address not allowed, single-use link locked).
+	// the share's policy (address not allowed, single-use link locked, uses
+	// exhausted, approval denied or timed out).
 	ErrShareRejected = errors.New("agent: share rejected this connector")
+	// ErrPassphraseRequired is returned when the share needs a passphrase and
+	// none, or the wrong one, was given. The CLI prompts and retries.
+	ErrPassphraseRequired = errors.New("agent: share needs a passphrase")
 )
 
 type ConnectConfig struct {
@@ -44,8 +55,14 @@ type ConnectConfig struct {
 	Secret      string
 	InstanceID  string
 
-	// ListenPort overrides the share's default local port. 0 means the
-	// share's default, falling back to a free port when that one is busy.
+	// Name is how the sharer sees this connector; empty means cN.
+	Name string
+	// Passphrase is sent with connect when the share set one.
+	Passphrase string
+
+	// Ports overrides local listen ports by target id or preset name.
+	// ListenPort is the override for the share's first target.
+	Ports      map[string]int
 	ListenPort int
 	// ListenHost is the loopback address to listen on; empty means 127.0.0.1.
 	ListenHost string
@@ -58,22 +75,43 @@ type ConnectConfig struct {
 	Events chan<- ConnectEvent
 }
 
+// Connect event states, in addition to the agent's StateConnecting etc.
+const (
+	StateAwaitingApproval = "awaiting_approval"
+	StateUpdated          = "updated" // ExpiresAt changed
+)
+
 // ConnectEvent reports connector state to the CLI.
 type ConnectEvent struct {
-	State string // StateConnecting, StateOnline, StateReconnecting, StateOffline
+	State string
 	Err   string
 
-	// Set with StateOnline.
+	// Set with StateOnline and StateUpdated.
 	ShareID     string
 	ConnectorID string
 	Label       string
-	Preset      string
-	ListenAddr  string
+	Targets     []ConnectTarget
 	ExpiresAt   time.Time
 
-	// Set with StateOffline when the share ended: expired, revoked,
-	// sharer_gone, edge_shutdown.
+	// Set with StateOffline when the share ended: expired, revoked, idle,
+	// kicked, sharer_gone, edge_shutdown.
 	Reason string
+}
+
+// ConnectTarget is a target as served locally.
+type ConnectTarget struct {
+	proto.ShareTarget
+	ListenAddr string
+}
+
+// ConnectStats is a snapshot of the connector's local activity.
+type ConnectStats struct {
+	OpenConns  int
+	TotalConns int64
+	BytesUp    int64
+	BytesDown  int64
+	ExpiresAt  time.Time
+	Connected  bool
 }
 
 type Connector struct {
@@ -81,13 +119,20 @@ type Connector struct {
 	instanceID string
 
 	mu        sync.Mutex
-	ln        net.Listener
+	listeners map[string]net.Listener // by target id
+	targets   []ConnectTarget
 	sess      tunnel.Session // current live session, nil while disconnected
 	shareID   string
 	expiresAt time.Time
 	joined    bool // ever joined; after that an unknown share is a retry, not a fatal
 	conns     map[net.Conn]struct{}
+	closed    bool
 	wg        sync.WaitGroup
+
+	openConns  atomic.Int64
+	totalConns atomic.Int64
+	bytesUp    atomic.Int64
+	bytesDown  atomic.Int64
 }
 
 func NewConnector(cfg ConnectConfig) *Connector {
@@ -95,17 +140,29 @@ func NewConnector(cfg ConnectConfig) *Connector {
 	if id == "" {
 		id = randomHex(16)
 	}
-	return &Connector{cfg: cfg, instanceID: id, conns: make(map[net.Conn]struct{})}
+	return &Connector{cfg: cfg, instanceID: id, conns: make(map[net.Conn]struct{}), listeners: make(map[string]net.Listener)}
 }
 
-// ListenAddr returns the local address once the listener is open, else "".
-func (c *Connector) ListenAddr() string {
+// Targets returns the targets as served locally once joined.
+func (c *Connector) Targets() []ConnectTarget {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.ln == nil {
-		return ""
+	return append([]ConnectTarget(nil), c.targets...)
+}
+
+// Stats snapshots local activity for a status line.
+func (c *Connector) Stats() ConnectStats {
+	c.mu.Lock()
+	expires, connected := c.expiresAt, c.sess != nil
+	c.mu.Unlock()
+	return ConnectStats{
+		OpenConns:  int(c.openConns.Load()),
+		TotalConns: c.totalConns.Load(),
+		BytesUp:    c.bytesUp.Load(),
+		BytesDown:  c.bytesDown.Load(),
+		ExpiresAt:  expires,
+		Connected:  connected,
 	}
-	return c.ln.Addr().String()
 }
 
 func (c *Connector) emit(ev ConnectEvent) {
@@ -130,10 +187,11 @@ func (c *Connector) dialConfig() Config {
 
 // Run connects, serves local connections, and reconnects on transient
 // failures until ctx ends, the share closes (ErrShareClosed), the edge
-// rejects this connector (ErrShareRejected) or the link is bad (ErrBadToken).
+// rejects this connector (ErrShareRejected, ErrPassphraseRequired) or the
+// link is bad (ErrBadToken).
 func (c *Connector) Run(ctx context.Context) error {
 	bo := newBackoff(connectReconnectBase, connectReconnectCap)
-	defer c.closeListener()
+	defer c.closeListeners()
 
 	first := true
 	for {
@@ -151,13 +209,13 @@ func (c *Connector) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		if errors.Is(err, errFatalHandshake) || errors.Is(err, ErrShareClosed) || errors.Is(err, ErrShareRejected) {
+		if errors.Is(err, errFatalHandshake) || errors.Is(err, ErrShareClosed) || errors.Is(err, ErrShareRejected) || errors.Is(err, ErrPassphraseRequired) {
 			c.emit(ConnectEvent{State: StateOffline, Err: err.Error(), Reason: closeReason(err)})
 			return err
 		}
 		if c.expired() {
 			c.emit(ConnectEvent{State: StateOffline, Err: ErrShareClosed.Error(), Reason: proto.ShareReasonExpired})
-			return fmt.Errorf("%w: expired", ErrShareClosed)
+			return fmt.Errorf("%w: %w", ErrShareClosed, &shareClosedErr{reason: proto.ShareReasonExpired})
 		}
 		if err != nil {
 			slog.Warn("connector: connection lost, will reconnect", "err", err)
@@ -177,6 +235,10 @@ func (c *Connector) Run(ctx context.Context) error {
 type shareClosedErr struct{ reason string }
 
 func (e *shareClosedErr) Error() string { return "share closed: " + e.reason }
+
+// CloseReason extracts the share-close reason from an error returned by
+// Run, or "".
+func CloseReason(err error) string { return closeReason(err) }
 
 func closeReason(err error) string {
 	var sc *shareClosedErr
@@ -206,14 +268,14 @@ func (c *Connector) runOnce(ctx context.Context, bo *backoff) error {
 
 	idgen := proto.NewAgentIDGen()
 	release := guardHandshake(ctx, sess)
-	ok, err := c.handshake(sess, idgen)
+	ok, err := c.handshake(ctx, sess, idgen)
 	release()
 	if err != nil {
 		return err
 	}
 	bo.reset()
 
-	ln, err := c.ensureListener(ok)
+	targets, err := c.ensureListeners(ok)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errFatalHandshake, err)
 	}
@@ -225,8 +287,7 @@ func (c *Connector) runOnce(ctx context.Context, bo *backoff) error {
 		ShareID:     ok.ShareID,
 		ConnectorID: ok.ConnectorID,
 		Label:       ok.Label,
-		Preset:      ok.Preset,
-		ListenAddr:  ln.Addr().String(),
+		Targets:     targets,
 		ExpiresAt:   time.UnixMilli(ok.ExpiresAtMS),
 	})
 
@@ -255,7 +316,7 @@ func (c *Connector) runOnce(ctx context.Context, bo *backoff) error {
 	}
 }
 
-func (c *Connector) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.ConnectOK, error) {
+func (c *Connector) handshake(ctx context.Context, sess tunnel.Session, idgen *proto.IDGen) (proto.ConnectOK, error) {
 	ctrl := sess.Control()
 
 	authID := idgen.Next()
@@ -302,19 +363,45 @@ func (c *Connector) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.Co
 		return proto.ConnectOK{}, fmt.Errorf("connector: unexpected reply %q to auth", msg.Type)
 	}
 
+	// The connect reply may wait on the sharer's approval, which is longer
+	// than the handshake guard allows.
+	_ = ctrl.SetDeadline(time.Now().Add(approvalWait))
 	connectID := idgen.Next()
-	if err := ctrl.Write(proto.TypeConnect, connectID, proto.Connect{}); err != nil {
+	if err := ctrl.Write(proto.TypeConnect, connectID, proto.Connect{Name: c.cfg.Name, Passphrase: c.cfg.Passphrase}); err != nil {
 		return proto.ConnectOK{}, err
 	}
-	msg, err = ctrl.Read()
-	if err != nil {
-		return proto.ConnectOK{}, err
+	type readResult struct {
+		msg proto.Msg
+		err error
 	}
+	replyCh := make(chan readResult, 1)
+	go func() {
+		m, err := ctrl.Read()
+		replyCh <- readResult{m, err}
+	}()
+	notice := time.NewTimer(approvalNotice)
+	defer notice.Stop()
+	var rr readResult
+	for rr.msg.Type == "" && rr.err == nil {
+		select {
+		case rr = <-replyCh:
+		case <-notice.C:
+			c.emit(ConnectEvent{State: StateAwaitingApproval})
+		case <-ctx.Done():
+			return proto.ConnectOK{}, ctx.Err()
+		}
+	}
+	if rr.err != nil {
+		return proto.ConnectOK{}, rr.err
+	}
+	msg = rr.msg
 	switch msg.Type {
 	case proto.TypeConnectErr:
 		e, _ := proto.Decode[proto.ConnectErr](msg)
 		switch e.Code {
-		case proto.CodeForbiddenCIDR, proto.CodeShareLocked:
+		case proto.CodeBadPassphrase:
+			return proto.ConnectOK{}, fmt.Errorf("%w: %s", ErrPassphraseRequired, e.Message)
+		case proto.CodeForbiddenCIDR, proto.CodeShareLocked, proto.CodeShareUsesExhausted, proto.CodeApprovalDenied, proto.CodeApprovalTimeout:
 			return proto.ConnectOK{}, fmt.Errorf("%w: %s: %s", ErrShareRejected, e.Code, e.Message)
 		case proto.CodeShareFull:
 			return proto.ConnectOK{}, fmt.Errorf("connector: %s: %s", e.Code, e.Message)
@@ -351,44 +438,65 @@ func (c *Connector) setSession(sess tunnel.Session) {
 	c.mu.Unlock()
 }
 
-// ensureListener opens the loopback listener on the first successful join
-// and keeps it across reconnects so the local address never changes. One
-// accept loop serves it for the connector's lifetime; each accepted
-// connection relays through whichever session is live at that moment.
-func (c *Connector) ensureListener(ok proto.ConnectOK) (net.Listener, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.ln != nil {
-		return c.ln, nil
+// portFor picks the local port for a target: an explicit override by target
+// id or preset, the first-target override, the preset's port, or 0 for any.
+func (c *Connector) portFor(i int, t proto.ShareTarget) (port int, explicit bool) {
+	if p, ok := c.cfg.Ports[t.ID]; ok {
+		return p, true
 	}
-	ln, err := c.listenLocked(ok)
-	if err != nil {
-		return nil, err
+	if p, ok := c.cfg.Ports[t.Preset]; ok {
+		return p, true
 	}
-	c.ln = ln
-	c.wg.Add(1)
-	go func() {
-		defer c.wg.Done()
-		c.acceptLoop(ln)
-	}()
-	return ln, nil
+	if i == 0 && c.cfg.ListenPort != 0 {
+		return c.cfg.ListenPort, true
+	}
+	return t.DefaultPort, false
 }
 
-func (c *Connector) listenLocked(ok proto.ConnectOK) (net.Listener, error) {
+// ensureListeners opens one loopback listener per target on the first
+// successful join and keeps them across reconnects so local addresses never
+// change. One accept loop serves each; every accepted connection relays
+// through whichever session is live at that moment.
+func (c *Connector) ensureListeners(ok proto.ConnectOK) ([]ConnectTarget, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, errors.New("connector: closed")
+	}
 	host := c.cfg.ListenHost
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	port := c.cfg.ListenPort
-	if port == 0 {
-		port = ok.DefaultPort
+	var out []ConnectTarget
+	for i, t := range ok.Targets {
+		ln, have := c.listeners[t.ID]
+		if !have {
+			port, explicit := c.portFor(i, t)
+			var err error
+			ln, err = listenLoopback(host, port, explicit)
+			if err != nil {
+				return nil, err
+			}
+			c.listeners[t.ID] = ln
+			c.wg.Add(1)
+			go func(id string, ln net.Listener) {
+				defer c.wg.Done()
+				c.acceptLoop(id, ln)
+			}(t.ID, ln)
+		}
+		out = append(out, ConnectTarget{ShareTarget: t, ListenAddr: ln.Addr().String()})
 	}
+	c.targets = out
+	return out, nil
+}
+
+func listenLoopback(host string, port int, explicit bool) (net.Listener, error) {
 	if port != 0 {
 		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 		if err == nil {
 			return ln, nil
 		}
-		if c.cfg.ListenPort != 0 {
+		if explicit {
 			return nil, fmt.Errorf("connector: listen on %s:%d: %w", host, port, err)
 		}
 		slog.Warn("connector: default port busy, picking a free one", "port", port, "err", err)
@@ -400,12 +508,13 @@ func (c *Connector) listenLocked(ok proto.ConnectOK) (net.Listener, error) {
 	return ln, nil
 }
 
-func (c *Connector) closeListener() {
+func (c *Connector) closeListeners() {
 	c.mu.Lock()
-	ln := c.ln
-	c.ln = nil
+	c.closed = true
+	lns := c.listeners
+	c.listeners = make(map[string]net.Listener)
 	c.mu.Unlock()
-	if ln != nil {
+	for _, ln := range lns {
 		ln.Close()
 	}
 	c.closeConns()
@@ -424,7 +533,7 @@ func (c *Connector) closeConns() {
 	}
 }
 
-func (c *Connector) acceptLoop(ln net.Listener) {
+func (c *Connector) acceptLoop(targetID string, ln net.Listener) {
 	for {
 		local, err := ln.Accept()
 		if err != nil {
@@ -439,7 +548,7 @@ func (c *Connector) acceptLoop(ln net.Listener) {
 			return
 		}
 		c.mu.Lock()
-		if c.ln == nil {
+		if c.closed {
 			c.mu.Unlock()
 			local.Close()
 			return
@@ -457,19 +566,33 @@ func (c *Connector) acceptLoop(ln net.Listener) {
 		}
 		go func() {
 			defer c.wg.Done()
-			c.relay(sess, shareID, local)
+			c.relay(sess, shareID, targetID, local)
 		}()
 	}
 }
 
-func (c *Connector) relay(sess tunnel.Session, shareID string, local net.Conn) {
+type countingWriter struct {
+	w io.Writer
+	n *atomic.Int64
+}
+
+func (cw countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.n.Add(int64(n))
+	return n, err
+}
+
+func (c *Connector) relay(sess tunnel.Session, shareID, targetID string, local net.Conn) {
 	c.mu.Lock()
 	c.conns[local] = struct{}{}
 	c.mu.Unlock()
+	c.openConns.Add(1)
+	c.totalConns.Add(1)
 	defer func() {
 		c.mu.Lock()
 		delete(c.conns, local)
 		c.mu.Unlock()
+		c.openConns.Add(-1)
 		local.Close()
 	}()
 
@@ -478,6 +601,7 @@ func (c *Connector) relay(sess tunnel.Session, shareID string, local net.Conn) {
 		Kind:       proto.KindShare,
 		Host:       shareID,
 		ShareID:    shareID,
+		Target:     targetID,
 		ReqID:      randomHex(8),
 		ClientAddr: local.RemoteAddr().String(),
 	})
@@ -501,12 +625,12 @@ func (c *Connector) relay(sess tunnel.Session, shareID string, local net.Conn) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		io.Copy(stream, local)
+		io.Copy(countingWriter{stream, &c.bytesUp}, local)
 		halfCloseWrite(stream)
 	}()
 	go func() {
 		defer wg.Done()
-		io.Copy(local, stream)
+		io.Copy(countingWriter{local, &c.bytesDown}, stream)
 		halfCloseWrite(local)
 	}()
 	wg.Wait()
@@ -560,11 +684,18 @@ func (c *Connector) controlLoop(sess tunnel.Session, idgen *proto.IDGen) error {
 			case proto.TypePong:
 				awaitingPong = false
 				misses = 0
+			case proto.TypeShareUpdated:
+				su, _ := proto.Decode[proto.ShareUpdated](m)
+				until := time.UnixMilli(su.ExpiresAtMS)
+				c.mu.Lock()
+				c.expiresAt = until
+				c.mu.Unlock()
+				c.emit(ConnectEvent{State: StateUpdated, ShareID: su.ShareID, ExpiresAt: until})
 			case proto.TypeShareClosed:
 				sc, _ := proto.Decode[proto.ShareClosed](m)
 				slog.Warn("connector: share closed", "share_id", sc.ShareID, "reason", sc.Reason)
 				switch sc.Reason {
-				case proto.ShareReasonExpired, proto.ShareReasonRevoked:
+				case proto.ShareReasonExpired, proto.ShareReasonRevoked, proto.ShareReasonIdle, proto.ShareReasonKicked:
 					return fmt.Errorf("%w: %w", ErrShareClosed, &shareClosedErr{reason: sc.Reason})
 				}
 				return &shareClosedErr{reason: sc.Reason}

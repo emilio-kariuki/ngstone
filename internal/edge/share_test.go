@@ -21,10 +21,22 @@ func testShareReq(secret string, ttl time.Duration) proto.Share {
 		Kind:         proto.KindTCP,
 		SecretSHA256: hex.EncodeToString(sum[:]),
 		Label:        "staging replica",
-		Preset:       "postgres",
-		DefaultPort:  5432,
+		Targets:      []proto.ShareTarget{{ID: "t1", Preset: "postgres", DefaultPort: 5432}},
 		ExpiresAtMS:  time.Now().Add(ttl).UnixMilli(),
 	}
+}
+
+// connectFor admits and joins as under name, the way handleConnect does
+// for a share without approval.
+func connectFor(r *shareRegistry, sh *share, as *AgentSession, name string) (string, error) {
+	id, err := r.admit(sh, as, proto.Connect{Name: name}, nil)
+	if err != nil {
+		return "", err
+	}
+	if err := r.join(sh, as, id); err != nil {
+		return "", err
+	}
+	return id, nil
 }
 
 func testSession(instanceID string, remote string) *AgentSession {
@@ -51,14 +63,19 @@ func TestShareValidateRejectsBadRequests(t *testing.T) {
 		"non-hex hash":       func(req *proto.Share) { req.SecretSHA256 = "zz" + req.SecretSHA256[2:] },
 		"past expiry":        func(req *proto.Share) { req.ExpiresAtMS = now.Add(-time.Second).UnixMilli() },
 		"zero expiry":        func(req *proto.Share) { req.ExpiresAtMS = 0 },
-		"bad preset":         func(req *proto.Share) { req.Preset = "mongo" },
+		"bad preset":         func(req *proto.Share) { req.Targets[0].Preset = "mongo" },
+		"no targets":         func(req *proto.Share) { req.Targets = nil },
+		"bad target id":      func(req *proto.Share) { req.Targets[0].ID = "T 1" },
+		"short idle":         func(req *proto.Share) { req.IdleTimeoutMS = 1000 },
+		"bad pass hash":      func(req *proto.Share) { req.PassphraseSHA256 = "zz" },
 		"control char label": func(req *proto.Share) { req.Label = "a\x00b" },
 		"huge max_conns":     func(req *proto.Share) { req.MaxConns = maxShareMaxConns + 1 },
 		"bad cidr":           func(req *proto.Share) { req.AllowCIDRs = []string{"not-a-cidr"} },
-		"port out of range":  func(req *proto.Share) { req.DefaultPort = 70000 },
+		"port out of range":  func(req *proto.Share) { req.Targets[0].DefaultPort = 70000 },
 	}
 	for name, mutate := range cases {
 		req := good
+		req.Targets = append([]proto.ShareTarget(nil), good.Targets...)
 		mutate(&req)
 		if _, err := r.validateShare(req, now); err == nil {
 			t.Errorf("%s: expected validation error", name)
@@ -144,10 +161,10 @@ func TestShareLookupIgnoresClosedAndExpired(t *testing.T) {
 	}
 	r.now = time.Now
 
-	if _, _, ok := r.close(sh, proto.ShareReasonRevoked); !ok {
+	if _, _, _, ok := r.close(sh, proto.ShareReasonRevoked); !ok {
 		t.Fatalf("first close should report ok")
 	}
-	if _, _, ok := r.close(sh, proto.ShareReasonRevoked); ok {
+	if _, _, _, ok := r.close(sh, proto.ShareReasonRevoked); ok {
 		t.Fatalf("second close must be a no-op")
 	}
 	if _, ok := r.lookup("s"); ok {
@@ -174,21 +191,21 @@ func TestShareConnectPolicy(t *testing.T) {
 	}
 
 	outside := testSession("c-out", "198.51.100.7:1000")
-	if _, err := r.connect(sh, outside); !errors.Is(err, errShareForbidden) {
+	if _, err := connectFor(r, sh, outside, ""); !errors.Is(err, errShareForbidden) {
 		t.Fatalf("outside allow list: err = %v, want errShareForbidden", err)
 	}
 
 	first := testSession("c-1", "203.0.113.9:1000")
-	id, err := r.connect(sh, first)
+	id, err := connectFor(r, sh, first, "")
 	if err != nil || id != "c1" {
 		t.Fatalf("first connector: id=%q err=%v", id, err)
 	}
-	if again, err := r.connect(sh, first); err != nil || again != id {
+	if again, err := connectFor(r, sh, first, ""); err != nil || again != id {
 		t.Fatalf("repeat connect must be idempotent: id=%q err=%v", again, err)
 	}
 
 	second := testSession("c-2", "203.0.113.10:1000")
-	if _, err := r.connect(sh, second); !errors.Is(err, errShareLocked) {
+	if _, err := connectFor(r, sh, second, ""); !errors.Is(err, errShareLocked) {
 		t.Fatalf("single-use lock: err = %v, want errShareLocked", err)
 	}
 
@@ -196,14 +213,146 @@ func TestShareConnectPolicy(t *testing.T) {
 	// with max_connectors=1 it is the connector count that refuses it until
 	// the old session leaves.
 	firstAgain := testSession("c-1", "203.0.113.9:2000")
-	if _, err := r.connect(sh, firstAgain); !errors.Is(err, errShareFull) {
+	if _, err := connectFor(r, sh, firstAgain, ""); !errors.Is(err, errShareFull) {
 		t.Fatalf("second session of the locked instance while the first is live: err = %v, want errShareFull", err)
 	}
 	if _, ok := r.disconnect(sh, first); !ok {
 		t.Fatalf("disconnect should find the member")
 	}
-	if _, err := r.connect(sh, firstAgain); err != nil {
+	if _, err := connectFor(r, sh, firstAgain, ""); err != nil {
 		t.Fatalf("locked instance after the old session left: %v", err)
+	}
+}
+
+func TestShareNamesPassphraseAndUses(t *testing.T) {
+	r := newShareRegistry(time.Hour)
+	owner := testSession("inst-a", "")
+	req := testShareReq("s", time.Minute)
+	req.MaxUses = 2
+	req.MaxConnectors = 4
+	req.PassphraseSHA256 = proto.PassphraseDigest(req.SecretSHA256, "open sesame")
+	sh, err := r.validateShare(req, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.register(owner, sh); err != nil {
+		t.Fatal(err)
+	}
+
+	a := testSession("a", "203.0.113.1:1")
+	if _, err := r.admit(sh, a, proto.Connect{Name: "alice"}, nil); !errors.Is(err, errBadPassphrase) {
+		t.Fatalf("missing passphrase: err = %v, want errBadPassphrase", err)
+	}
+	if _, err := r.admit(sh, a, proto.Connect{Name: "alice", Passphrase: "wrong"}, nil); !errors.Is(err, errBadPassphrase) {
+		t.Fatalf("wrong passphrase: err = %v, want errBadPassphrase", err)
+	}
+	id, err := r.admit(sh, a, proto.Connect{Name: "alice", Passphrase: "open sesame"}, nil)
+	if err != nil || id != "alice" {
+		t.Fatalf("named connector: id=%q err=%v", id, err)
+	}
+	if err := r.join(sh, a, id); err != nil {
+		t.Fatal(err)
+	}
+
+	b := testSession("b", "203.0.113.2:1")
+	id2, err := r.admit(sh, b, proto.Connect{Name: "alice", Passphrase: "open sesame"}, nil)
+	if err != nil || id2 != "alice-2" {
+		t.Fatalf("duplicate name should be suffixed: id=%q err=%v", id2, err)
+	}
+	if err := r.join(sh, b, id2); err != nil {
+		t.Fatal(err)
+	}
+
+	c := testSession("c", "203.0.113.3:1")
+	if _, err := r.admit(sh, c, proto.Connect{Name: "bad name!", Passphrase: "open sesame"}, nil); !errors.Is(err, errUsesExhausted) {
+		t.Fatalf("third use: err = %v, want errUsesExhausted", err)
+	}
+	if got := r.list(owner); len(got) != 1 || got[0].Uses != 2 || len(got[0].Connectors) != 2 || !got[0].Passphrase || !got[0].Mine {
+		t.Fatalf("list = %+v", got)
+	}
+	if got := r.list(a); got[0].Mine {
+		t.Fatalf("list from a non-owner must not claim the share")
+	}
+}
+
+func TestShareAdmitReservesPendingNames(t *testing.T) {
+	r := newShareRegistry(time.Hour)
+	owner := testSession("inst-a", "")
+	req := testShareReq("s", time.Minute)
+	req.Approve = true
+	sh, err := r.validateShare(req, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.register(owner, sh); err != nil {
+		t.Fatal(err)
+	}
+	p1 := &pendingConnect{session: testSession("a", "203.0.113.1:1"), answer: make(chan bool, 1)}
+	id1, err := r.admit(sh, p1.session, proto.Connect{Name: "alice"}, p1)
+	if err != nil || id1 != "alice" || p1.id != "alice" {
+		t.Fatalf("first pending: id=%q p.id=%q err=%v", id1, p1.id, err)
+	}
+	p2 := &pendingConnect{session: testSession("b", "203.0.113.2:1"), answer: make(chan bool, 1)}
+	id2, err := r.admit(sh, p2.session, proto.Connect{Name: "alice"}, p2)
+	if err != nil || id2 != "alice-2" {
+		t.Fatalf("second pending with the same name: id=%q err=%v", id2, err)
+	}
+	if !r.resolvePending(sh, "alice", true) {
+		t.Fatalf("pending alice should resolve")
+	}
+	if r.resolvePending(sh, "alice", true) {
+		t.Fatalf("resolving twice should find nothing")
+	}
+	if got := <-p1.answer; !got {
+		t.Fatalf("approval not delivered")
+	}
+	if err := r.join(sh, p1.session, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if !r.idleNow(sh) {
+		t.Fatalf("share with no relayed connection should be idle")
+	}
+}
+
+func TestShareExtendAndIdle(t *testing.T) {
+	r := newShareRegistry(time.Hour)
+	idled := make(chan *share, 1)
+	r.onIdle = func(sh *share) { idled <- sh }
+	owner := testSession("inst-a", "")
+	req := testShareReq("s", time.Minute)
+	req.IdleTimeoutMS = minShareIdleTimeout.Milliseconds()
+	sh, err := r.validateShare(req, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Shorten the idle timer under test; validation already enforced the
+	// floor on the request.
+	sh.policy.idleTimeout = 100 * time.Millisecond
+	if _, err := r.register(owner, sh); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := r.extend(sh, time.Now().Add(2*time.Hour)); !errors.Is(err, errShareTTLTooLong) {
+		t.Fatalf("extend beyond max ttl: err = %v", err)
+	}
+	if _, err := r.extend(sh, time.Now().Add(-time.Second)); err == nil {
+		t.Fatalf("extend into the past should fail")
+	}
+	later := time.Now().Add(30 * time.Minute)
+	if _, err := r.extend(sh, later); err != nil {
+		t.Fatalf("extend: %v", err)
+	}
+	if !sh.expiresAt.Equal(later) {
+		t.Fatalf("expiresAt = %v, want %v", sh.expiresAt, later)
+	}
+
+	select {
+	case got := <-idled:
+		if got != sh {
+			t.Fatalf("idle callback got a different share")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("idle callback did not fire for a share with no connections")
 	}
 }
 
@@ -376,7 +525,7 @@ func TestShareRelayEndToEnd(t *testing.T) {
 	}
 	connOKMsg := readType(t, connClient.Control(), proto.TypeConnectOK)
 	connOK, _ := proto.Decode[proto.ConnectOK](connOKMsg)
-	if connOK.ShareID != shareOK.ShareID || connOK.Label != "staging replica" || connOK.Preset != "postgres" || connOK.DefaultPort != 5432 || connOK.ConnectorID != "c1" {
+	if connOK.ShareID != shareOK.ShareID || connOK.Label != "staging replica" || len(connOK.Targets) != 1 || connOK.Targets[0].Preset != "postgres" || connOK.Targets[0].DefaultPort != 5432 || connOK.ConnectorID != "c1" {
 		t.Fatalf("connect_ok = %+v", connOK)
 	}
 	joined := readEvent(t, sharerClient.Control(), proto.ShareEventConnectorJoined)
@@ -391,7 +540,7 @@ func TestShareRelayEndToEnd(t *testing.T) {
 	}
 	select {
 	case pre := <-gotPreamble:
-		if pre.Kind != proto.KindTCP || pre.ShareID != shareOK.ShareID || pre.ClientAddr != "203.0.113.9:40000" || pre.ReqID != "r1" {
+		if pre.Kind != proto.KindTCP || pre.ShareID != shareOK.ShareID || pre.ClientAddr != "203.0.113.9:40000" || pre.ReqID != "r1" || pre.Target != "t1" {
 			t.Fatalf("sharer preamble = %+v", pre)
 		}
 	case <-time.After(5 * time.Second):
