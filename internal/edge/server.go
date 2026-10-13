@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caddyserver/certmagic"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -35,10 +36,10 @@ type Config struct {
 	TCPPortRange string
 	TCPBindAddr  string
 
-	CertStoragePath    string
-	ACMEEmail          string
-	ACMECA             string
-	CloudflareAPIToken string
+	CertStoragePath string
+	ACMEEmail       string
+	ACMECA          string
+	DNSProvider     certmagic.DNSProvider
 
 	Limits LimitsConfig
 }
@@ -143,11 +144,11 @@ func (s *Server) Run(ctx context.Context) error {
 
 	if !s.cfg.Insecure {
 		mgr, err := NewTLSManager(TLSConfig{
-			Domain:             s.cfg.Domain,
-			CloudflareAPIToken: s.cfg.CloudflareAPIToken,
-			ACMEEmail:          s.cfg.ACMEEmail,
-			ACMECA:             s.cfg.ACMECA,
-			StoragePath:        s.cfg.CertStoragePath,
+			Domain:      s.cfg.Domain,
+			DNSProvider: s.cfg.DNSProvider,
+			ACMEEmail:   s.cfg.ACMEEmail,
+			ACMECA:      s.cfg.ACMECA,
+			StoragePath: s.cfg.CertStoragePath,
 		})
 		if err != nil {
 			return fmt.Errorf("edge: tls setup: %w", err)

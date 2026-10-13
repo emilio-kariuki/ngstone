@@ -28,10 +28,10 @@ func TestHandleHealthzInsecureModeReportsOK(t *testing.T) {
 
 func TestHandleHealthzReportsUnloadableCertsAsUnhealthy(t *testing.T) {
 	mgr, err := NewTLSManager(TLSConfig{
-		Domain:             "healthz-check.invalid",
-		CloudflareAPIToken: "unused-in-this-test",
-		ACMEEmail:          "ops@healthz-check.invalid",
-		StoragePath:        t.TempDir(),
+		Domain:      "healthz-check.invalid",
+		DNSProvider: fakeDNSProvider{},
+		ACMEEmail:   "ops@healthz-check.invalid",
+		StoragePath: t.TempDir(),
 	})
 	if err != nil {
 		t.Fatalf("NewTLSManager: %v", err)
