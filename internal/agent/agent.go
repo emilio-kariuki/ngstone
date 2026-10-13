@@ -121,8 +121,10 @@ type Agent struct {
 	target    *url.URL
 	targetErr error
 
-	mu     sync.Mutex
-	status Status
+	mu          sync.Mutex
+	status      Status
+	control     *liveControl      // live control stream in sharer mode, for Approve/Kick/Extend
+	pendingMgmt map[uint64]string // ids of management requests awaiting a reply
 }
 
 func New(cfg Config) *Agent {
@@ -289,6 +291,11 @@ func (a *Agent) runOnce(ctx context.Context, bo *backoff) error {
 	serveErrCh := make(chan error, 1)
 	go func() { serveErrCh <- srv.Serve(ln) }()
 
+	if a.shareMode() {
+		a.setControl(&liveControl{ctrl: sess.Control(), idgen: idgen})
+		defer a.setControl(nil)
+	}
+
 	ctrlErrCh := make(chan error, 1)
 	go func() { ctrlErrCh <- a.controlLoop(sess, idgen) }()
 
@@ -343,6 +350,27 @@ func (a *Agent) advertisedURL(b proto.BindOK) string {
 }
 
 func (a *Agent) newServer() (tunnelServer, error) {
+	if a.shareMode() {
+		srv := newTCPServer(a.cfg.TargetURL)
+		spec := a.cfg.Share
+		srv.resolve = func(stream net.Conn) (string, error) {
+			pc, ok := stream.(preambleConn)
+			if !ok {
+				return "", errors.New("agent: share stream without a preamble")
+			}
+			pre := pc.Preamble()
+			target := pre.Target
+			if target == "" && len(spec.Targets) == 1 {
+				target = spec.Targets[0].ID
+			}
+			addr, ok := spec.addrFor(target)
+			if !ok {
+				return "", fmt.Errorf("agent: share stream for unknown target %q", pre.Target)
+			}
+			return addr, nil
+		}
+		return srv, nil
+	}
 	if a.bindKind() == proto.KindTCP {
 		return newTCPServer(a.cfg.TargetURL), nil
 	}
@@ -576,13 +604,31 @@ func (a *Agent) controlLoop(sess tunnel.Session, idgen *proto.IDGen) error {
 				}
 				a.deliverShareEvent(ev)
 				if ev.Event == proto.ShareEventClosed {
-					if ev.Reason == proto.ShareReasonExpired {
+					switch ev.Reason {
+					case proto.ShareReasonExpired:
 						return fmt.Errorf("%w: %w", errFatalHandshake, ErrShareExpired)
+					case proto.ShareReasonIdle:
+						return fmt.Errorf("%w: %w", errFatalHandshake, ErrShareIdle)
+					case proto.ShareReasonRevoked:
+						return fmt.Errorf("%w: %w", errFatalHandshake, ErrShareRevoked)
 					}
 					return fmt.Errorf("agent: share closed by edge: %s", ev.Reason)
 				}
+			case proto.TypeApproveOK, proto.TypeKickOK, proto.TypeShareOK, proto.TypeShareErr:
+				// Replies to management requests sent from the sharer's
+				// terminal; failures are reported there, not fatal here.
+				if _, ok := a.isMgmtReply(m.ID); ok {
+					if m.Type == proto.TypeShareErr {
+						e, _ := proto.Decode[proto.ShareErr](m)
+						a.deliverShareEvent(proto.ShareEvent{Event: "error", AtMS: time.Now().UnixMilli(), Reason: e.Code + ": " + e.Message})
+					}
+				}
 			case proto.TypeError:
 				e, _ := proto.Decode[proto.Error](m)
+				if _, ok := a.isMgmtReply(m.ID); ok {
+					a.deliverShareEvent(proto.ShareEvent{Event: "error", AtMS: time.Now().UnixMilli(), Reason: e.Code + ": " + e.Message})
+					continue
+				}
 				return fmt.Errorf("agent: edge protocol error: %s: %s", e.Code, e.Message)
 			default:
 				slog.Warn("agent: unexpected control message", "type", m.Type)

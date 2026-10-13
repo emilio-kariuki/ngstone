@@ -475,7 +475,33 @@ func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 					ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeForbidden, Message: "connect requires a share-link session"})
 					return
 				}
-				s.handleConnect(as, ctrl, m.ID)
+				req, _ := proto.Decode[proto.Connect](m) // an empty payload is a plain connect
+				s.handleConnect(as, ctrl, m.ID, req)
+			case proto.TypeShareUpdate:
+				req, err := proto.Decode[proto.ShareUpdate](m)
+				if err != nil {
+					ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeMalformed, Message: "malformed share_update"})
+					return
+				}
+				s.handleShareUpdate(as, ctrl, m.ID, req)
+			case proto.TypeKick:
+				req, err := proto.Decode[proto.Kick](m)
+				if err != nil {
+					ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeMalformed, Message: "malformed kick"})
+					return
+				}
+				s.handleKick(as, ctrl, m.ID, req)
+			case proto.TypeApprove:
+				req, err := proto.Decode[proto.Approve](m)
+				if err != nil {
+					ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeMalformed, Message: "malformed approve"})
+					return
+				}
+				s.handleApprove(as, ctrl, m.ID, req)
+			case proto.TypeListShares:
+				s.handleListShares(as, ctrl, m.ID)
+			case proto.TypeWatchShares:
+				s.handleWatchShares(as, ctrl, m.ID)
 			case proto.TypeUnbind:
 				ub, err := proto.Decode[proto.Unbind](m)
 				if err != nil {

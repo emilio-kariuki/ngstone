@@ -267,11 +267,15 @@ type Pong struct { TS int64 \`json:"ts_unix_ms"\` } // echoes Ping.TS`}
         <code>token</code>, <code>AuthOK.scope</code> (
         <code>operator</code> or <code>connector</code>), the{" "}
         <code>share</code>/<code>share_ok</code>/<code>share_err</code>,{" "}
-        <code>unshare</code>, <code>connect</code>/<code>connect_ok</code>/
-        <code>connect_err</code>, <code>share_event</code> and{" "}
-        <code>share_closed</code> messages, a <code>share</code> stream kind
-        and an optional <code>share_id</code> on the stream preamble. A
-        connector-scoped session may send only <code>connect</code>,{" "}
+        <code>unshare</code>, <code>share_update</code>, <code>kick</code>,{" "}
+        <code>approve</code>, <code>list_shares</code>,{" "}
+        <code>watch_shares</code>, <code>connect</code>/
+        <code>connect_ok</code>/<code>connect_err</code>,{" "}
+        <code>share_event</code>, <code>share_closed</code> and{" "}
+        <code>share_updated</code> messages, a <code>share</code> stream
+        kind and optional <code>share_id</code> and <code>target</code>{" "}
+        fields on the stream preamble. A connector-scoped session may send
+        only <code>connect</code>,{" "}
         <code>ping</code>, <code>pong</code> and <code>goodbye</code>;
         anything else is answered with <code>forbidden</code> and the
         session closes. The full message set is in{" "}

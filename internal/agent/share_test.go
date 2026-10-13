@@ -76,7 +76,7 @@ func TestFormatShareEvent(t *testing.T) {
 		ev   proto.ShareEvent
 		want []string
 	}{
-		{proto.ShareEvent{Event: proto.ShareEventConnectorJoined, AtMS: at, ConnectorID: "c1", ClientAddr: "203.0.113.9:1234"}, []string{"14:05:11", "connector joined", "203.0.113.9", "id c1"}},
+		{proto.ShareEvent{Event: proto.ShareEventConnectorJoined, AtMS: at, ConnectorID: "c1", ClientAddr: "203.0.113.9:1234"}, []string{"14:05:11", "connector joined", "203.0.113.9", "c1"}},
 		{proto.ShareEvent{Event: proto.ShareEventConnOpen, AtMS: at, ConnectorID: "c1", ConnID: 3, ClientAddr: "203.0.113.9:1234"}, []string{"conn #3", "open", "via c1"}},
 		{proto.ShareEvent{Event: proto.ShareEventConnClose, AtMS: at, ConnID: 3, DurationMS: 247_000, BytesUp: 12 << 20, BytesDown: 512}, []string{"conn #3", "closed", "4m07s", "12.0 MiB up", "512 B down"}},
 		{proto.ShareEvent{Event: proto.ShareEventConnRejected, AtMS: at, ClientAddr: "198.51.100.1:5", Reason: "max_conns"}, []string{"rejected", "198.51.100.1", "max_conns"}},
