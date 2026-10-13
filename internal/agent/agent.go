@@ -108,6 +108,10 @@ type Agent struct {
 
 	mu     sync.Mutex
 	status Status
+	// tcpPort is the edge port from the last successful TCP bind when the
+	// user did not pass --remote-port. Reconnects request it again so the
+	// advertised tcp://host:port survives a reconnect.
+	tcpPort int
 }
 
 func New(cfg Config) *Agent {
@@ -423,11 +427,14 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 
 	ctrl := sess.Control()
 
+	// Takeover is sent for every kind: the edge authorizes it by InstanceID,
+	// so a reconnect reclaims this process's own tunnel from a half-open
+	// zombie session instead of waiting for the edge to reap it.
 	bindMsg := proto.Bind{
 		Kind:       a.bindKind(),
 		Subdomain:  a.cfg.Subdomain,
 		RemotePort: a.cfg.RemotePort,
-		Takeover:   a.bindKind() == proto.KindHTTP,
+		Takeover:   true,
 		AllowCIDRs: a.cfg.AllowCIDRs,
 	}
 	if a.bindKind() == proto.KindHTTP {
@@ -437,17 +444,28 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		}
 	}
 
-	bindID := idgen.Next()
-	if err := ctrl.Write(proto.TypeBind, bindID, bindMsg); err != nil {
-		return proto.BindOK{}, err
+	rememberPort := a.bindKind() == proto.KindTCP && a.cfg.RemotePort == 0
+	if rememberPort {
+		bindMsg.RemotePort = a.rememberedTCPPort()
 	}
-	msg, err := ctrl.Read()
+
+	bindOK, bindErr, err := a.bind(ctrl, idgen, bindMsg)
 	if err != nil {
 		return proto.BindOK{}, err
 	}
-	switch msg.Type {
-	case proto.TypeBindErr:
-		e, _ := proto.Decode[proto.BindErr](msg)
+	if bindErr != nil && rememberPort && bindMsg.RemotePort != 0 && bindErr.Code == proto.CodePortUnavailable {
+		// The port we had before is gone (another tunnel holds it now).
+		// The user never asked for it, so take any free port rather than
+		// keep retrying for one the edge will not give back.
+		slog.Warn("agent: previous tcp port unavailable, binding a new one", "port", bindMsg.RemotePort)
+		a.setRememberedTCPPort(0)
+		bindMsg.RemotePort = 0
+		bindOK, bindErr, err = a.bind(ctrl, idgen, bindMsg)
+		if err != nil {
+			return proto.BindOK{}, err
+		}
+	}
+	if e := bindErr; e != nil {
 		if e.Code == proto.CodeInvalidSubdomain || e.Code == proto.CodeKindUnsupported || e.Code == proto.CodeInvalidAccess {
 			return proto.BindOK{}, fmt.Errorf("%w: bind failed: %s: %s", errFatalHandshake, e.Code, e.Message)
 		}
@@ -455,15 +473,48 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 			return proto.BindOK{}, fmt.Errorf("%w: bind failed: %s: %s", errFatalHandshake, e.Code, e.Message)
 		}
 		return proto.BindOK{}, fmt.Errorf("agent: bind failed: %s: %s", e.Code, e.Message)
+	}
+	if rememberPort {
+		a.setRememberedTCPPort(bindOK.Port)
+	}
+	return bindOK, nil
+}
+
+// bind sends one Bind and reads its reply. A BindErr from the edge comes
+// back as bindErr with a nil err; err is for transport and protocol failures.
+func (a *Agent) bind(ctrl *proto.Conn, idgen *proto.IDGen, bindMsg proto.Bind) (proto.BindOK, *proto.BindErr, error) {
+	if err := ctrl.Write(proto.TypeBind, idgen.Next(), bindMsg); err != nil {
+		return proto.BindOK{}, nil, err
+	}
+	msg, err := ctrl.Read()
+	if err != nil {
+		return proto.BindOK{}, nil, err
+	}
+	switch msg.Type {
+	case proto.TypeBindErr:
+		e, _ := proto.Decode[proto.BindErr](msg)
+		return proto.BindOK{}, &e, nil
 	case proto.TypeBindOK:
 		bindOK, err := proto.Decode[proto.BindOK](msg)
 		if err != nil {
-			return proto.BindOK{}, err
+			return proto.BindOK{}, nil, err
 		}
-		return bindOK, nil
+		return bindOK, nil, nil
 	default:
-		return proto.BindOK{}, fmt.Errorf("agent: unexpected reply %q to bind", msg.Type)
+		return proto.BindOK{}, nil, fmt.Errorf("agent: unexpected reply %q to bind", msg.Type)
 	}
+}
+
+func (a *Agent) rememberedTCPPort() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.tcpPort
+}
+
+func (a *Agent) setRememberedTCPPort(port int) {
+	a.mu.Lock()
+	a.tcpPort = port
+	a.mu.Unlock()
 }
 
 func (a *Agent) sendGoodbye(sess tunnel.Session, idgen *proto.IDGen, reason string) {
