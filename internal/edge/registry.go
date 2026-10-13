@@ -179,19 +179,19 @@ func newBindingTransport(host string, s *AgentSession, limits LimitsConfig) *htt
 				s.inflight.Done()
 				return nil, &dialError{err: err}
 			}
-			return &inflightConn{Conn: conn, wg: &s.inflight}, nil
+			return &inflightConn{Conn: conn, inflight: &s.inflight}, nil
 		},
 	}
 }
 
 type inflightConn struct {
 	net.Conn
-	wg   *sync.WaitGroup
-	once sync.Once
+	inflight *inflightTracker
+	once     sync.Once
 }
 
 func (c *inflightConn) Close() error {
 	err := c.Conn.Close()
-	c.once.Do(c.wg.Done)
+	c.once.Do(c.inflight.Done)
 	return err
 }
