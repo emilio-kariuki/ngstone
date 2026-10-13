@@ -51,6 +51,13 @@ fail() {
 # checks this table against it).
 DNS_PROVIDER_TABLE='
 cloudflare NGSTONE_CF_API_TOKEN:secret
+route53 NGSTONE_AWS_REGION:plain NGSTONE_AWS_ACCESS_KEY_ID:plain NGSTONE_AWS_SECRET_ACCESS_KEY:secret
+digitalocean NGSTONE_DO_API_TOKEN:secret
+hetzner NGSTONE_HETZNER_API_TOKEN:secret
+vultr NGSTONE_VULTR_API_KEY:secret
+ovh NGSTONE_OVH_ENDPOINT:plain NGSTONE_OVH_APPLICATION_KEY:plain NGSTONE_OVH_APPLICATION_SECRET:secret NGSTONE_OVH_CONSUMER_KEY:secret
+desec NGSTONE_DESEC_TOKEN:secret
+bunny NGSTONE_BUNNY_API_KEY:secret
 '
 # dns-providers:end
 
@@ -272,11 +279,14 @@ if [[ -z "$EXISTING_DNS_PROVIDER" && -f "$SERVICE_PATH" ]]; then
   EXISTING_DNS_PROVIDER=cloudflare
 fi
 
+# On a rerun, keep the existing domain and email unless new ones are given.
+DOMAIN="${DOMAIN:-$EXISTING_DOMAIN}"
+EMAIL="${EMAIL:-$EXISTING_EMAIL}"
 if [[ -z "$DOMAIN" ]]; then
-  prompt_value "Public domain" "$EXISTING_DOMAIN" DOMAIN
+  prompt_value "Public domain" "" DOMAIN
 fi
 if [[ -z "$EMAIL" ]]; then
-  prompt_value "Let's Encrypt email" "$EXISTING_EMAIL" EMAIL
+  prompt_value "Let's Encrypt email" "" EMAIL
 fi
 if [[ -z "$DNS_PROVIDER" ]]; then
   DNS_PROVIDER="${EXISTING_DNS_PROVIDER:-cloudflare}"
@@ -381,12 +391,15 @@ build_from_source() {
   BINARY_PATH="${TEMP_DIR}/ngstoned"
 }
 
+# Checked before the binary replaces the installed one, so a rerun with an
+# unsupported provider leaves a working installation untouched.
 check_binary_supports_provider() {
+  local candidate="$1"
   if [[ "$DNS_PROVIDER" == cloudflare ]]; then
     return
   fi
-  if ! "$INSTALL_PATH" -dns-provider help 2>/dev/null | awk '{ print $1 }' | grep -qx "$DNS_PROVIDER"; then
-    fail "the installed ngstoned does not support --dns-provider ${DNS_PROVIDER}; use --from-source or a newer --version"
+  if ! "$candidate" -dns-provider help 2>/dev/null | awk '{ print $1 }' | grep -qx "$DNS_PROVIDER"; then
+    fail "this ngstoned build does not support --dns-provider ${DNS_PROVIDER}; use --from-source or a newer --version"
   fi
 }
 
@@ -397,6 +410,7 @@ install_binary() {
   fi
   if [[ -n "$BINARY_PATH" ]]; then
     [[ -f "$BINARY_PATH" ]] || fail "edge binary not found: $BINARY_PATH"
+    check_binary_supports_provider "$BINARY_PATH"
     install -o root -g root -m 0755 "$BINARY_PATH" "$INSTALL_PATH"
     return
   fi
@@ -427,6 +441,7 @@ install_binary() {
   ( cd "$TEMP_DIR" && printf '%s\n' "$checksum_line" | sha256sum -c - )
   tar -xzf "${TEMP_DIR}/${archive}" -C "$TEMP_DIR"
   [[ -f "${TEMP_DIR}/ngstoned" ]] || fail "release archive did not contain ngstoned"
+  check_binary_supports_provider "${TEMP_DIR}/ngstoned"
   install -o root -g root -m 0755 "${TEMP_DIR}/ngstoned" "$INSTALL_PATH"
 }
 
@@ -568,7 +583,6 @@ info "checking DNS"
 check_dns
 info "installing edge binary"
 install_binary
-check_binary_supports_provider
 info "writing root-only secrets file"
 write_env
 info "installing hardened systemd unit"
