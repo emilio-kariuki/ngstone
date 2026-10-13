@@ -133,7 +133,9 @@ export default function ConfigurationPage() {
         <code>-per-ip-lru</code>, <code>-global-inflight</code>,{" "}
         <code>-per-session-inflight</code>, <code>-upgrade-inflight</code>,{" "}
         <code>-per-session-upgrade</code>,{" "}
-        <code>-handshake-concurrency</code>, <code>-unauth-sessions</code>).
+        <code>-handshake-concurrency</code>, <code>-unauth-sessions</code>,{" "}
+        <code>-per-ip-inflight</code>, <code>-client-idle-timeout</code>,{" "}
+        <code>-tcp-idle-timeout</code>).
         See{" "}
         <a href="/docs/reference/limits-timeouts">Limits &amp; timeouts</a>{" "}
         for the full set and their defaults.
