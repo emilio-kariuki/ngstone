@@ -36,6 +36,7 @@ var verbs = map[string]func([]string) int{
 	"tcp":     cmdTCP,
 	"serve":   cmdServe,
 	"start":   cmdStart,
+	"ps":      cmdPS,
 	"service": cmdService,
 	"config":  cmdConfig,
 	"logout":  cmdLogout,
@@ -62,6 +63,7 @@ Commands:
   serve [dir]             share a directory of files through the tunnel
   start [name ...]        start the tunnels defined in ngstone.yml
   service install         run 'ngstone start' as a background service (systemd or launchd)
+  ps                      list the tunnels of every running ngstone process
   config                  view or set local configuration
   logout                  remove the saved auth token
   version                 print the ngstone version
@@ -498,6 +500,7 @@ func runPortPlain(ctx context.Context, acfg agent.Config) int {
 	slog.SetDefault(logger)
 
 	a := agent.New(acfg)
+	defer publishStatus(ctx, "port", []agent.Config{acfg}, []*agent.Agent{a})()
 
 	logger.Info("ngstone: starting", "control", acfg.ControlAddr, "target", acfg.TargetURL, "insecure", acfg.Insecure)
 	if err := a.Run(ctx); err != nil {
@@ -629,6 +632,7 @@ func runTCPPlain(ctx context.Context, acfg agent.Config) int {
 	acfg.Events = events
 
 	a := agent.New(acfg)
+	defer publishStatus(ctx, "tcp", []agent.Config{acfg}, []*agent.Agent{a})()
 
 	go func() {
 		for {
@@ -664,6 +668,7 @@ func runPortTUI(ctx context.Context, acfg agent.Config) int {
 	acfg.Events = events
 
 	a := agent.New(acfg)
+	defer publishStatus(ctx, "port", []agent.Config{acfg}, []*agent.Agent{a})()
 
 	logger.Info("ngstone: starting", "control", acfg.ControlAddr, "target", acfg.TargetURL, "insecure", acfg.Insecure)
 

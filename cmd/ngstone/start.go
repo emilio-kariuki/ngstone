@@ -241,6 +241,7 @@ func runStartPlain(ctx context.Context, acfgs []agent.Config) int {
 
 	events := make(chan agent.StatusEvent, 64)
 	agents, names := newTunnelAgents(acfgs, events, nil)
+	defer publishStatus(ctx, "start", acfgs, agents)()
 
 	targets := map[string]string{}
 	width := 0
@@ -280,6 +281,7 @@ func runStartTUI(ctx context.Context, acfgs []agent.Config) int {
 	store := inspect.NewStore()
 	events := make(chan agent.StatusEvent, 64)
 	agents, names := newTunnelAgents(acfgs, events, store)
+	defer publishStatus(ctx, "start", acfgs, agents)()
 
 	tunnels := make([]tui.Tunnel, len(agents))
 	for i, a := range agents {
