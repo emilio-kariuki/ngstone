@@ -32,7 +32,7 @@ func (a *Agent) buildProxy(target *url.URL) http.Handler {
 		return proxy
 	}
 
-	capturer := inspect.NewCapturer(a.store)
+	capturer := inspect.NewCapturer(a.store).WithTunnel(a.cfg.Name)
 	capturer.Install(proxy)
 	return capturer.Middleware(proxy)
 }
