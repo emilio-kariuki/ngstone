@@ -81,8 +81,10 @@ type Config struct {
 }
 
 type Status struct {
+	State    string // one of the State* constants; empty before the first attempt
 	Hostname string
 	URL      string
+	Err      string // last error text when not online
 	Evicted  bool
 }
 
@@ -168,13 +170,17 @@ func (a *Agent) emit(ev StatusEvent) {
 }
 
 func (a *Agent) emitState(state, errText string) {
-	st := a.Status()
+	a.mu.Lock()
+	a.status.State = state
+	a.status.Err = errText
+	st := a.status
+	a.mu.Unlock()
 	a.emit(StatusEvent{State: state, Hostname: st.Hostname, URL: st.URL, Err: errText})
 }
 
 func (a *Agent) setBound(hostname, url string) {
 	a.mu.Lock()
-	a.status = Status{Hostname: hostname, URL: url}
+	a.status = Status{State: StateOnline, Hostname: hostname, URL: url}
 	a.mu.Unlock()
 	slog.Info("agent: bound", "hostname", hostname, "url", url)
 	a.emit(StatusEvent{State: StateOnline, Hostname: hostname, URL: url})
@@ -183,6 +189,7 @@ func (a *Agent) setBound(hostname, url string) {
 func (a *Agent) setEvicted(hostname string) {
 	a.mu.Lock()
 	a.status.Evicted = true
+	a.status.State = StateEvicted
 	url := a.status.URL
 	a.mu.Unlock()
 	slog.Warn("agent: tunnel evicted, no longer advertising", "hostname", hostname)
