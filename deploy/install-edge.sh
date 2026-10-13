@@ -141,12 +141,14 @@ if [[ ! -r /etc/os-release ]]; then
   fail "cannot identify the Linux distribution"
 fi
 
-. /etc/os-release
-case "${ID:-}" in
+# Read ID in a subshell: /etc/os-release also defines VERSION, which would
+# clobber the --version / NGSTONE_VERSION value this script relies on.
+DISTRO_ID="$(. /etc/os-release && printf '%s' "${ID:-}")"
+case "$DISTRO_ID" in
 ubuntu|debian)
   ;;
 *)
-  fail "the edge installer currently supports Ubuntu and Debian; detected ${ID:-unknown}"
+  fail "the edge installer currently supports Ubuntu and Debian; detected ${DISTRO_ID:-unknown}"
   ;;
 esac
 
@@ -396,7 +398,10 @@ EOF
 
 start_service() {
   systemctl daemon-reload
-  systemctl enable --now ngstoned
+  systemctl enable ngstoned
+  # restart, not start: on a re-run the service is already active and
+  # "enable --now" would leave the old binary, unit and env in place.
+  systemctl restart ngstoned
   if ! systemctl is-active --quiet ngstoned; then
     journalctl -u ngstoned -n 80 --no-pager >&2 || true
     fail "ngstoned did not start"
