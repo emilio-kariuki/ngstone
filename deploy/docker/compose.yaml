@@ -1,0 +1,63 @@
+# ngstoned, the ngstone edge server, under Docker Compose.
+#
+#   cp .env.example .env    # then fill it in and chmod 600 .env
+#   docker compose up -d
+#   docker compose ps       # STATUS turns "healthy" once both certificates load
+#   docker compose logs -f ngstoned
+#
+# The DNS records and open ports are the same as for the systemd install; see
+# "Run with Docker" in deploy/README.md.
+
+name: ngstone
+
+services:
+  ngstoned:
+    image: ghcr.io/emilio-kariuki/ngstoned:latest
+    # To build the image from this checkout instead of pulling it:
+    # build: ../..
+
+    # Secrets (NGSTONE_TOKEN_SHA256 and the DNS provider credentials) reach
+    # the edge only through the environment, never as flags: flags are
+    # visible to anyone who can list processes on the host.
+    env_file: .env
+
+    # Non-secret settings, read from .env for substitution.
+    command:
+      - -domain=${NGSTONE_DOMAIN:?set NGSTONE_DOMAIN in .env}
+      - -dns-provider=${NGSTONE_DNS_PROVIDER:-cloudflare}
+      - -cert-email=${NGSTONE_CERT_EMAIL:?set NGSTONE_CERT_EMAIL in .env}
+      - -acme-ca=${NGSTONE_ACME_CA:-staging}
+      - -cert-storage=/data/certs
+      # Unprivileged ports inside the container; "ports" maps the host's
+      # 80, 443 and 4443 onto them.
+      - -public=:8443
+      - -http=:8080
+      - -control=:4443
+      # Loopback inside the container, where the image's HEALTHCHECK probes
+      # /healthz. Use "docker compose exec ngstoned /ngstoned healthcheck"
+      # to check it by hand.
+      - -ops=127.0.0.1:4041
+      # Raw TCP tunnels: uncomment, and publish the same range under "ports".
+      # - -tcp-ports=10000-10100
+
+    ports:
+      - "80:8080"
+      - "443:8443"
+      - "4443:4443"
+      # Raw TCP tunnel range; it must match -tcp-ports exactly.
+      # - "10000-10100:10000-10100"
+
+    # Certificates and the ACME account. The image creates /data owned by
+    # uid 65532, so a new named volume is writable by the container's
+    # nonroot user. A bind mount must be chowned to 65532:65532 first.
+    volumes:
+      - ngstoned-data:/data
+
+    restart: unless-stopped
+    # On SIGTERM the edge finishes in-flight requests and drains agent
+    # sessions (up to about 30 seconds) before exiting; Docker's default
+    # 10 seconds would SIGKILL it mid-drain.
+    stop_grace_period: 60s
+
+volumes:
+  ngstoned-data:
