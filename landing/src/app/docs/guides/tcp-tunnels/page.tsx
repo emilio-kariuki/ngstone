@@ -15,6 +15,7 @@ export const metadata: Metadata = {
 const TOC: TocItem[] = [
   { id: "basic-usage", title: "Basic usage" },
   { id: "requesting-a-specific-port", title: "Requesting a specific port" },
+  { id: "reconnects", title: "Reconnects keep the port" },
   { id: "encryption", title: "Encryption" },
   { id: "public-exposure", title: "Public exposure" },
   { id: "stream-lifetime", title: "Stream lifetime" },
@@ -77,10 +78,47 @@ tcp://amber-fox-42.example.com:14202 -> 127.0.0.1:5432`}
       <ParamTable>
         <Property name="--remote-port, -r" type="int" defaultValue="0">
           Requested remote port. <code>0</code> means server-assigned. If
-          the port is outside the edge&apos;s configured range or already
-          taken, the request is rejected.
+          the port is outside the edge&apos;s configured range or held by
+          another agent, the request is rejected with{" "}
+          <code>port_unavailable</code> and the agent keeps retrying with
+          backoff — it never silently moves you to a different port.
         </Property>
       </ParamTable>
+
+      <Anchor id="reconnects">Reconnects keep the port</Anchor>
+      <p>
+        TCP tunnels reconnect the same way HTTP tunnels do. After a laptop
+        sleep or a network blip the agent reclaims its port straight away,
+        using the same{" "}
+        <a href="/docs/operations/reconnection-takeover#takeover-rules">
+          identity-based takeover rules
+        </a>{" "}
+        as subdomains: the same agent process gets its port back
+        immediately, even while the edge still thinks the old, half-open
+        session is alive. It doesn&apos;t wait out the 45 s dead-peer window.
+        Another agent can only take a port whose holder is already dead.
+      </p>
+      <p>
+        Without <code>--remote-port</code>, the agent remembers the port the
+        edge assigned and asks for it again on every reconnect, so the{" "}
+        <code>tcp://host:port</code> you handed out stays valid:
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone tcp 22
+tcp://amber-fox-42.example.com:14201 -> 127.0.0.1:22
+# laptop sleeps, wakes up, agent reconnects
+tcp://amber-fox-42.example.com:14201 -> 127.0.0.1:22`}
+      />
+      <Callout variant="note">
+        If the agent was gone long enough for the edge to free its port and
+        another tunnel has taken it since, the agent gives up on the old port
+        and comes back on a new one in the same reconnect attempt. Check the
+        status line for the new address. A restarted agent is a new process
+        with a new identity, so it gets whichever port is free. Pass{" "}
+        <code>--remote-port</code> if you need the same port across
+        restarts too.
+      </Callout>
 
       <Anchor id="encryption">Encryption</Anchor>
       <Callout variant="warning" title="The client-to-edge hop is raw pass-through">
