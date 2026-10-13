@@ -49,6 +49,13 @@ ngstone port 3000 --subdomain demo   # request a specific name instead of a rand
 ngstone port 3000 --host-header demo.localhost:3000
 ```
 
+To share a folder of files without running a web server first:
+
+```
+ngstone serve ./dist --subdomain demo
+ngstone serve ./dist --spa          # serve index.html for client-side routes
+```
+
 By default, the local app receives the public tunnel hostname in `Host`. Use
 `--host-header` when it expects a tenant-specific local hostname; the public
 hostname remains available in `X-Forwarded-Host`.
