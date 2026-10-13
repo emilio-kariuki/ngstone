@@ -29,6 +29,11 @@ const (
 	drainTimeout = 15 * time.Second
 )
 
+// handshakeTimeout bounds the auth+bind exchange on the control stream. The
+// edge gives an agent 5s to send Auth; this is the symmetric guard on the
+// agent's side, so a silent or wedged edge cannot hang a reconnect forever.
+var handshakeTimeout = 15 * time.Second
+
 var errFatalHandshake = errors.New("agent: fatal handshake error")
 var errEdgeGoodbye = errors.New("agent: edge said goodbye")
 
@@ -237,7 +242,9 @@ func (a *Agent) runOnce(ctx context.Context, bo *backoff) error {
 
 	idgen := proto.NewAgentIDGen()
 
+	release := guardHandshake(ctx, sess)
 	bindOK, err := a.handshake(sess, idgen)
+	release()
 	if err != nil {
 		return err
 	}
@@ -337,6 +344,33 @@ func streamConnContext(ctx context.Context, c net.Conn) context.Context {
 		Host:       pre.Host,
 		ClientAddr: pre.ClientAddr,
 	})
+}
+
+// guardHandshake bounds a handshake running on sess. The control stream gets
+// a handshakeTimeout deadline, and the session is closed if ctx is cancelled
+// first, so neither a silent edge nor Ctrl-C can leave the agent blocked in a
+// control-stream read. The returned func lifts both guards; call it as soon
+// as the handshake is over, before the control loop starts.
+func guardHandshake(ctx context.Context, sess tunnel.Session) (release func()) {
+	ctrl := sess.Control()
+	_ = ctrl.SetDeadline(time.Now().Add(handshakeTimeout))
+
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		select {
+		case <-ctx.Done():
+			sess.Close("context cancelled during handshake")
+		case <-done:
+		}
+	}()
+
+	return func() {
+		close(done)
+		<-exited
+		_ = ctrl.SetDeadline(time.Time{})
+	}
 }
 
 func (a *Agent) authenticate(sess tunnel.Session, idgen *proto.IDGen) (int, error) {
@@ -535,7 +569,10 @@ func Verify(ctx context.Context, cfg Config) error {
 
 	a := New(cfg)
 	idgen := proto.NewAgentIDGen()
-	if _, err := a.authenticate(sess, idgen); err != nil {
+	release := guardHandshake(ctx, sess)
+	_, err = a.authenticate(sess, idgen)
+	release()
+	if err != nil {
 		var ae *authErr
 		if errors.As(err, &ae) && ae.code == proto.CodeBadToken {
 			return fmt.Errorf("%w: %s", ErrBadToken, ae.message)
