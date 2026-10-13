@@ -19,6 +19,12 @@ import (
 )
 
 func main() {
+	// Handled before flag parsing so the container HEALTHCHECK can run
+	// "ngstoned healthcheck" without repeating the server's flags.
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		os.Exit(runHealthcheck())
+	}
+
 	publicAddr := flag.String("public", ":443", "public HTTPS listen address")
 	controlAddr := flag.String("control", ":4443", "control plane listen address")
 	httpAddr := flag.String("http", ":80", "HTTP redirect listen address (unused with -insecure)")
