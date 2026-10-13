@@ -13,10 +13,25 @@ import (
 	"time"
 )
 
-const (
-	DefaultServerName   = "ngstone.site"
-	tlsHandshakeTimeout = 10 * time.Second
-)
+const tlsHandshakeTimeout = 10 * time.Second
+
+// tlsServerName picks the name the edge's certificate is verified against:
+// the explicit override when set, otherwise the host part of the control
+// address. The edge serves its apex certificate on the control port, so
+// dialing example.com:4443 verifies against example.com with no extra flag.
+func tlsServerName(cfg Config) (string, error) {
+	if cfg.ServerName != "" {
+		return cfg.ServerName, nil
+	}
+	host, _, err := net.SplitHostPort(cfg.ControlAddr)
+	if err != nil {
+		host = cfg.ControlAddr
+	}
+	if host == "" {
+		return "", fmt.Errorf("agent: cannot derive a TLS server name from control address %q; pass --server-name", cfg.ControlAddr)
+	}
+	return host, nil
+}
 
 func dialControl(ctx context.Context, cfg Config) (net.Conn, error) {
 	var d net.Dialer
@@ -29,9 +44,10 @@ func dialControl(ctx context.Context, cfg Config) (net.Conn, error) {
 		return raw, nil
 	}
 
-	serverName := cfg.ServerName
-	if serverName == "" {
-		serverName = DefaultServerName
+	serverName, err := tlsServerName(cfg)
+	if err != nil {
+		raw.Close()
+		return nil, err
 	}
 
 	tlsCfg := &tls.Config{

@@ -9,9 +9,11 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ngstone/internal/proto"
@@ -59,6 +61,13 @@ type tcpManager struct {
 
 	forceCloseGrace time.Duration
 	globalSem       *globalSemaphore
+
+	// perIP is shared with the public HTTP handler, so one client has one
+	// budget across requests and TCP connections. nil disables the cap.
+	perIP *perIPInflight
+	// idleTimeout closes a relayed connection that has carried no bytes in
+	// either direction for this long. 0 disables it.
+	idleTimeout time.Duration
 
 	mu        sync.Mutex
 	allocated map[int]struct{}
@@ -365,6 +374,16 @@ func (tm *tcpManager) handleConn(as *AgentSession, hostname string, allow []neti
 		}
 	}
 
+	releaseIP, ok := tm.perIP.acquire(remoteIP(client))
+	if !ok {
+		metricRejectedPerIPCap.Add(1)
+		client.Close()
+		as.inflight.Done()
+		tm.deregister(as, tc)
+		return
+	}
+	defer releaseIP()
+
 	if !tm.globalSem.tryAcquire() {
 		metricTCPRejectedGlobalCap.Add(1)
 		client.Close()
@@ -424,17 +443,19 @@ func (tm *tcpManager) handleConn(as *AgentSession, hostname string, allow []neti
 		})
 	}
 
+	idle := newIdleDeadline(tm.idleTimeout, client, stream)
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	go func() {
-		io.Copy(stream, client)
+		io.Copy(stream, idle.reader(client))
 		wg.Done()
 		closeWrite(stream)
 	}()
 
 	go func() {
-		io.Copy(client, stream)
+		io.Copy(client, idle.reader(stream))
 		wg.Done()
 		closeWrite(client)
 	}()
@@ -443,6 +464,63 @@ func (tm *tcpManager) handleConn(as *AgentSession, hostname string, allow []neti
 	release()
 	stream.Close()
 	client.Close()
+}
+
+// idleDeadline closes a relayed TCP connection once neither direction has
+// carried a byte for timeout. Every successful read on either side pushes
+// the read deadline of both sides forward, so a connection that is busy in
+// only one direction, such as a download, stays open.
+type idleDeadline struct {
+	timeout  time.Duration
+	conns    []net.Conn
+	last     atomic.Int64
+	timedOut sync.Once
+}
+
+// idleExtendEvery throttles deadline updates on busy connections; it is
+// capped at a quarter of the timeout so a busy connection never lapses.
+const idleExtendEvery = time.Second
+
+func newIdleDeadline(timeout time.Duration, conns ...net.Conn) *idleDeadline {
+	d := &idleDeadline{timeout: timeout, conns: conns}
+	d.extend(time.Now(), true)
+	return d
+}
+
+func (d *idleDeadline) extend(now time.Time, force bool) {
+	if d.timeout <= 0 {
+		return
+	}
+	if !force && now.Sub(time.Unix(0, d.last.Load())) < min(idleExtendEvery, d.timeout/4) {
+		return
+	}
+	d.last.Store(now.UnixNano())
+	for _, c := range d.conns {
+		_ = c.SetReadDeadline(now.Add(d.timeout))
+	}
+}
+
+func (d *idleDeadline) reader(c net.Conn) io.Reader {
+	if d.timeout <= 0 {
+		return c
+	}
+	return &idleReader{conn: c, d: d}
+}
+
+type idleReader struct {
+	conn net.Conn
+	d    *idleDeadline
+}
+
+func (r *idleReader) Read(p []byte) (int, error) {
+	n, err := r.conn.Read(p)
+	if n > 0 {
+		r.d.extend(time.Now(), false)
+	}
+	if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
+		r.d.timedOut.Do(func() { metricTCPClosedIdle.Add(1) })
+	}
+	return n, err
 }
 
 func closeWrite(c net.Conn) {
