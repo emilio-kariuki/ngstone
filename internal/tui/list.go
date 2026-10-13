@@ -174,7 +174,11 @@ func renderRow(ex *inspect.Exchange, width int, selected bool, replaying bool) s
 	if pathWidth < 0 {
 		pathWidth = 0
 	}
-	path := padRight(truncatePath(rowPath(ex.Req.URL), pathWidth), pathWidth)
+	rowText := rowPath(ex.Req.URL)
+	if ex.Tunnel != "" {
+		rowText = ex.Tunnel + "  " + rowText
+	}
+	path := padRight(truncatePath(rowText, pathWidth), pathWidth)
 
 	methodSt := methodStyle(method)
 	statusSt := statusStyle(ex.Resp.Status)

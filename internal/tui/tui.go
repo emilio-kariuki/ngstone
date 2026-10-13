@@ -12,6 +12,7 @@ import (
 )
 
 type StatusEvent struct {
+	Tunnel   string
 	State    string
 	Hostname string
 	URL      string
@@ -24,6 +25,19 @@ type Options struct {
 	RT     http.RoundTripper
 	Status <-chan StatusEvent
 	Logs   *LogRing
+
+	// Tunnels lists the tunnels when one process runs several. Each
+	// exchange is replayed to the target of the tunnel that captured it,
+	// and the header shows one status line per tunnel. Leave it empty for
+	// a single tunnel described by Target and RT.
+	Tunnels []Tunnel
+}
+
+// Tunnel is one named tunnel's replay target.
+type Tunnel struct {
+	Name   string
+	Target *url.URL
+	RT     http.RoundTripper
 }
 
 func Run(ctx context.Context, opts Options) error {
