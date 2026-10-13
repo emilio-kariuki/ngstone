@@ -12,8 +12,9 @@ import (
 // bindReply is what the fake edge answers to one Bind: a BindOK, or a
 // BindErr when errCode is set.
 type bindReply struct {
-	port    int
-	errCode string
+	port     int
+	hostname string // defaults to example.com
+	errCode  string
 }
 
 // scriptedEdge plays the edge side of one handshake: it accepts Auth with
@@ -47,9 +48,13 @@ func scriptedEdge(t *testing.T, edgeSess tunnel.Session, replies []bindReply) <-
 				ctrl.Write(proto.TypeBindErr, msg.ID, proto.BindErr{Code: r.errCode, Message: "scripted"})
 				continue
 			}
+			hostname := r.hostname
+			if hostname == "" {
+				hostname = "example.com"
+			}
 			ctrl.Write(proto.TypeBindOK, msg.ID, proto.BindOK{
-				Hostname: "example.com",
-				URL:      "tcp://example.com",
+				Hostname: hostname,
+				URL:      "https://" + hostname,
 				Port:     r.port,
 			})
 		}

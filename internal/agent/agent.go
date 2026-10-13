@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -114,9 +115,11 @@ type Agent struct {
 	mu     sync.Mutex
 	status Status
 	// tcpPort is the edge port from the last successful TCP bind when the
-	// user did not pass --remote-port. Reconnects request it again so the
-	// advertised tcp://host:port survives a reconnect.
-	tcpPort int
+	// user did not pass --remote-port, and subdomain the name the edge
+	// assigned when the user did not pass --subdomain. Reconnects request
+	// them again so the advertised URL survives a reconnect.
+	tcpPort   int
+	subdomain string
 }
 
 func New(cfg Config) *Agent {
@@ -450,26 +453,37 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		}
 	}
 
+	// When the user left the port or name to the edge, ask for the one we
+	// were given last time so the advertised URL survives a reconnect.
 	rememberPort := a.bindKind() == proto.KindTCP && a.cfg.RemotePort == 0
+	rememberName := a.bindKind() == proto.KindHTTP && a.cfg.Subdomain == ""
 	if rememberPort {
 		bindMsg.RemotePort = a.rememberedTCPPort()
+	}
+	if rememberName {
+		bindMsg.Subdomain = a.rememberedSubdomain()
 	}
 
 	bindOK, bindErr, err := a.bind(ctrl, idgen, bindMsg)
 	if err != nil {
 		return proto.BindOK{}, err
 	}
-	if bindErr != nil && rememberPort && bindMsg.RemotePort != 0 && bindErr.Code == proto.CodePortUnavailable {
-		// The port we had before is gone (another tunnel holds it now).
-		// The user never asked for it, so take any free port rather than
-		// keep retrying for one the edge will not give back.
+	// A remembered port or name that another tunnel now holds is not worth
+	// retrying for: the user never asked for it, so take a fresh one.
+	switch {
+	case bindErr != nil && rememberPort && bindMsg.RemotePort != 0 && bindErr.Code == proto.CodePortUnavailable:
 		slog.Warn("agent: previous tcp port unavailable, binding a new one", "port", bindMsg.RemotePort)
 		a.setRememberedTCPPort(0)
 		bindMsg.RemotePort = 0
 		bindOK, bindErr, err = a.bind(ctrl, idgen, bindMsg)
-		if err != nil {
-			return proto.BindOK{}, err
-		}
+	case bindErr != nil && rememberName && bindMsg.Subdomain != "" && bindErr.Code == proto.CodeSubdomainTaken:
+		slog.Warn("agent: previous subdomain taken, binding a new one", "subdomain", bindMsg.Subdomain)
+		a.setRememberedSubdomain("")
+		bindMsg.Subdomain = ""
+		bindOK, bindErr, err = a.bind(ctrl, idgen, bindMsg)
+	}
+	if err != nil {
+		return proto.BindOK{}, err
 	}
 	if e := bindErr; e != nil {
 		if e.Code == proto.CodeInvalidSubdomain || e.Code == proto.CodeKindUnsupported || e.Code == proto.CodeInvalidAccess {
@@ -483,7 +497,31 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 	if rememberPort {
 		a.setRememberedTCPPort(bindOK.Port)
 	}
+	if rememberName {
+		a.setRememberedSubdomain(subdomainOf(bindOK.Hostname))
+	}
 	return bindOK, nil
+}
+
+// subdomainOf returns the first label of a tunnel hostname, which is the
+// subdomain the edge assigned: subdomains are single labels.
+func subdomainOf(hostname string) string {
+	if i := strings.IndexByte(hostname, '.'); i > 0 {
+		return hostname[:i]
+	}
+	return ""
+}
+
+func (a *Agent) rememberedSubdomain() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.subdomain
+}
+
+func (a *Agent) setRememberedSubdomain(name string) {
+	a.mu.Lock()
+	a.subdomain = name
+	a.mu.Unlock()
 }
 
 // bind sends one Bind and reads its reply. A BindErr from the edge comes
