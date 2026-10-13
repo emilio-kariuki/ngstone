@@ -43,6 +43,71 @@ store the plaintext tunnel token on the VPS, so save the token it prints.
 command line (`sudo NGSTONE_CF_API_TOKEN=... ./deploy/install-edge.sh ...`)
 when running non-interactively.
 
+## Run with Docker
+
+The `ghcr.io/emilio-kariuki/ngstoned` image (linux/amd64 and linux/arm64,
+published for each release) runs the same edge on any host with Docker and
+the Compose plugin. The [DNS records](#dns-records) and
+[provider credentials](#dns-provider-credentials) are the same as for the
+systemd install, and the host's firewall must allow `80`, `443` and `4443`
+(plus any TCP tunnel range). The installer's UFW and DNS checks do not run,
+so do those yourself.
+
+Copy [`docker/compose.yaml`](docker/compose.yaml) and
+[`docker/.env.example`](docker/.env.example) into a directory on the host,
+rename the latter to `.env`, `chmod 600 .env`, and fill it in: domain, email,
+`NGSTONE_DNS_PROVIDER` and that provider's variables, and
+`NGSTONE_TOKEN_SHA256`. Then:
+
+```
+docker compose up -d
+docker compose ps                  # STATUS turns "healthy" once both certificates load
+docker compose logs -f ngstoned
+docker compose exec ngstoned /ngstoned healthcheck   # exit 0 when /healthz is OK
+```
+
+Start with `NGSTONE_ACME_CA=staging`. Once the container is healthy, which
+means both certificates loaded, set `NGSTONE_ACME_CA=production` in `.env`
+and run `docker compose up -d` to recreate the container with the new flag.
+The [staging -> production](#staging---production-promotion) notes apply
+unchanged; certificates and the ACME account live in the `ngstoned-data`
+volume at `/data/certs`. Upgrade with `docker compose pull && docker compose up -d`.
+
+How the container differs from the systemd unit:
+
+- **Ports.** The edge listens on unprivileged ports inside the container
+  (`-http :8080`, `-public :8443`, `-control :4443`), so it needs no added
+  capabilities, and Compose publishes them as the host's `80`, `443` and
+  `4443`. The ops endpoint stays on the container's loopback,
+  `127.0.0.1:4041`, where the image's `HEALTHCHECK` (`ngstoned healthcheck`)
+  probes `/healthz`; it is not published. `/healthz` returns 503 until both
+  certificates load, so the health check has a 3 minute start period.
+- **Secrets.** `NGSTONE_TOKEN_SHA256` and the DNS credentials reach the edge
+  only through `env_file: .env`, never through `command` flags, for the same
+  reason as `EnvironmentFile=` below: the container's command line is visible
+  to every user of the host through `ps`, but its environment is not.
+- **Client addresses.** Docker's published ports forward with NAT and keep
+  the client's source IP, so per-IP rate limits, `X-Forwarded-For` and
+  `--allow-cidr` work without `-proxy-protocol`. The exception is IPv6 when
+  the Compose network has no IPv6: Docker's userland proxy then accepts the
+  connection and it appears to come from the bridge gateway. Enable IPv6 on
+  the network, or serve only IPv4 (A records), if that matters.
+- **Storage.** The image runs as the distroless `nonroot` user, uid and gid
+  65532, and creates `/data` owned by it, so the named volume is writable. A
+  bind mount in its place must be writable by that uid first, for example
+  `sudo install -d -o 65532 -g 65532 -m 0700 /srv/ngstoned`.
+- **Shutdown.** On SIGTERM the edge finishes in-flight requests and drains
+  agent sessions for up to about 30 seconds, so the Compose file sets
+  `stop_grace_period: 60s` instead of Docker's 10 seconds.
+- **TCP tunnels.** Uncomment the `-tcp-ports` line and the matching `ports`
+  range in `compose.yaml`; the published range must equal `-tcp-ports`
+  exactly. Docker sets up forwarding per published port, so keep the range
+  small.
+
+To build the image from a checkout instead of pulling it, replace `image:`
+with the commented `build: ../..` in `compose.yaml`, or run
+`docker build -t ngstoned .` at the repository root.
+
 ## Uninstalling
 
 From the checkout on the VPS, remove the service, binary, and root-only

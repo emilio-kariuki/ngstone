@@ -17,6 +17,7 @@ export const metadata: Metadata = {
 const TOC: TocItem[] = [
   { id: "fast-path", title: "Fast path installer" },
   { id: "uninstalling", title: "Uninstalling" },
+  { id: "docker", title: "Running it with Docker" },
   { id: "prerequisites", title: "Prerequisites" },
   { id: "dns-records", title: "DNS records" },
   { id: "dns-provider", title: "Choosing a DNS provider" },
@@ -161,6 +162,65 @@ $ sudo ./deploy/install-edge.sh \\
         option. Use <code>--yes</code> only for a deliberate non-interactive
         uninstall.
       </Callout>
+
+      <Anchor id="docker">Running it with Docker</Anchor>
+      <p>
+        Instead of the installer, run the{" "}
+        <code>ghcr.io/emilio-kariuki/ngstoned</code> image (amd64 and arm64)
+        on any host with Docker and the Compose plugin. The{" "}
+        <a href="#dns-records">DNS records</a>, the{" "}
+        <a href="#dns-provider">provider credential</a>, and the open ports
+        (<code>80</code>, <code>443</code>, <code>4443</code>) are the same;
+        the installer&apos;s UFW and DNS checks are yours to do. Fetch the
+        Compose file and the environment template, fill in{" "}
+        <code>.env</code>, and start it:
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ mkdir ngstone && cd ngstone
+$ curl -fsSLO https://raw.githubusercontent.com/emilio-kariuki/ngstone/main/deploy/docker/compose.yaml
+$ curl -fsSL -o .env https://raw.githubusercontent.com/emilio-kariuki/ngstone/main/deploy/docker/.env.example
+$ chmod 600 .env && $EDITOR .env
+$ docker compose up -d
+$ docker compose ps               # STATUS turns "healthy" once both certificates load
+$ docker compose logs -f ngstoned`}
+      />
+      <p>
+        <code>.env</code> holds the domain, email, DNS provider and its
+        credentials, and the <a href="#auth-token">token hash</a>. Compose
+        passes the secrets to the edge as environment variables only, never
+        as flags. When the container reports healthy, set{" "}
+        <code>NGSTONE_ACME_CA=production</code> in <code>.env</code> and run{" "}
+        <code>docker compose up -d</code> again. Certificates live in the{" "}
+        <code>ngstoned-data</code> volume, so restarts and{" "}
+        <code>docker compose pull</code> upgrades reuse them.
+      </p>
+      <ParamTable>
+        <Property name="Ports" type="container">
+          The edge listens on <code>8080</code>, <code>8443</code> and{" "}
+          <code>4443</code> inside the container, so it needs no added
+          capabilities; the host publishes them as <code>80</code>,{" "}
+          <code>443</code> and <code>4443</code>. The ops endpoint stays on
+          the container&apos;s loopback, where the image&apos;s health check
+          (<code>ngstoned healthcheck</code>) probes <code>/healthz</code>.
+        </Property>
+        <Property name="Client IPs" type="container">
+          Published ports keep the client&apos;s source address, so per-IP
+          limits and <code>--allow-cidr</code> work without{" "}
+          <code>-proxy-protocol</code>. IPv6 clients are the exception unless
+          IPv6 is enabled on the Compose network.
+        </Property>
+        <Property name="Storage" type="container">
+          The image runs as uid and gid <code>65532</code>. The named volume
+          is writable by it; a bind mount in its place must be{" "}
+          <code>chown</code>ed to <code>65532:65532</code> first.
+        </Property>
+        <Property name="TCP tunnels" type="container">
+          Uncomment <code>-tcp-ports</code> and the matching{" "}
+          <code>ports</code> range in <code>compose.yaml</code>; the two
+          ranges must be identical.
+        </Property>
+      </ParamTable>
 
       <Anchor id="prerequisites">Prerequisites</Anchor>
       <Steps>
