@@ -17,8 +17,10 @@ const TOC: TocItem[] = [
   { id: "ngstone-auth", title: "ngstone auth" },
   { id: "ngstone-port", title: "ngstone port" },
   { id: "ngstone-tcp", title: "ngstone tcp" },
+  { id: "ngstone-serve", title: "ngstone serve" },
   { id: "ngstone-start", title: "ngstone start" },
   { id: "ngstone-service", title: "ngstone service" },
+  { id: "ngstone-ps", title: "ngstone ps" },
   { id: "ngstone-config", title: "ngstone config" },
   { id: "ngstone-logout", title: "ngstone logout" },
   { id: "ngstone-version", title: "ngstone version" },
@@ -35,9 +37,10 @@ export default function CliPage() {
       <p>
         The <code>ngstone</code> command is built on the stdlib{" "}
         <code>flag</code> package — no cobra, no subcommand framework. There
-        are eight verbs: <code>auth</code>, <code>port</code>,{" "}
-        <code>tcp</code>, <code>start</code>, <code>service</code>,{" "}
-        <code>config</code>, <code>logout</code>, and <code>version</code>.
+        are ten verbs: <code>auth</code>, <code>port</code>,{" "}
+        <code>tcp</code>, <code>serve</code>, <code>start</code>,{" "}
+        <code>service</code>, <code>ps</code>, <code>config</code>,{" "}
+        <code>logout</code>, and <code>version</code>.
       </p>
 
       <Anchor id="overview">Overview</Anchor>
@@ -259,6 +262,34 @@ $ ngstone tcp db.local:5432 --remote-port 15432`}
         <a href="/docs/guides/access-control">Access control</a>.
       </Callout>
 
+      <Anchor id="ngstone-serve">ngstone serve</Anchor>
+      <p>
+        Shares a directory of files: a built site, a folder of downloads, a
+        report. It starts a file server on a loopback port and tunnels it
+        exactly as <code>ngstone port</code> would, inspector included.
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone serve ./dist --subdomain demo
+$ ngstone serve ./dist --spa
+$ ngstone serve            # the current directory`}
+      />
+      <ParamTable>
+        <Property name="dir" type="positional" defaultValue=".">
+          The directory to share. Directory listings are shown for folders
+          without an <code>index.html</code>.
+        </Property>
+        <Property name="--spa" type="bool" defaultValue="false">
+          Single-page app mode: a path with no file and no extension gets{" "}
+          <code>index.html</code>, so client-side routes survive a reload.
+          Paths with an extension still return <code>404</code> when the
+          file is missing.
+        </Property>
+        <Property name="--subdomain, --basic-auth, --allow-cidr, …" type="flags">
+          Every <code>ngstone port</code> flag applies.
+        </Property>
+      </ParamTable>
+
       <Anchor id="ngstone-start">ngstone start</Anchor>
       <p>
         Starts every tunnel described in a tunnels file, or only the ones
@@ -352,6 +383,33 @@ $ ngstone service uninstall`}
         <code>sudo loginctl enable-linger $USER</code> once so the service
         keeps running after you log out and starts at boot.
       </Callout>
+
+      <Anchor id="ngstone-ps">ngstone ps</Anchor>
+      <p>
+        Lists the tunnels of every ngstone process running as your user,
+        with their state and public URL: the quick way to find the URL of a
+        tunnel the background service started, or of a{" "}
+        <code>ngstone port</code> left running in another terminal.
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone ps
+PID    COMMAND  TUNNEL  KIND  STATE   URL                        TARGET                 UP
+41200  start    web     http  online  https://demo.example.com   http://127.0.0.1:3000  1h30m
+41200  start    db      tcp   online  tcp://example.com:15432    127.0.0.1:5432         1h30m
+41377  port     -       http  online  https://amber-fox-42.example.com  http://127.0.0.1:8080  5m`}
+      />
+      <ParamTable>
+        <Property name="--json" type="bool" defaultValue="false">
+          Print the raw status of each process as JSON, for scripts.
+        </Property>
+      </ParamTable>
+      <p>
+        Each running process serves its status on a unix socket under{" "}
+        <code>$XDG_RUNTIME_DIR/ngstone/</code>, or <code>run/</code> next
+        to the config file when that variable is unset. Sockets left by a
+        crashed process are removed on the next <code>ps</code>.
+      </p>
 
       <Anchor id="ngstone-config">ngstone config</Anchor>
       <p>Read or change the local config file without hand-editing JSON.</p>
