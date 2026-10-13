@@ -43,8 +43,9 @@ export default function ReconnectionTakeoverPage() {
 
       <Anchor id="takeover-rules">The takeover rules</Anchor>
       <p>
-        When a <code>Bind</code> request names a subdomain that&apos;s already
-        held, the edge resolves it with three rules, in order:
+        When a <code>Bind</code> request names a subdomain — or, for a TCP
+        tunnel, a port — that&apos;s already held, the edge resolves it with
+        three rules, in order:
       </p>
       <Steps>
         <Step title="Same InstanceID — immediate takeover">
@@ -58,9 +59,10 @@ export default function ReconnectionTakeoverPage() {
           dead. The new session takes the binding.
         </Step>
         <Step title="Different InstanceID, live holder — rejected">
-          The edge returns <code>BindErr{"{subdomain_taken}"}</code>. Two
-          separate agents shouldn&apos;t silently fight over a name — liveness
-          is only consulted in this one case.
+          The edge returns <code>BindErr{"{subdomain_taken}"}</code>, or{" "}
+          <code>BindErr{"{port_unavailable}"}</code> for a TCP port. Two
+          separate agents shouldn&apos;t silently fight over a name or a port
+          — liveness is only consulted in this one case.
         </Step>
       </Steps>
       <p>
@@ -68,7 +70,12 @@ export default function ReconnectionTakeoverPage() {
         <code>Evicted{"{hostname, reason: \"takeover\"}"}</code>, force-closes
         it, and rebinds atomically under the registry lock. The evicted agent
         updates its status line instead of continuing to advertise a URL it
-        no longer owns.
+        no longer owns. For a TCP tunnel, <code>hostname</code> carries the{" "}
+        <code>tcp://host:port</code> URL, and the takeover hands the
+        port&apos;s existing listener to the new session instead of closing
+        and reopening it, so no other process can grab the port in between.
+        An empty <code>InstanceID</code> never matches another empty one for
+        a TCP port.
       </p>
 
       <Anchor id="reconnect-backoff">Reconnect backoff</Anchor>
@@ -80,6 +87,17 @@ export default function ReconnectionTakeoverPage() {
         effectively instant — the agent doesn&apos;t sit around waiting out the
         45 s dead-peer detection window before it can have its own name
         back.
+      </p>
+      <p>
+        TCP tunnels get the same instant reconnect. When you didn&apos;t pass{" "}
+        <code>--remote-port</code>, the agent remembers the port the edge
+        last gave it and requests that port again on reconnect, so the
+        advertised <code>tcp://host:port</code> stays the same. If that port
+        has since gone to another tunnel, the edge answers{" "}
+        <code>port_unavailable</code>. The agent then drops the remembered
+        port and binds a fresh one in the same handshake, so the tunnel still
+        comes up, at a new address. An explicit <code>--remote-port</code>{" "}
+        is never moved: the agent keeps retrying for that port.
       </p>
 
       <Anchor id="dead-peer-detection">Dead-peer detection</Anchor>
@@ -117,6 +135,12 @@ export default function ReconnectionTakeoverPage() {
         eventual cleanup from deleting a binding that a newer session already
         took over — the operation is idempotent, since it can be triggered
         both from the session-death path and from a graceful drain.
+      </p>
+      <p>
+        TCP ports work the same way. A takeover moves the port out of the
+        old session&apos;s ownership, so when the old session is finally
+        released it closes only the connections it was already relaying and
+        leaves the port, and its listener, with the new owner.
       </p>
     </DocsArticle>
   )
