@@ -49,6 +49,11 @@ export const NAV: NavGroup[] = [
         description: "Raw TCP tunnels for SSH, databases, and anything else that isn't HTTP.",
       },
       {
+        title: "Sharing a database",
+        href: "/docs/guides/database-sharing",
+        description: "Hand a teammate a link to a local database that expires on its own.",
+      },
+      {
         title: "Custom subdomains",
         href: "/docs/guides/custom-subdomains",
         description: "Pick your own name instead of a random one.",

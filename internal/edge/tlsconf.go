@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
-	"github.com/libdns/cloudflare"
 )
 
 const (
@@ -21,11 +20,11 @@ const (
 )
 
 type TLSConfig struct {
-	Domain             string
-	CloudflareAPIToken string
-	ACMEEmail          string
-	ACMECA             string
-	StoragePath        string
+	Domain      string
+	DNSProvider certmagic.DNSProvider
+	ACMEEmail   string
+	ACMECA      string
+	StoragePath string
 }
 
 type TLSManager struct {
@@ -40,8 +39,8 @@ func NewTLSManager(cfg TLSConfig) (*TLSManager, error) {
 	if cfg.Domain == "" {
 		return nil, errors.New("edge: tls: domain must not be empty")
 	}
-	if cfg.CloudflareAPIToken == "" {
-		return nil, errors.New("edge: tls: cloudflare API token must not be empty")
+	if cfg.DNSProvider == nil {
+		return nil, errors.New("edge: tls: a DNS provider is required for DNS-01 certificates")
 	}
 	if cfg.ACMEEmail == "" {
 		return nil, errors.New("edge: tls: acme email must not be empty")
@@ -67,7 +66,7 @@ func NewTLSManager(cfg TLSConfig) (*TLSManager, error) {
 	certmagic.DefaultACME.Agreed = true
 	certmagic.DefaultACME.DNS01Solver = &certmagic.DNS01Solver{
 		DNSManager: certmagic.DNSManager{
-			DNSProvider: &cloudflare.Provider{APIToken: cfg.CloudflareAPIToken},
+			DNSProvider: cfg.DNSProvider,
 		},
 	}
 

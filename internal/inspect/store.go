@@ -56,8 +56,10 @@ type CapturedResp struct {
 }
 
 type Exchange struct {
-	ID       string
-	ReqID    string
+	ID    string
+	ReqID string
+	// Tunnel names the tunnel that carried the exchange when one process
+	// runs several tunnels (ngstone start); empty for a single tunnel.
 	Tunnel   string
 	Kind     string
 	Start    time.Time

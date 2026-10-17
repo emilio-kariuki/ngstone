@@ -19,6 +19,7 @@ const TOC: TocItem[] = [
   { id: "uninstalling", title: "Uninstalling" },
   { id: "prerequisites", title: "Prerequisites" },
   { id: "dns-records", title: "DNS records" },
+  { id: "dns-provider", title: "Choosing a DNS provider" },
   { id: "cloudflare-token", title: "The Cloudflare API token" },
   { id: "two-certificates", title: "Two certificates, not one" },
   { id: "auth-token", title: "Scoped tunnel credentials" },
@@ -46,10 +47,11 @@ export default function EdgeVpsPage() {
       <Anchor id="fast-path">Fast path installer</Anchor>
       <p>
         On a fresh Ubuntu or Debian VPS, create the apex and wildcard DNS
-        records first, then install the edge from a checkout. The installer
-        downloads both release binaries, verifies their checksums, creates the
-        root-only secrets file, installs the hardened systemd unit, configures
-        UFW, and starts <code>ngstoned</code>:
+        records first and create an API credential for your{" "}
+        <a href="#dns-provider">DNS provider</a>, then install the edge from
+        a checkout. The installer downloads both release binaries, verifies their
+        checksums, creates the root-only secrets file, installs the hardened
+        systemd unit, configures UFW, and starts <code>ngstoned</code>:
       </p>
       <CodeBlock
         language="bash"
@@ -58,18 +60,80 @@ $ cd /opt/ngstone
 $ sudo ./deploy/install-edge.sh \\
     --domain example.com \\
     --email you@example.com \\
-    --acme-ca production`}
+    --dns-provider cloudflare \\
+    --acme-ca staging`}
       />
       <p>
-        It prompts for a narrowly scoped Cloudflare DNS token without
-        echoing it, initializes durable SQLite storage, and prints a scoped
+        It prompts for the chosen provider&apos;s credentials without
+        echoing them, initializes durable SQLite storage, and prints a scoped
         agent credential once. Set <code>NGSTONE_DATABASE_URL</code> before
-        running it to use PostgreSQL. Use{" "}
-        <code>--acme-ca staging</code> while validating DNS and promote to{" "}
-        <code>production</code> after the health check passes. The installer
-        does not create DNS records, so the apex and wildcard must already
-        resolve to the VPS.
+        running it to use PostgreSQL. The installer does not create DNS
+        records, so the apex and wildcard must already resolve to the VPS.
+        Once the health output shows both certificates, switch to trusted
+        certificates:
       </p>
+      <CodeBlock
+        language="bash"
+        code={`$ sudo ./deploy/install-edge.sh --acme-ca production`}
+      />
+      <p>
+        A rerun with only <code>--acme-ca production</code> keeps the
+        domain, email, DNS provider, credentials, TCP port range, and auth
+        token from the existing installation. The installer then prints the
+        laptop commands, which connect to the bare domain,{" "}
+        <code>example.com:4443</code>.
+      </p>
+      <ParamTable>
+        <Property name="--domain" type="string" required>
+          Public base domain. Tunnels get hostnames one label below it.
+        </Property>
+        <Property name="--email" type="string" required>
+          Let&apos;s Encrypt account email.
+        </Property>
+        <Property name="--dns-provider" type="string" defaultValue="cloudflare">
+          DNS host for the certificate challenges; see{" "}
+          <a href="#dns-provider">Choosing a DNS provider</a>. The installer
+          prompts for that provider&apos;s credentials.
+        </Property>
+        <Property name="--acme-ca" type="string" defaultValue="staging">
+          <code>staging</code> or <code>production</code>. Start with{" "}
+          <code>staging</code>, then promote; neither browsers nor the agent
+          trust staging certificates. A rerun keeps the current value.
+        </Property>
+        <Property name="--tcp-ports" type="MIN-MAX">
+          Enable raw <a href="#tcp-tunnels">TCP tunnels</a> on this range,
+          e.g. <code>10000-10100</code>. Adds <code>-tcp-ports</code> to the
+          unit and opens the range in UFW; the range is kept across reruns
+          and <code>--tcp-ports off</code> removes it. It must lie within{" "}
+          <code>1024-65535</code> and must not include <code>4443</code>.
+        </Property>
+        <Property name="--from-source" type="bool">
+          Build <code>ngstoned</code> from the checkout with Go instead of
+          downloading a release. Needed for providers other than Cloudflare
+          until a release that includes them is published; the installer
+          refuses to install a binary that does not support the chosen
+          provider.
+        </Property>
+        <Property name="--version" type="string">
+          Release to download, for example <code>v0.3.2</code>.
+        </Property>
+        <Property name="--ssh-port" type="int" defaultValue="22">
+          SSH port to keep open in UFW.
+        </Property>
+        <Property name="--skip-firewall" type="bool">
+          Do not configure UFW.
+        </Property>
+        <Property name="--skip-dns-check" type="bool">
+          Do not verify that the apex and wildcard records resolve first.
+        </Property>
+      </ParamTable>
+      <Callout variant="note" title="Passing credentials without a prompt">
+        <code>sudo</code> drops variables exported in your shell, so put
+        them on the <code>sudo</code> command line instead:{" "}
+        <code>sudo NGSTONE_CF_API_TOKEN=... ./deploy/install-edge.sh ...</code>.
+        Either way they are stored only in the root-only{" "}
+        <code>/etc/ngstoned/env</code>.
+      </Callout>
 
       <Anchor id="uninstalling">Uninstalling</Anchor>
       <p>
@@ -91,7 +155,8 @@ $ sudo ./deploy/install-edge.sh \\
       />
       <Callout variant="warning" title="SSH access is kept">
         The firewall option removes matching allow rules for only{" "}
-        <code>80/tcp</code>, <code>443/tcp</code>, and <code>4443/tcp</code>.
+        <code>80/tcp</code>, <code>443/tcp</code>, <code>4443/tcp</code>,
+        and the TCP tunnel range if one is configured.
         SSH rules and the source checkout are left in place. If another
         service uses the same allow rule, review it before selecting this
         option. Use <code>--yes</code> only for a deliberate non-interactive
@@ -111,12 +176,12 @@ $ sudo ./deploy/install-edge.sh \\
           hostnames one label below it, such as{" "}
           <code>amber-fox-42.example.com</code>.
         </Step>
-        <Step title="The zone hosted on Cloudflare">
-          Certificates are issued through the ACME DNS-01 challenge, and{" "}
-          <code>github.com/libdns/cloudflare</code> is the only DNS provider
-          compiled into <code>ngstoned</code>. The domain&apos;s nameservers
-          must therefore point at Cloudflare and the zone must be active
-          there before anything below will work.
+        <Step title="The zone hosted on a supported DNS provider">
+          Certificates are issued through the ACME DNS-01 challenge, so{" "}
+          <code>ngstoned</code> needs API access to the zone. The
+          domain&apos;s nameservers must point at one of the{" "}
+          <a href="#dns-provider">supported providers</a> and the zone must
+          be active there before anything below will work.
         </Step>
         <Step title="A machine to run the agent">
           Your laptop, with the <code>ngstone</code> binary installed — see{" "}
@@ -153,12 +218,77 @@ $ sudo ./deploy/install-edge.sh \\
         <code>--transport raw</code> or when you want the simplest path.
       </Callout>
 
-      <Anchor id="cloudflare-token">The Cloudflare API token</Anchor>
+      <Anchor id="dns-provider">Choosing a DNS provider</Anchor>
       <p>
         The edge needs to create and delete <code>_acme-challenge</code> TXT
-        records in the one zone. Create a scoped API token for exactly that
-        — never the Global API Key, which authenticates everything on the
-        account.
+        records in the one zone. Pick the provider that hosts the zone with{" "}
+        <code>-dns-provider</code> (default <code>cloudflare</code>) and
+        create a credential scoped as tightly as that provider allows.
+        Credentials are read from the environment only;{" "}
+        <code>ngstoned -dns-provider help</code> lists the providers and the
+        variables of the binary you have.
+      </p>
+      <ParamTable>
+        <Property name="cloudflare" type="NGSTONE_CF_API_TOKEN">
+          The default. API token with <code>Zone</code> / <code>DNS</code> /{" "}
+          <code>Edit</code> on this zone only. See{" "}
+          <a href="#cloudflare-token">below</a>.
+        </Property>
+        <Property
+          name="route53"
+          type="NGSTONE_AWS_REGION, NGSTONE_AWS_ACCESS_KEY_ID, NGSTONE_AWS_SECRET_ACCESS_KEY"
+        >
+          An IAM user whose policy allows only{" "}
+          <code>route53:ListHostedZonesByName</code>,{" "}
+          <code>route53:ListResourceRecordSets</code>,{" "}
+          <code>route53:ChangeResourceRecordSets</code>, and{" "}
+          <code>route53:GetChange</code>.
+        </Property>
+        <Property name="digitalocean" type="NGSTONE_DO_API_TOKEN">
+          Personal access token with domain read and write scopes.
+        </Property>
+        <Property name="hetzner" type="NGSTONE_HETZNER_API_TOKEN">
+          Read and write API token of the Hetzner Console project that holds
+          the zone. Zones still on the deprecated{" "}
+          <code>dns.hetzner.com</code> must be migrated first.
+        </Property>
+        <Property name="vultr" type="NGSTONE_VULTR_API_KEY">
+          API key; allow only the VPS&apos;s IP in the key&apos;s access
+          control.
+        </Property>
+        <Property
+          name="ovh"
+          type="NGSTONE_OVH_ENDPOINT, NGSTONE_OVH_APPLICATION_KEY, NGSTONE_OVH_APPLICATION_SECRET, NGSTONE_OVH_CONSUMER_KEY"
+        >
+          The endpoint is <code>ovh-eu</code>, <code>ovh-ca</code>, or{" "}
+          <code>ovh-us</code>. Limit the consumer key to <code>GET</code>,{" "}
+          <code>POST</code>, and <code>DELETE</code> on{" "}
+          <code>/domain/zone/*</code>.
+        </Property>
+        <Property name="desec" type="NGSTONE_DESEC_TOKEN">
+          Token from desec.io. deSEC enforces a 3600 s minimum TTL and rate
+          limits, so issuance can take a few minutes.
+        </Property>
+        <Property name="bunny" type="NGSTONE_BUNNY_API_KEY">
+          Bunny DNS account API key.
+        </Property>
+      </ParamTable>
+      <Callout variant="warning" title="GoDaddy, Namecheap, Porkbun and others are not supported">
+        GoDaddy, Namecheap, Porkbun, IONOS, Azure, DNSimple, and netcup are
+        left out deliberately: their <code>libdns</code> modules replace or
+        delete every TXT value at a name, and the apex and wildcard
+        certificates publish two values at{" "}
+        <code>_acme-challenge.example.com</code> at the same time, so one
+        issuance would break the other. Keep the registrar and move only the
+        DNS hosting to a supported provider by changing the nameservers —
+        Cloudflare and deSEC are free.
+      </Callout>
+
+      <Anchor id="cloudflare-token">The Cloudflare API token</Anchor>
+      <p>
+        The default provider, and the example used below. Create a scoped
+        API token for exactly the challenge records — never the Global API
+        Key, which authenticates everything on the account.
       </p>
       <Steps>
         <Step title="Open the token editor">
@@ -205,7 +335,9 @@ $ sudo ./deploy/install-edge.sh \\
         fallback on <code>:443</code> and the raw control plane on{" "}
         <code>:4443</code>.
         Both names validate through the same{" "}
-        <code>_acme-challenge.example.com</code> TXT record.
+        <code>_acme-challenge.example.com</code> TXT record, which is why
+        only providers that add and remove challenge values individually
+        are supported.
       </p>
       <Callout variant="warning" title="A healthy wildcard can hide a dead apex">
         If the apex order fails while the wildcard renews fine, public
@@ -237,9 +369,10 @@ $ sudo ./deploy/install-edge.sh \\
         PostgreSQL URL on every edge and a different <code>NGSTONE_EDGE_ID</code>.
       </p>
       <p>
-        The edge reads its storage and certificate values from the environment. Put them in{" "}
+        The edge reads its storage settings, token hash, ACME email, and DNS
+        provider&apos;s credentials from its environment. Put them in{" "}
         <code>/etc/ngstoned/env</code>, mode <code>0600</code>, owned by
-        root:
+        root — for Cloudflare:
       </p>
       <CodeBlock
         filename="/etc/ngstoned/env"
@@ -265,9 +398,11 @@ NGSTONE_CF_API_TOKEN=cf_fake_token_value_goes_here`}
           use it only while migrating older installations.
         </Property>
         <Property name="NGSTONE_CF_API_TOKEN" type="env" required>
-          The scoped Cloudflare token. Equivalent flag{" "}
+          The scoped Cloudflare token. Equivalent legacy flag{" "}
           <code>-cf-api-token</code>; the environment wins when both are
-          set.
+          set. Other providers read the variables listed under{" "}
+          <a href="#dns-provider">Choosing a DNS provider</a> instead, and
+          have no flags at all.
         </Property>
         <Property name="NGSTONE_CERT_EMAIL" type="env" required>
           Not read by <code>ngstoned</code> directly — the unit interpolates
@@ -280,9 +415,9 @@ NGSTONE_CF_API_TOKEN=cf_fake_token_value_goes_here`}
         <code>/proc/&lt;pid&gt;/cmdline</code> is world-readable, so any
         local user can read a flag value with <code>ps auxww</code> — but
         not the process environment. That is precisely why{" "}
-        <code>ngstoned</code> prefers <code>$NGSTONE_CREDENTIALS_FILE</code>,{" "}
-        the legacy <code>$NGSTONE_TOKEN_SHA256</code>, and{" "}
-        <code>$NGSTONE_CF_API_TOKEN</code> over their flags. Keep all out
+        Secrets belong in the environment file. Explicit flags override
+        their environment defaults; other DNS providers&apos; credentials
+        are available only through environment variables. Keep secrets out
         of <code>ExecStart</code>.
       </Callout>
 
@@ -375,6 +510,12 @@ $ systemctl status ngstoned`}
         <code>-cert-storage</code> at <code>{"${STATE_DIRECTORY}"}/certs</code>{" "}
         so the two always agree.
       </p>
+      <p>
+        <code>-domain</code> is required and has no default. For a DNS host
+        other than Cloudflare, add <code>-dns-provider NAME</code> to{" "}
+        <code>ExecStart</code> and put that provider&apos;s variables in the
+        environment file.
+      </p>
       <Callout variant="danger" title="Do not substitute ReadWritePaths= for StateDirectory=">
         <code>ReadWritePaths=</code> gets no ownership handling from
         systemd, so a freshly assigned dynamic user cannot read the existing
@@ -439,7 +580,9 @@ $ sudo ufw enable`}
       <ParamTable>
         <Property name="-tcp-ports" type="string">
           Port range for raw TCP tunnels, e.g. <code>10000-10999</code>.
-          Empty disables TCP tunnels.
+          Empty disables TCP tunnels. The installer sets it with{" "}
+          <code>--tcp-ports MIN-MAX</code> and opens the range in UFW for
+          you.
         </Property>
         <Property name="-tcp-bind" type="string" defaultValue="0.0.0.0">
           Interface address the TCP tunnel port range binds on.
@@ -456,6 +599,15 @@ $ sudo ufw enable`}
         language="bash"
         code={`$ sudo ufw allow 10000:10999/tcp`}
       />
+      <p>
+        <a href="/docs/guides/database-sharing">Database sharing</a> needs
+        none of this: shares ride the control port and open no listener.
+        The edge knobs for it are <code>-max-share-ttl</code> (default{" "}
+        <code>24h</code>), the longest lifetime <code>ngstone share
+        --expires</code> may ask for, and <code>-share-audit-log PATH</code>,
+        which appends every share&apos;s audit events to a JSON Lines file
+        on the VPS.
+      </p>
 
       <Anchor id="behind-a-proxy">Behind an existing reverse proxy</Anchor>
       <p>
@@ -556,27 +708,30 @@ $ sudo ufw enable`}
       <Anchor id="connect-an-agent">Connecting an agent</Anchor>
       <p>
         On the agent machine, point <code>ngstone</code> at your edge and
-        hand it the <em>plaintext</em> token. Both flags matter for a custom
-        domain: <code>-server</code> is the address to dial, and{" "}
-        <code>-server-name</code> is the SNI and certificate name to verify —
-        it defaults to <code>ngstone.site</code>, so verification fails
-        against any other domain without it.
+        hand it the <em>plaintext</em> token. Dial the bare domain: the
+        control port serves the apex certificate, and the agent verifies it
+        against the host in <code>--server</code>.
       </p>
       <CodeBlock
         language="bash"
-        code={`$ ngstone auth "$TOKEN" -server example.com:4443 -server-name example.com
+        code={`$ ngstone auth "$TOKEN" --server example.com:4443
 verified against example.com:4443 and saved`}
       />
       <p>
         <code>auth</code> persists the token and server address to the
-        config file, but not <code>-server-name</code> — pass it again on
-        every <code>ngstone port</code> invocation:
+        config file, so later commands need no extra flags:
       </p>
       <CodeBlock
         language="bash"
-        code={`$ ngstone port 3000 -server-name example.com
-$ ngstone port 3000 -server-name example.com --subdomain demo`}
+        code={`$ ngstone port 3000
+$ ngstone port 3000 --subdomain demo`}
       />
+      <Callout variant="note" title="Older agents">
+        Agent releases from before <code>--server-name</code> defaulted to
+        the <code>--server</code> host verify against{" "}
+        <code>ngstone.site</code> instead, and need{" "}
+        <code>--server-name example.com</code> on every command.
+      </Callout>
       <p>
         The agent prints the assigned URL. Verify it end to end from a third
         machine:
@@ -614,10 +769,11 @@ $ curl http://127.0.0.1:4041/healthz`}
       <ParamTable>
         <Property name="Certificate issuance fails" type="startup">
           Check that both DNS records exist and have propagated, that the
-          zone is actually served by Cloudflare, and that the API token has{" "}
-          <code>Zone:DNS:Edit</code> on <em>this</em> zone. A token scoped to
-          the wrong zone fails at the TXT-record write, which the log names
-          explicitly.
+          zone is actually served by the provider named in{" "}
+          <code>-dns-provider</code>, and that the credential can edit{" "}
+          <em>this</em> zone — for Cloudflare, <code>Zone:DNS:Edit</code>{" "}
+          on it. A credential scoped to the wrong zone fails at the
+          TXT-record write, which the log names explicitly.
         </Property>
         <Property name="The service exits at startup" type="startup">
           The apex certificate check runs before <code>:4443</code> accepts
@@ -626,12 +782,13 @@ $ curl http://127.0.0.1:4041/healthz`}
           being healthy proves nothing about the apex.
         </Property>
         <Property name="ngstoned refuses to start with no ACME traffic" type="config">
-          <code>-credentials-file</code> (or{" "}
-          <code>$NGSTONE_CREDENTIALS_FILE</code>) is required for scoped mode;
-          the legacy <code>-token-sha256</code> path remains available, and{" "}
-          <code>-cert-email</code> plus <code>-cf-api-token</code> are
-          required unless <code>-insecure</code>. Each missing value is
-          named in a single error line before exit.
+          <code>-domain</code> is required. The edge uses durable SQLite
+          storage by default; <code>-credentials-file</code> and the legacy
+          <code>-token-sha256</code> mode remain available. TLS requires
+          <code>-cert-email</code> and the chosen DNS provider&apos;s
+          credentials unless <code>-insecure</code> is set. Each missing
+          value is named before exit; <code>ngstoned -dns-provider help</code>{" "}
+          lists the variables each provider reads.
         </Property>
         <Property name="rejected this token" type="agent">
           The agent hashed a different string than the edge was given.
@@ -649,10 +806,12 @@ $ curl http://127.0.0.1:4041/healthz`}
           <code>ngstone config get server</code>.
         </Property>
         <Property name="TLS handshake failures from the agent" type="agent">
-          Usually a missing <code>-server-name example.com</code>: the
-          default SNI is <code>ngstone.site</code>, which the apex
-          certificate does not cover. It is also what a staging-issued apex
-          certificate looks like from a client with a normal trust store.
+          Usually the agent is dialling a name the apex certificate does
+          not cover, such as <code>edge.example.com</code> (which older
+          installer versions printed) — use <code>example.com:4443</code>,
+          and see <a href="#connect-an-agent">Older agents</a> above. It is
+          also what a staging-issued apex certificate looks like from a
+          client with a normal trust store.
         </Property>
       </ParamTable>
       <p>

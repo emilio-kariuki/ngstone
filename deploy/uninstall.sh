@@ -36,7 +36,7 @@ Usage: uninstall.sh [options]
 Options:
   -y, --yes                   skip the confirmation prompt
   --remove-state              delete the persisted certificate and ACME state
-  --remove-firewall-rules     remove matching UFW allow rules for 80/tcp, 443/tcp, and 4443/tcp
+  --remove-firewall-rules     remove matching UFW allow rules for 80/tcp, 443/tcp, 4443/tcp and any TCP tunnel range
   -h, --help                  show this help
 
 The default removes the ngstoned systemd unit, binary, and root-only secrets.
@@ -113,11 +113,20 @@ if [[ "$found" -eq 0 ]]; then
   exit 0
 fi
 
+# Read the TCP tunnel range before the unit is removed, so its firewall rule
+# can be removed too.
+TCP_PORTS=""
+if [[ -f "$SERVICE_PATH" ]]; then
+  TCP_PORTS="$(awk '$1 == "-tcp-ports" { print $2; exit }' "$SERVICE_PATH")"
+fi
+[[ "$TCP_PORTS" =~ ^[0-9]+-[0-9]+$ ]] || TCP_PORTS=""
+FIREWALL_PORTS="80/tcp, 443/tcp, and 4443/tcp${TCP_PORTS:+, plus the ${TCP_PORTS} TCP tunnel range}"
+
 printf 'This removes:\n'
 printf '  - the %s systemd unit and its enablement\n' "$SERVICE_NAME"
 printf '  - %s\n' "$BINARY_PATH"
 printf '  - %s\n' "$AGENT_BINARY_PATH"
-printf '  - %s, including the Cloudflare API token and auth-token hash\n' "$ENV_PATH"
+printf '  - %s, including the DNS provider credentials and auth-token hash\n' "$ENV_PATH"
 if [[ -n "$SCOPED_CREDENTIALS_PATH" ]]; then
   printf '  - scoped credential file %s\n' "$SCOPED_CREDENTIALS_PATH"
 fi
@@ -130,7 +139,7 @@ if [[ -n "$DATABASE_URL" && "$DATABASE_URL" != sqlite:///* && "$DATABASE_URL" !=
   printf 'The configured external control-plane database will not be modified.\n'
 fi
 if [[ "$REMOVE_FIREWALL" -eq 1 ]]; then
-  printf 'Matching UFW allow rules for 80/tcp, 443/tcp, and 4443/tcp will be removed; SSH rules stay.\n'
+  printf 'Matching UFW allow rules for %s will be removed; SSH rules stay.\n' "$FIREWALL_PORTS"
 else
   printf 'UFW rules will be left unchanged.\n'
 fi
@@ -202,6 +211,9 @@ if [[ "$REMOVE_FIREWALL" -eq 1 ]]; then
     ufw delete allow 80/tcp >/dev/null || true
     ufw delete allow 443/tcp >/dev/null || true
     ufw delete allow 4443/tcp >/dev/null || true
+    if [[ -n "$TCP_PORTS" ]]; then
+      ufw delete allow "${TCP_PORTS/-/:}/tcp" >/dev/null || true
+    fi
   else
     info "UFW is not active; no firewall rules were changed"
   fi
@@ -212,5 +224,5 @@ if [[ "$REMOVE_STATE" -eq 0 ]]; then
   printf 'Certificate state remains at %s for a future reinstall.\n' "$STATE_PRIVATE"
 fi
 if [[ "$REMOVE_FIREWALL" -eq 0 ]]; then
-  printf 'Review UFW rules for 80/tcp, 443/tcp, and 4443/tcp if they are no longer needed.\n'
+  printf 'Review UFW rules for %s if they are no longer needed.\n' "$FIREWALL_PORTS"
 fi

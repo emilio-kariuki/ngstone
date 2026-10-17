@@ -287,8 +287,8 @@ type Pong struct { TS int64 \`json:"ts_unix_ms"\` } // echoes Ping.TS`}
       <Anchor id="versioning">Versioning</Anchor>
       <p>
         The protocol uses a single integer major version, currently{" "}
-        <code>2</code>. The agent offers every version it supports in{" "}
-        <code>Auth.ProtoVersions</code> — <code>[2, 1]</code> — and the edge
+        <code>3</code>. The agent offers every version it supports in{" "}
+        <code>Auth.ProtoVersions</code> — <code>[3, 2, 1]</code> — and the edge
         picks the highest version present in both its own supported list
         and the agent&apos;s offer, returning it in{" "}
         <code>AuthOK.ProtoVersion</code>. An edge that only understands v1
@@ -315,6 +315,26 @@ type Pong struct { TS int64 \`json:"ts_unix_ms"\` } // echoes Ping.TS`}
         HTTP/2 mode is also v2-only and requires the <code>http2</code> echo in
         <code>BindOK</code>, so an older edge cannot silently fall back to
         HTTP/1.1.
+      </p>
+      <p>
+        v3 added <a href="/docs/guides/database-sharing">database
+        sharing</a>: <code>Auth.share_secret</code> as an alternative to{" "}
+        <code>token</code>, <code>AuthOK.scope</code> (
+        <code>operator</code> or <code>connector</code>), the{" "}
+        <code>share</code>/<code>share_ok</code>/<code>share_err</code>,{" "}
+        <code>unshare</code>, <code>share_update</code>, <code>kick</code>,{" "}
+        <code>approve</code>, <code>list_shares</code>,{" "}
+        <code>watch_shares</code>, <code>connect</code>/
+        <code>connect_ok</code>/<code>connect_err</code>,{" "}
+        <code>share_event</code>, <code>share_closed</code> and{" "}
+        <code>share_updated</code> messages, a <code>share</code> stream
+        kind and optional <code>share_id</code> and <code>target</code>{" "}
+        fields on the stream preamble. A connector-scoped session may send
+        only <code>connect</code>,{" "}
+        <code>ping</code>, <code>pong</code> and <code>goodbye</code>;
+        anything else is answered with <code>forbidden</code> and the
+        session closes. The full message set is in{" "}
+        <code>docs/SHARE-DESIGN.md</code>.
       </p>
       <p>
         Additive JSON fields never bump the version — unknown fields are

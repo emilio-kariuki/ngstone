@@ -35,6 +35,11 @@ const (
 	drainTimeout = 15 * time.Second
 )
 
+// handshakeTimeout bounds the auth+bind exchange on the control stream. The
+// edge gives an agent 5s to send Auth; this is the symmetric guard on the
+// agent's side, so a silent or wedged edge cannot hang a reconnect forever.
+var handshakeTimeout = 15 * time.Second
+
 var errFatalHandshake = errors.New("agent: fatal handshake error")
 var errEdgeGoodbye = errors.New("agent: edge said goodbye")
 
@@ -65,10 +70,13 @@ func (e *authErr) Error() string {
 }
 
 type Config struct {
+	// Name identifies this tunnel when one process runs several; it tags
+	// status events and captured exchanges. Empty for a single tunnel.
+	Name string
+
 	ControlAddr string
 	Transport   string
 	Token       string
-	Name        string
 	Subdomain   string
 	TargetURL   string
 	HostHeader  string
@@ -93,12 +101,25 @@ type Config struct {
 
 	Store  *inspect.Store
 	Events chan<- StatusEvent
+
+	// Share switches the agent into sharer mode (protocol v3): instead of a
+	// Bind, the handshake registers this share and the edge relays
+	// connector streams to TargetURL (a host:port, as for Kind "tcp").
+	Share *ShareSpec
+	// ShareEvents receives the edge's audit events for the share. Sends
+	// never block; a full channel drops the event with a log line.
+	ShareEvents chan<- proto.ShareEvent
 }
 
 type Status struct {
+	State    string // one of the State* constants; empty before the first attempt
 	Hostname string
 	URL      string
+	Err      string // last error text when not online
 	Evicted  bool
+
+	ShareID   string
+	ExpiresAt time.Time
 }
 
 const (
@@ -111,10 +132,15 @@ const (
 )
 
 type StatusEvent struct {
+	Tunnel   string
 	State    string
 	Hostname string
 	URL      string
 	Err      string
+
+	// Set in sharer mode once the share is registered.
+	ShareID   string
+	ExpiresAt time.Time
 }
 
 type Agent struct {
@@ -127,8 +153,10 @@ type Agent struct {
 	target         *url.URL
 	targetErr      error
 
-	mu     sync.Mutex
-	status Status
+	mu          sync.Mutex
+	status      Status
+	control     *liveControl      // live control stream in sharer mode, for Approve/Kick/Extend
+	pendingMgmt map[uint64]string // ids of management requests awaiting a reply
 }
 
 func New(cfg Config) *Agent {
@@ -179,6 +207,7 @@ func (a *Agent) emit(ev StatusEvent) {
 	if a.cfg.Events == nil {
 		return
 	}
+	ev.Tunnel = a.cfg.Name
 	select {
 	case a.cfg.Events <- ev:
 	default:
@@ -186,13 +215,17 @@ func (a *Agent) emit(ev StatusEvent) {
 }
 
 func (a *Agent) emitState(state, errText string) {
-	st := a.Status()
+	a.mu.Lock()
+	a.status.State = state
+	a.status.Err = errText
+	st := a.status
+	a.mu.Unlock()
 	a.emit(StatusEvent{State: state, Hostname: st.Hostname, URL: st.URL, Err: errText})
 }
 
 func (a *Agent) setBound(hostname, url string) {
 	a.mu.Lock()
-	a.status = Status{Hostname: hostname, URL: url}
+	a.status = Status{State: StateOnline, Hostname: hostname, URL: url}
 	a.mu.Unlock()
 	slog.Info("agent: bound", "hostname", hostname, "url", url)
 	a.emit(StatusEvent{State: StateOnline, Hostname: hostname, URL: url})
@@ -201,6 +234,7 @@ func (a *Agent) setBound(hostname, url string) {
 func (a *Agent) setEvicted(hostname string) {
 	a.mu.Lock()
 	a.status.Evicted = true
+	a.status.State = StateEvicted
 	url := a.status.URL
 	a.mu.Unlock()
 	slog.Warn("agent: tunnel evicted, no longer advertising", "hostname", hostname)
@@ -281,14 +315,28 @@ func (a *Agent) runOnceTransport(ctx context.Context, bo *backoff, mode string) 
 
 	idgen := proto.NewAgentIDGen()
 
-	bindOK, err := a.handshake(sess, idgen)
-	if err != nil {
-		if errors.Is(err, errFatalHandshake) {
-			return err
+	release := guardHandshake(ctx, sess)
+	if a.shareMode() {
+		shareOK, err := a.handshakeShare(sess, idgen)
+		release()
+		if err != nil {
+			if errors.Is(err, errFatalHandshake) {
+				return err
+			}
+			return &preBindTransportError{err: err}
 		}
-		return &preBindTransportError{err: err}
+		a.setShared(shareOK)
+	} else {
+		bindOK, err := a.handshake(sess, idgen)
+		release()
+		if err != nil {
+			if errors.Is(err, errFatalHandshake) {
+				return err
+			}
+			return &preBindTransportError{err: err}
+		}
+		a.setBound(bindOK.Hostname, a.advertisedURL(bindOK))
 	}
-	a.setBound(bindOK.Hostname, a.advertisedURL(bindOK))
 	bo.reset()
 
 	ln, err := tunnel.NewListener(sess)
@@ -304,6 +352,11 @@ func (a *Agent) runOnceTransport(ctx context.Context, bo *backoff, mode string) 
 
 	serveErrCh := make(chan error, 1)
 	go func() { serveErrCh <- srv.Serve(ln) }()
+
+	if a.shareMode() {
+		a.setControl(&liveControl{ctrl: sess.Control(), idgen: idgen})
+		defer a.setControl(nil)
+	}
 
 	ctrlErrCh := make(chan error, 1)
 	go func() { ctrlErrCh <- a.controlLoop(sess, idgen) }()
@@ -342,6 +395,9 @@ type tunnelServer interface {
 }
 
 func (a *Agent) bindKind() string {
+	if a.shareMode() {
+		return proto.KindTCP
+	}
 	if a.cfg.Kind == "" {
 		return proto.KindHTTP
 	}
@@ -356,7 +412,28 @@ func (a *Agent) advertisedURL(b proto.BindOK) string {
 }
 
 func (a *Agent) newServer() (tunnelServer, error) {
-	if a.cfg.Kind == proto.KindTCP {
+	if a.shareMode() {
+		srv := newTCPServer(a.cfg.TargetURL)
+		spec := a.cfg.Share
+		srv.resolve = func(stream net.Conn) (string, error) {
+			pc, ok := stream.(preambleConn)
+			if !ok {
+				return "", errors.New("agent: share stream without a preamble")
+			}
+			pre := pc.Preamble()
+			target := pre.Target
+			if target == "" && len(spec.Targets) == 1 {
+				target = spec.Targets[0].ID
+			}
+			addr, ok := spec.addrFor(target)
+			if !ok {
+				return "", fmt.Errorf("agent: share stream for unknown target %q", pre.Target)
+			}
+			return addr, nil
+		}
+		return srv, nil
+	}
+	if a.bindKind() == proto.KindTCP {
 		return newTCPServer(a.cfg.TargetURL), nil
 	}
 	target := a.Target()
@@ -392,6 +469,33 @@ func streamConnContext(ctx context.Context, c net.Conn) context.Context {
 	})
 }
 
+// guardHandshake bounds a handshake running on sess. The control stream gets
+// a handshakeTimeout deadline, and the session is closed if ctx is cancelled
+// first, so neither a silent edge nor Ctrl-C can leave the agent blocked in a
+// control-stream read. The returned func lifts both guards; call it as soon
+// as the handshake is over, before the control loop starts.
+func guardHandshake(ctx context.Context, sess tunnel.Session) (release func()) {
+	ctrl := sess.Control()
+	_ = ctrl.SetDeadline(time.Now().Add(handshakeTimeout))
+
+	done := make(chan struct{})
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		select {
+		case <-ctx.Done():
+			sess.Close("context cancelled during handshake")
+		case <-done:
+		}
+	}()
+
+	return func() {
+		close(done)
+		<-exited
+		_ = ctrl.SetDeadline(time.Time{})
+	}
+}
+
 func (a *Agent) authenticate(sess tunnel.Session, idgen *proto.IDGen) (int, error) {
 	ctrl := sess.Control()
 
@@ -424,6 +528,16 @@ func (a *Agent) authenticate(sess tunnel.Session, idgen *proto.IDGen) (int, erro
 	default:
 		return 0, fmt.Errorf("agent: unexpected reply %q to auth", msg.Type)
 	}
+}
+
+// handshakeShare authenticates with the operator token and registers the
+// configured share.
+func (a *Agent) handshakeShare(sess tunnel.Session, idgen *proto.IDGen) (proto.ShareOK, error) {
+	negotiated, err := a.authenticate(sess, idgen)
+	if err != nil {
+		return proto.ShareOK{}, err
+	}
+	return a.registerShare(sess, idgen, negotiated)
 }
 
 func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK, error) {
@@ -589,8 +703,38 @@ func (a *Agent) controlLoop(sess tunnel.Session, idgen *proto.IDGen) error {
 					return fmt.Errorf("%w: %s", errFatalHandshake, gb.Reason)
 				}
 				return errEdgeGoodbye
+			case proto.TypeShareEvent:
+				ev, err := proto.Decode[proto.ShareEvent](m)
+				if err != nil {
+					return fmt.Errorf("agent: malformed share event: %w", err)
+				}
+				a.deliverShareEvent(ev)
+				if ev.Event == proto.ShareEventClosed {
+					switch ev.Reason {
+					case proto.ShareReasonExpired:
+						return fmt.Errorf("%w: %w", errFatalHandshake, ErrShareExpired)
+					case proto.ShareReasonIdle:
+						return fmt.Errorf("%w: %w", errFatalHandshake, ErrShareIdle)
+					case proto.ShareReasonRevoked:
+						return fmt.Errorf("%w: %w", errFatalHandshake, ErrShareRevoked)
+					}
+					return fmt.Errorf("agent: share closed by edge: %s", ev.Reason)
+				}
+			case proto.TypeApproveOK, proto.TypeKickOK, proto.TypeShareOK, proto.TypeShareErr:
+				// Replies to management requests sent from the sharer's
+				// terminal; failures are reported there, not fatal here.
+				if _, ok := a.isMgmtReply(m.ID); ok {
+					if m.Type == proto.TypeShareErr {
+						e, _ := proto.Decode[proto.ShareErr](m)
+						a.deliverShareEvent(proto.ShareEvent{Event: "error", AtMS: time.Now().UnixMilli(), Reason: e.Code + ": " + e.Message})
+					}
+				}
 			case proto.TypeError:
 				e, _ := proto.Decode[proto.Error](m)
+				if _, ok := a.isMgmtReply(m.ID); ok {
+					a.deliverShareEvent(proto.ShareEvent{Event: "error", AtMS: time.Now().UnixMilli(), Reason: e.Code + ": " + e.Message})
+					continue
+				}
 				return fmt.Errorf("agent: edge protocol error: %s: %s", e.Code, e.Message)
 			default:
 				slog.Warn("agent: unexpected control message", "type", m.Type)
@@ -625,7 +769,9 @@ func Verify(ctx context.Context, cfg Config) error {
 			continue
 		}
 		idgen := proto.NewAgentIDGen()
+		release := guardHandshake(ctx, sess)
 		_, authErrValue := a.authenticate(sess, idgen)
+		release()
 		if authErrValue == nil {
 			a.sendGoodbye(sess, idgen, "verify done")
 			sess.Close("verify done")

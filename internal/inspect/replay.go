@@ -125,6 +125,7 @@ func Replay(ctx context.Context, ex *Exchange, target *url.URL, rt http.RoundTri
 	out := &Exchange{
 		ID:       newID(),
 		ReqID:    ex.ReqID,
+		Tunnel:   ex.Tunnel,
 		Kind:     KindHTTP,
 		Start:    start,
 		Replayed: true,

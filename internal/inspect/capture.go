@@ -252,10 +252,11 @@ func wrapRWC(rwc io.ReadWriteCloser, ctr *upgradeCounters) io.ReadWriteCloser {
 }
 
 type exchangeState struct {
-	store *Store
-	id    string
-	reqID string
-	start time.Time
+	store  *Store
+	id     string
+	reqID  string
+	tunnel string
+	start  time.Time
 
 	method string
 	url    string
@@ -315,6 +316,7 @@ func (s *exchangeState) finalizeUpgrade(resp *http.Response) *upgradeCounters {
 	ex := &Exchange{
 		ID:       s.id,
 		ReqID:    s.reqID,
+		Tunnel:   s.tunnel,
 		Kind:     KindUpgrade,
 		Start:    s.start,
 		Duration: time.Since(s.start),
@@ -349,6 +351,7 @@ func (s *exchangeState) finalizeHTTP(rec *recorder, errText string) {
 	s.store.Add(&Exchange{
 		ID:       s.id,
 		ReqID:    s.reqID,
+		Tunnel:   s.tunnel,
 		Kind:     kind,
 		Start:    s.start,
 		Duration: time.Since(s.start),
@@ -434,10 +437,18 @@ func (w *recorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 }
 
 type Capturer struct {
-	store *Store
+	store  *Store
+	tunnel string
 }
 
 func NewCapturer(store *Store) *Capturer { return &Capturer{store: store} }
+
+// WithTunnel tags every exchange this capturer records with a tunnel name,
+// so one store can serve several tunnels.
+func (c *Capturer) WithTunnel(name string) *Capturer {
+	c.tunnel = name
+	return c
+}
 
 func (c *Capturer) Store() *Store { return c.store }
 
@@ -455,6 +466,7 @@ func (c *Capturer) Middleware(next http.Handler) http.Handler {
 		state := &exchangeState{
 			store:  c.store,
 			id:     c.store.NextID(),
+			tunnel: c.tunnel,
 			reqID:  ReqIDFrom(r.Context()),
 			start:  time.Now(),
 			method: r.Method,

@@ -41,16 +41,25 @@ export default function QuickstartPage() {
           connections on ports 80, 443, and 4443.
         </Step>
         <Step title="A domain with wildcard DNS">
-          A domain such as <code>ngstone.site</code> with a wildcard record
-          (<code>*.ngstone.site</code>) and an apex record (
-          <code>ngstone.site</code>) both pointing at your VPS&apos;s IP
+          A domain such as <code>example.com</code> with a wildcard record
+          (<code>*.example.com</code>) and an apex record (
+          <code>example.com</code>) both pointing at your VPS&apos;s IP
           address.
         </Step>
-        <Step title="Go 1.25, to build the edge">
-          Build <code>ngstoned</code> and the VPS-side credential CLI from
-          source for the VPS&apos;s architecture, or use the release archive.
-          The laptop agent has prebuilt installs (next section), so you
-          don&apos;t need Go on your laptop.
+        <Step title="DNS hosted on a supported provider">
+          The edge obtains its certificates through DNS-01, so it needs an
+          API credential for the zone: Cloudflare (the default), Route 53,
+          DigitalOcean, Hetzner, Vultr, OVH, deSEC, or Bunny. See{" "}
+          <a href="/docs/guides/edge-vps#dns-provider">
+            Choosing a DNS provider
+          </a>
+          .
+        </Step>
+        <Step title="The ngstoned binary">
+          Release archives include <code>ngstoned</code> and <code>ngstone</code>. Providers other
+          than Cloudflare need a build from source (Go 1.25) until a release
+          that includes them is published. The agent has prebuilt installs
+          (below), so you don&apos;t need Go on your laptop.
         </Step>
       </Steps>
 
@@ -72,16 +81,25 @@ token: <save this value on the laptop>`}
       <Anchor id="start-the-edge">Start the edge</Anchor>
       <p>
         On the VPS, run <code>ngstoned</code> with your domain, a
-        certificate contact email, and a Cloudflare API token scoped to{" "}
-        <code>Zone:DNS:Edit</code>. SQLite is used automatically; set{" "}
+        certificate contact email, and the chosen DNS provider&apos;s credentials in the environment
+        (Cloudflare by default, or select <code>--dns-provider</code>). SQLite is used automatically; set{" "}
         <code>NGSTONE_DATABASE_URL</code> to a PostgreSQL URL for multiple
         edge servers:
       </p>
       <CodeBlock
         language="bash"
         code={`$ NGSTONE_CF_API_TOKEN="$CF_API_TOKEN" \\
-  ngstoned --domain ngstone.site --cert-email you@ngstone.site`}
+  ngstoned --domain example.com --cert-email you@example.com`}
       />
+      <p>
+        For another provider, add <code>--dns-provider NAME</code> and set
+        its variables instead; <code>ngstoned -dns-provider help</code>{" "}
+        lists them. On Ubuntu or Debian,{" "}
+        <a href="/docs/guides/edge-vps#fast-path">
+          <code>deploy/install-edge.sh</code>
+        </a>{" "}
+        does all of this, generates the token, and installs a systemd unit.
+      </p>
       <p>
         The edge requests two independent TLS certificates via DNS-01 — a
         wildcard for tunnel traffic and an apex certificate for the
@@ -109,9 +127,13 @@ $ curl -fsSL https://raw.githubusercontent.com/emilio-kariuki/ngstone/main/insta
       </p>
       <CodeBlock
         language="bash"
-        code={`$ ngstone auth "$TOKEN"
-verified against ngstone.site:4443 and saved`}
+        code={`$ ngstone auth "$TOKEN" --server example.com:4443
+verified against example.com:4443 and saved`}
       />
+      <p>
+        The server address is saved with the token, and the certificate is
+        verified against its host, so later commands need no further flags.
+      </p>
 
       <Anchor id="start-tunneling">Start tunneling</Anchor>
       <p>

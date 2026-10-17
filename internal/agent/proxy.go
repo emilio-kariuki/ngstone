@@ -47,7 +47,7 @@ func (a *Agent) buildProxyWithTransport(target *url.URL, transport http.RoundTri
 		return proxy
 	}
 
-	capturer := inspect.NewCapturer(a.store)
+	capturer := inspect.NewCapturer(a.store).WithTunnel(a.cfg.Name)
 	capturer.Install(proxy)
 	return capturer.Middleware(proxy)
 }

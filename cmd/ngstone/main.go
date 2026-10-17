@@ -34,6 +34,16 @@ var verbs = map[string]func([]string) int{
 	"auth":    cmdAuth,
 	"port":    cmdPort,
 	"tcp":     cmdTCP,
+	"share":   cmdShare,
+	"connect": cmdConnect,
+	"shares":  cmdShares,
+	"unshare": cmdUnshare,
+	"extend":  cmdExtend,
+	"kick":    cmdKick,
+	"serve":   cmdServe,
+	"start":   cmdStart,
+	"ps":      cmdPS,
+	"service": cmdService,
 	"config":  cmdConfig,
 	"logout":  cmdLogout,
 	"version": cmdVersion,
@@ -56,6 +66,16 @@ Commands:
   auth <token>            verify and save an auth token
   port <port|url>         expose a local port or URL through the tunnel
   tcp <port|host:port>    expose a raw TCP service through the tunnel
+  share <preset>...       share local databases with teammates via a link
+  connect <link>          connect to a shared database through a link
+  shares                  list live shares on the edge (--watch tails their events)
+  unshare <id>            revoke a share
+  extend <id> <duration>  move a share's expiry
+  kick <id> <connector>   remove one connector from a share
+  serve [dir]             share a directory of files through the tunnel
+  start [name ...]        start the tunnels defined in ngstone.yml
+  service install         run 'ngstone start' as a background service (systemd or launchd)
+  ps                      list the tunnels of every running ngstone process
   config                  view or set local configuration
   logout                  remove the saved auth token
   version                 print the ngstone version
@@ -65,8 +85,14 @@ Examples:
   ngstone port 3000
   ngstone port 3000 --subdomain demo
   ngstone port 3000 --host-header demo.localhost:3000
+  ngstone serve ./dist --subdomain demo
   ngstone tcp 5432
   ngstone tcp db.local:5432 --remote-port 15432
+  ngstone share postgres --expires 2h --label "staging replica"
+  ngstone share postgres redis:6380 --approve --passphrase hunter2
+  ngstone share tcp:9000 --single-use --idle 30m
+  ngstone connect ngstone://example.com:4443/s/... --as alice
+  ngstone shares --watch
 `
 
 func printUsage(w *os.File) {
@@ -206,7 +232,7 @@ func cmdAuth(args []string) int {
 	fs := flag.NewFlagSet("auth", flag.ContinueOnError)
 	serverFlag := fs.String("server", "", "edge control plane address to verify against (defaults to config or "+defaultServer+")")
 	insecure := fs.Bool("insecure", false, "dial the control plane in plaintext (dev/test only)")
-	serverName := fs.String("server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
+	serverName := fs.String("server-name", "", "TLS ServerName/SNI to verify against; defaults to the host in the server address (ignored with -insecure)")
 	pin := fs.String("pin", "", "optional \"sha256/BASE64\" SPKI pin")
 	positionals, err := parsePermissive(fs, args)
 	if err != nil {
@@ -340,7 +366,7 @@ func newPortFlagSet() (*flag.FlagSet, *portFlags) {
 	fs.StringVar(&pf.token, "token", "", "auth token override (defaults to NGSTONE_TOKEN or the saved config)")
 	fs.StringVar(&pf.instanceID, "instance-id", "", "internal/undocumented: force a specific instance id (testing only)")
 	fs.BoolVar(&pf.insecure, "insecure", false, "dial the control plane in plaintext (dev/test only, no certificates involved)")
-	fs.StringVar(&pf.serverName, "server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
+	fs.StringVar(&pf.serverName, "server-name", "", "TLS ServerName/SNI to verify against; defaults to the host in the server address (ignored with -insecure)")
 	fs.StringVar(&pf.pin, "pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation")
 	fs.StringVar(&pf.hostHeader, "host-header", "", "Host header sent to the local app (empty = preserve the public host)")
 	fs.BoolVar(&pf.noTUI, "no-tui", false, "disable the terminal inspector UI and log plain text to stderr")
@@ -491,6 +517,7 @@ func runPortPlain(ctx context.Context, acfg agent.Config) int {
 	slog.SetDefault(logger)
 
 	a := agent.New(acfg)
+	defer publishStatus(ctx, "port", []agent.Config{acfg}, []*agent.Agent{a})()
 
 	logger.Info("ngstone: starting", "control", acfg.ControlAddr, "target", acfg.TargetURL, "insecure", acfg.Insecure)
 	if err := a.Run(ctx); err != nil {
@@ -551,7 +578,7 @@ func newTCPFlagSet() (*flag.FlagSet, *tcpFlags) {
 	fs.StringVar(&tf.token, "token", "", "auth token override (defaults to NGSTONE_TOKEN or the saved config)")
 	fs.StringVar(&tf.instanceID, "instance-id", "", "internal/undocumented: force a specific instance id (testing only)")
 	fs.BoolVar(&tf.insecure, "insecure", false, "dial the control plane in plaintext (dev/test only, no certificates involved)")
-	fs.StringVar(&tf.serverName, "server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
+	fs.StringVar(&tf.serverName, "server-name", "", "TLS ServerName/SNI to verify against; defaults to the host in the server address (ignored with -insecure)")
 	fs.StringVar(&tf.pin, "pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation")
 	fs.StringVar(&tf.allowCIDR, "allow-cidr", "", "comma-separated CIDRs allowed to reach the tunnel (empty = allow all)")
 	return fs, tf
@@ -622,6 +649,7 @@ func runTCPPlain(ctx context.Context, acfg agent.Config) int {
 	acfg.Events = events
 
 	a := agent.New(acfg)
+	defer publishStatus(ctx, "tcp", []agent.Config{acfg}, []*agent.Agent{a})()
 
 	go func() {
 		for {
@@ -657,6 +685,7 @@ func runPortTUI(ctx context.Context, acfg agent.Config) int {
 	acfg.Events = events
 
 	a := agent.New(acfg)
+	defer publishStatus(ctx, "port", []agent.Config{acfg}, []*agent.Agent{a})()
 
 	logger.Info("ngstone: starting", "control", acfg.ControlAddr, "target", acfg.TargetURL, "insecure", acfg.Insecure)
 
@@ -767,7 +796,7 @@ func bridgeStatus(ctx context.Context, in <-chan agent.StatusEvent, out chan<- t
 				err = errors.New(ev.Err)
 			}
 			select {
-			case out <- tui.StatusEvent{State: ev.State, Hostname: ev.Hostname, URL: ev.URL, Err: err}:
+			case out <- tui.StatusEvent{Tunnel: ev.Tunnel, State: ev.State, Hostname: ev.Hostname, URL: ev.URL, Err: err}:
 			case <-ctx.Done():
 				return
 			default:
@@ -876,7 +905,7 @@ func legacyMain() {
 	instanceID := flag.String("instance-id", "", "internal/undocumented: force a specific instance id (testing only)")
 
 	insecure := flag.Bool("insecure", false, "dial the control plane in plaintext (dev/test only, no certificates involved)")
-	serverName := flag.String("server-name", agent.DefaultServerName, "TLS ServerName/SNI to verify against (ignored with -insecure)")
+	serverName := flag.String("server-name", "", "TLS ServerName/SNI to verify against; defaults to the host in the server address (ignored with -insecure)")
 	pin := flag.String("pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation (off by default)")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	noTUI := flag.Bool("no-tui", false, "disable the terminal inspector UI (this legacy flag form is always plain output)")

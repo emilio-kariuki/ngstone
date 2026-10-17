@@ -41,18 +41,28 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/ngstoned --domain ngstone.site --cert-email you@ngstone.site
+ExecStart=/usr/local/bin/ngstoned --domain example.com --cert-email you@example.com
 DynamicUser=yes
 StateDirectory=ngstoned
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
-EnvironmentFile=/etc/ngstoned/ngstoned.env
+EnvironmentFile=/etc/ngstoned/env
 Restart=always
 RestartSec=2
 
 [Install]
 WantedBy=multi-user.target`}
       />
+      <p>
+        <code>--domain</code> is required and has no default. For a DNS host
+        other than Cloudflare, add <code>--dns-provider NAME</code> to{" "}
+        <code>ExecStart</code> and put that provider&apos;s credentials in
+        the environment file; for raw TCP tunnels, add{" "}
+        <code>--tcp-ports MIN-MAX</code> and open that range in the
+        firewall. <code>deploy/install-edge.sh</code> writes this unit for
+        you — see{" "}
+        <a href="/docs/guides/edge-vps#fast-path">Fast path installer</a>.
+      </p>
 
       <Anchor id="dynamicuser-statedirectory">DynamicUser & StateDirectory</Anchor>
       <p>
@@ -92,12 +102,10 @@ WantedBy=multi-user.target`}
         <code>NGSTONE_DATABASE_URL</code>, <code>NGSTONE_EDGE_ID</code>,{" "}
         <code>NGSTONE_CREDENTIALS_FILE</code>,{" "}
         <code>NGSTONE_TOKEN_SHA256</code>,{" "}
-        <code>NGSTONE_ADMIN_TOKEN_SHA256</code>, and{" "}
-        <code>NGSTONE_CF_API_TOKEN</code> in the unit&apos;s{" "}
-        <code>EnvironmentFile=</code> instead — <code>ngstoned</code> reads
-        the scoped credential file in preference to the equivalent legacy
-        <code>-token-sha256</code>/
-        <code>-cf-api-token</code> flags for exactly this reason. (The
+        <code>NGSTONE_ADMIN_TOKEN_SHA256</code>, and your DNS provider&apos;s
+        credentials (for Cloudflare, <code>NGSTONE_CF_API_TOKEN</code>) in
+        the unit&apos;s <code>EnvironmentFile=</code> instead. Other DNS
+        providers&apos; credentials have no flags at all. (The
         plaintext token itself, <code>NGSTONE_TOKEN</code>, belongs on the
         agent side, not on the VPS.)
       </Callout>

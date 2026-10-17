@@ -27,7 +27,24 @@ type editFormModel struct {
 	headers  textarea.Model
 	body     textarea.Model
 	focus    int
+
+	// The textarea sanitizes what it holds (CR and LF each become a newline,
+	// tabs become spaces, control bytes and invalid UTF-8 are dropped, and it
+	// caps the line count), so its value is not a faithful copy of the
+	// captured bytes. The *Init fields hold the value as loaded: a field left
+	// unchanged is sent as no override, so replay uses the captured bytes. A
+	// field the textarea cannot hold faithfully is locked instead of edited.
+	headersInit   string
+	headersLocked bool
+	bodyInit      string
+	bodyLocked    bool
+	bodyNote      string
 }
+
+const (
+	noteBodyTruncated = "(captured body was truncated, so it cannot be edited or replayed)"
+	noteBodyLossy     = "(body has bytes the editor cannot preserve, such as binary data, tabs or CR; it is replayed unchanged)"
+)
 
 func newEditForm() editFormModel {
 	method := textinput.New()
@@ -91,8 +108,21 @@ func (f *editFormModel) populate(ex *inspect.Exchange) {
 	f.sourceID = ex.ID
 	f.method.SetValue(ex.Req.Method)
 	f.url.SetValue(ex.Req.URL)
-	f.headers.SetValue(headersToLines(ex.Req.Header))
+	headerText := headersToLines(ex.Req.Header)
+	f.headers.SetValue(headerText)
+	f.headersInit = f.headers.Value()
+	f.headersLocked = f.headersInit != headerText
+
 	f.body.SetValue(string(ex.Req.Body))
+	f.bodyInit = f.body.Value()
+	f.bodyLocked, f.bodyNote = false, ""
+	switch {
+	case ex.Req.Truncated:
+		f.bodyLocked, f.bodyNote = true, noteBodyTruncated
+	case f.bodyInit != string(ex.Req.Body):
+		f.bodyLocked, f.bodyNote = true, noteBodyLossy
+	}
+
 	f.focus = editFocusMethod
 	f.applyFocus()
 }
@@ -145,20 +175,31 @@ func (f editFormModel) Update(msg tea.Msg) (editFormModel, tea.Cmd) {
 	case editFocusURL:
 		f.url, cmd = f.url.Update(msg)
 	case editFocusHeaders:
-		f.headers, cmd = f.headers.Update(msg)
+		if !f.headersLocked {
+			f.headers, cmd = f.headers.Update(msg)
+		}
 	case editFocusBody:
-		f.body, cmd = f.body.Update(msg)
+		if !f.bodyLocked {
+			f.body, cmd = f.body.Update(msg)
+		}
 	}
 	return f, cmd
 }
 
 func (f editFormModel) overrides() *inspect.Overrides {
-	return &inspect.Overrides{
+	ov := &inspect.Overrides{
 		Method: strings.TrimSpace(f.method.Value()),
 		URL:    strings.TrimSpace(f.url.Value()),
-		Header: parseHeaderLines(f.headers.Value()),
-		Body:   []byte(f.body.Value()),
 	}
+	// A nil Header or Body tells Replay to use the captured bytes, which also
+	// keeps its ErrTruncatedBody guard in force for truncated captures.
+	if !f.headersLocked && f.headers.Value() != f.headersInit {
+		ov.Header = parseHeaderLines(f.headers.Value())
+	}
+	if !f.bodyLocked && f.body.Value() != f.bodyInit {
+		ov.Body = []byte(f.body.Value())
+	}
+	return ov
 }
 
 func (f editFormModel) View() string {
@@ -169,10 +210,19 @@ func (f editFormModel) View() string {
 	b.WriteString("URL: ")
 	b.WriteString(f.url.View())
 	b.WriteString("\n")
-	b.WriteString("Headers:\n")
+	b.WriteString("Headers:")
+	if f.headersLocked {
+		b.WriteString(" (cannot be edited without changing them; replayed unchanged)")
+	}
+	b.WriteString("\n")
 	b.WriteString(f.headers.View())
 	b.WriteString("\n")
-	b.WriteString("Body:\n")
+	b.WriteString("Body:")
+	if f.bodyNote != "" {
+		b.WriteString(" ")
+		b.WriteString(f.bodyNote)
+	}
+	b.WriteString("\n")
 	b.WriteString(f.body.View())
 	return b.String()
 }

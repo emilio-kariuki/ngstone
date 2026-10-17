@@ -40,7 +40,7 @@ type ProjectTunnel struct {
 	CredentialEnv     string `json:"credential_env,omitempty"`
 }
 
-type NamedTunnel struct {
+type NamedProjectTunnel struct {
 	Name   string
 	Tunnel ProjectTunnel
 }
@@ -163,16 +163,16 @@ func (p Project) Validate() error {
 	return nil
 }
 
-func (p Project) SortedTunnels() []NamedTunnel {
+func (p Project) SortedTunnels() []NamedProjectTunnel {
 	names := make([]string, 0, len(p.Tunnels))
 	for name := range p.Tunnels {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 
-	out := make([]NamedTunnel, 0, len(names))
+	out := make([]NamedProjectTunnel, 0, len(names))
 	for _, name := range names {
-		out = append(out, NamedTunnel{Name: name, Tunnel: p.Tunnels[name]})
+		out = append(out, NamedProjectTunnel{Name: name, Tunnel: p.Tunnels[name]})
 	}
 	return out
 }

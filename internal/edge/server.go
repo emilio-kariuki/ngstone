@@ -11,9 +11,13 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/caddyserver/certmagic"
 	"golang.org/x/sync/errgroup"
+
+	"ngstone/internal/proto"
 )
 
 type Config struct {
@@ -34,10 +38,17 @@ type Config struct {
 	TCPPortRange string
 	TCPBindAddr  string
 
-	CertStoragePath    string
-	ACMEEmail          string
-	ACMECA             string
-	CloudflareAPIToken string
+	// MaxShareTTL caps how far in the future a share may expire; 0 means
+	// DefaultMaxShareTTL.
+	MaxShareTTL time.Duration
+	// ShareAuditLogPath appends every share audit event as JSON Lines to
+	// this file; empty disables it.
+	ShareAuditLogPath string
+
+	CertStoragePath string
+	ACMEEmail       string
+	ACMECA          string
+	DNSProvider     certmagic.DNSProvider
 
 	Limits LimitsConfig
 }
@@ -50,6 +61,7 @@ type Server struct {
 	randomName  func() string
 
 	perIPLimiter *perIPLimiter
+	perIP        *perIPInflight
 	globalSem    *globalSemaphore
 	upgradeSem   *globalSemaphore
 	handshakeSem *globalSemaphore
@@ -58,8 +70,22 @@ type Server struct {
 	tlsMgr *TLSManager
 	tcpMgr *tcpManager
 
+	shares     *shareRegistry
+	shareSem   *globalSemaphore
+	shareAudit *shareAuditLog
+
 	proxyProtoTrusted []netip.Prefix
+
+	// controlConns tracks per-connection control goroutines so Run can wait
+	// for each session's Goodbye and drain before returning. Add happens only
+	// in acceptControl, which has returned before Run calls Wait.
+	controlConns sync.WaitGroup
 }
+
+// controlShutdownGrace bounds how long Run waits, after its listeners stop,
+// for agent sessions to send Goodbye and drain. A session drains for at most
+// drainTimeout plus the TCP release grace; the margin covers a slow peer.
+var controlShutdownGrace = drainTimeout + 15*time.Second
 
 func New(cfg Config) (*Server, error) {
 	if cfg.PublicScheme == "" {
@@ -85,6 +111,12 @@ func New(cfg Config) (*Server, error) {
 			bindAddr = "0.0.0.0"
 		}
 		tcpMgr = newTCPManager(lo, hi, bindAddr, newPerIPLimiter(limits.PerIPRate, limits.PerIPBurst, limits.PerIPLRU))
+		tcpMgr.idleTimeout = limits.TCPIdleTimeout
+	}
+	perIP := newPerIPInflight(limits.PerIPInFlight)
+	if tcpMgr != nil {
+		// One budget per client across HTTP requests and TCP connections.
+		tcpMgr.perIP = perIP
 	}
 
 	var trustedPrefixes []netip.Prefix
@@ -103,19 +135,40 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("edge: -proxy-protocol-trusted contains no valid CIDRs")
 	}
 
-	return &Server{
+	if cfg.MaxShareTTL < 0 {
+		return nil, fmt.Errorf("edge: -max-share-ttl must not be negative, got %s", cfg.MaxShareTTL)
+	}
+
+	srv := &Server{
 		cfg:               cfg,
 		registry:          registry,
 		authLimiter:       newAuthRateLimiter(),
 		randomName:        randomSubdomain,
 		perIPLimiter:      newPerIPLimiter(limits.PerIPRate, limits.PerIPBurst, limits.PerIPLRU),
+		perIP:             perIP,
 		globalSem:         newGlobalSemaphore(limits.GlobalInFlight),
 		upgradeSem:        newGlobalSemaphore(limits.UpgradeInFlight),
 		handshakeSem:      newGlobalSemaphore(int64(limits.HandshakeConcurrency)),
 		unauthSem:         newGlobalSemaphore(int64(limits.UnauthSessions)),
 		tcpMgr:            tcpMgr,
 		proxyProtoTrusted: trustedPrefixes,
-	}, nil
+		shares:            newShareRegistry(cfg.MaxShareTTL),
+		shareSem:          newGlobalSemaphore(maxGlobalShareConns),
+	}
+	srv.shares.onExpire = func(sh *share) { srv.closeShare(sh, proto.ShareReasonExpired) }
+	srv.shares.onIdle = func(sh *share) {
+		if srv.shares.idleNow(sh) {
+			srv.closeShare(sh, proto.ShareReasonIdle)
+		}
+	}
+	if cfg.ShareAuditLogPath != "" {
+		audit, err := openShareAuditLog(cfg.ShareAuditLogPath)
+		if err != nil {
+			return nil, fmt.Errorf("edge: -share-audit-log: %w", err)
+		}
+		srv.shareAudit = audit
+	}
+	return srv, nil
 }
 
 func (s *Server) limitsOrDefault() LimitsConfig {
@@ -132,11 +185,11 @@ func (s *Server) Run(ctx context.Context) error {
 
 	if !s.cfg.Insecure {
 		mgr, err := NewTLSManager(TLSConfig{
-			Domain:             s.cfg.Domain,
-			CloudflareAPIToken: s.cfg.CloudflareAPIToken,
-			ACMEEmail:          s.cfg.ACMEEmail,
-			ACMECA:             s.cfg.ACMECA,
-			StoragePath:        s.cfg.CertStoragePath,
+			Domain:      s.cfg.Domain,
+			DNSProvider: s.cfg.DNSProvider,
+			ACMEEmail:   s.cfg.ACMEEmail,
+			ACMECA:      s.cfg.ACMECA,
+			StoragePath: s.cfg.CertStoragePath,
 		})
 		if err != nil {
 			return fmt.Errorf("edge: tls setup: %w", err)
@@ -286,7 +339,29 @@ func (s *Server) Run(ctx context.Context) error {
 
 	slog.Info("ngstoned: listeners up", "control", s.cfg.ControlAddr, "public", s.cfg.PublicAddr, "insecure", s.cfg.Insecure, "proxy_protocol", s.cfg.ProxyProtocol)
 
-	return g.Wait()
+	err = g.Wait()
+	s.waitControlSessions(controlShutdownGrace)
+	s.shareAudit.close()
+	return err
+}
+
+// waitControlSessions waits for every control-connection goroutine to finish
+// its Goodbye/unroute/drain sequence, up to grace. Without it the process
+// exits as soon as the listeners close, cutting WebSocket and TCP tunnel
+// traffic (which http.Server.Shutdown does not wait for) mid-drain.
+func (s *Server) waitControlSessions(grace time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		s.controlConns.Wait()
+		close(done)
+	}()
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		slog.Warn("edge: shutdown grace expired with agent sessions still draining", "grace", grace)
+	}
 }
 
 func (s *Server) redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
