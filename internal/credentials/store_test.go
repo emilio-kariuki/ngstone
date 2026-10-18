@@ -146,6 +146,9 @@ func TestCredentialScopeValidation(t *testing.T) {
 	}{
 		{name: "http", spec: Spec{Kind: KindHTTP, Subdomain: "demo"}, want: ""},
 		{name: "tcp", spec: Spec{Kind: KindTCP, RemotePort: 15432}, want: ""},
+		{name: "preview", spec: Spec{Kind: KindPreview}, want: ""},
+		{name: "named preview", spec: Spec{Kind: KindPreview, Subdomain: "demo"}, want: "preview"},
+		{name: "TCP preview", spec: Spec{Kind: KindPreview, RemotePort: 15432}, want: "preview"},
 		{name: "missing subdomain", spec: Spec{Kind: KindHTTP}, want: "a valid HTTP subdomain is required"},
 		{name: "bad subdomain", spec: Spec{Kind: KindHTTP, Subdomain: "www"}, want: "a valid HTTP subdomain is required"},
 		{name: "tcp port missing", spec: Spec{Kind: KindTCP}, want: "TCP credentials require a remote port"},

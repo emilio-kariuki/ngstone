@@ -9,12 +9,15 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/caddyserver/certmagic"
 
 	"ngstone/internal/edge"
+	"ngstone/internal/oidc"
+	"ngstone/internal/storage"
 	"ngstone/internal/version"
 )
 
@@ -22,8 +25,27 @@ func main() {
 	publicAddr := flag.String("public", ":443", "public HTTPS listen address")
 	controlAddr := flag.String("control", ":4443", "control plane listen address")
 	httpAddr := flag.String("http", ":80", "HTTP redirect listen address (unused with -insecure)")
-	opsAddr := flag.String("ops", "127.0.0.1:4041", "loopback ops endpoint address (expvar, /healthz, pprof); empty disables it")
-	tokenSHA256Hex := flag.String("token-sha256", "", "hex-encoded SHA-256 of the shared auth token (defaults to $NGSTONE_TOKEN_SHA256; avoid passing this flag on a shared host, since ps auxww exposes flags but not the environment)")
+	opsAddr := flag.String("ops", "127.0.0.1:4041", "loopback ops endpoint address (dashboard, /api/state, /metrics, expvar, /healthz, pprof); empty disables it")
+	tokenSHA256Hex := flag.String("token-sha256", "", "legacy hex-encoded SHA-256 of the shared auth token (defaults to $NGSTONE_TOKEN_SHA256; prefer -credentials-file)")
+	credentialsFileFlag := flag.String("credentials-file", "", "versioned per-tunnel credential file (defaults to $NGSTONE_CREDENTIALS_FILE)")
+	databaseDriver := flag.String("database-driver", "", "control-plane database driver: sqlite or postgres (defaults from the database URL)")
+	databaseURLFlag := flag.String("database-url", "", "control-plane database URL (defaults to $NGSTONE_DATABASE_URL or SQLite at /var/lib/ngstoned/control.db; prefer the environment for PostgreSQL credentials)")
+	edgeID := flag.String("edge-id", "", "stable identifier for this edge server (defaults to $NGSTONE_EDGE_ID or a generated value)")
+	leaseTTL := flag.Duration("lease-ttl", storage.DefaultLeaseTTL, "connector lease lifetime; heartbeats renew leases before expiry")
+	adminTokenSHA256Hex := flag.String("admin-token-sha256", "", "hex-encoded SHA-256 of the management API bearer token (defaults to $NGSTONE_ADMIN_TOKEN_SHA256; loopback-only when unset)")
+	alertWebhookURL := flag.String("alert-webhook", "", "HTTP(S) webhook for credential, connector, and lease lifecycle alerts (defaults to $NGSTONE_ALERT_WEBHOOK_URL)")
+	oidcIssuer := flag.String("oidc-issuer", "", "OIDC issuer URL (defaults to $NGSTONE_OIDC_ISSUER; HTTPS required outside -insecure loopback development)")
+	oidcClientID := flag.String("oidc-client-id", "", "OIDC client ID (defaults to $NGSTONE_OIDC_CLIENT_ID)")
+	oidcRedirectURL := flag.String("oidc-redirect-url", "", "OIDC callback URL (defaults to $NGSTONE_OIDC_REDIRECT_URL)")
+	oidcGroupsClaim := flag.String("oidc-groups-claim", "groups", "OIDC claim containing team/group names")
+	oidcAdminGroups := flag.String("oidc-admin-groups", "", "comma-separated OIDC groups mapped to the admin role")
+	oidcOperatorGroups := flag.String("oidc-operator-groups", "", "comma-separated OIDC groups mapped to the operator role")
+	oidcViewerGroups := flag.String("oidc-viewer-groups", "", "comma-separated OIDC groups mapped to the viewer role")
+	oidcAllowedEmailDomains := flag.String("oidc-allowed-email-domains", "", "comma-separated email domains allowed to log in")
+	oidcDefaultRole := flag.String("oidc-default-role", "", "optional role for authenticated OIDC users without a matching group; empty requires a configured group")
+	screenTURNURLs := flag.String("screen-turn-urls", "", "comma-separated STUN/TURN URLs delivered to authenticated screen participants (defaults to $NGSTONE_SCREEN_TURN_URLS)")
+	screenTURNSecret := flag.String("screen-turn-secret", "", "coturn REST shared secret (defaults to $NGSTONE_SCREEN_TURN_SHARED_SECRET; prefer the environment)")
+	screenMaxViewers := flag.Int("screen-max-viewers", edge.DefaultScreenMaxViewers, "maximum viewers allowed for an SFU screen session (1 keeps direct mode)")
 	domain := flag.String("domain", "", "base domain used to build tunnel hostnames and the two managed certificates (required), for example example.com")
 	publicScheme := flag.String("public-scheme", "https", "scheme advertised in BindOK.URL (http or https)")
 	tcpPortRange := flag.String("tcp-ports", "", "port range for raw TCP tunnels, e.g. \"10000-10999\"; empty disables TCP tunnels. These ports are exposed directly to the internet (not behind a reverse proxy) and must be opened in the firewall.")
@@ -75,18 +97,139 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	slog.SetDefault(logger)
 
+	credentialsFile := os.Getenv("NGSTONE_CREDENTIALS_FILE")
+	if credentialsFile == "" {
+		credentialsFile = *credentialsFileFlag
+	}
+	databaseURL := os.Getenv("NGSTONE_DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = *databaseURLFlag
+	}
+	resolvedDatabaseDriver := os.Getenv("NGSTONE_DATABASE_DRIVER")
+	if resolvedDatabaseDriver == "" {
+		resolvedDatabaseDriver = *databaseDriver
+	}
+	resolvedEdgeID := os.Getenv("NGSTONE_EDGE_ID")
+	if resolvedEdgeID == "" {
+		resolvedEdgeID = *edgeID
+	}
 	tokenSHA256HexVal := os.Getenv("NGSTONE_TOKEN_SHA256")
 	if tokenSHA256HexVal == "" {
 		tokenSHA256HexVal = *tokenSHA256Hex
 	}
-	if tokenSHA256HexVal == "" {
-		logger.Error("ngstoned: -token-sha256 (or $NGSTONE_TOKEN_SHA256) is required")
+	adminTokenSHA256HexVal := os.Getenv("NGSTONE_ADMIN_TOKEN_SHA256")
+	if adminTokenSHA256HexVal == "" {
+		adminTokenSHA256HexVal = *adminTokenSHA256Hex
+	}
+	resolvedAlertWebhookURL := os.Getenv("NGSTONE_ALERT_WEBHOOK_URL")
+	if resolvedAlertWebhookURL == "" {
+		resolvedAlertWebhookURL = *alertWebhookURL
+	}
+	alertWebhookToken := os.Getenv("NGSTONE_ALERT_WEBHOOK_TOKEN")
+	resolvedOIDCIssuer := os.Getenv("NGSTONE_OIDC_ISSUER")
+	if resolvedOIDCIssuer == "" {
+		resolvedOIDCIssuer = *oidcIssuer
+	}
+	resolvedOIDCClientID := os.Getenv("NGSTONE_OIDC_CLIENT_ID")
+	if resolvedOIDCClientID == "" {
+		resolvedOIDCClientID = *oidcClientID
+	}
+	resolvedOIDCClientSecret := os.Getenv("NGSTONE_OIDC_CLIENT_SECRET")
+	resolvedOIDCRedirectURL := os.Getenv("NGSTONE_OIDC_REDIRECT_URL")
+	if resolvedOIDCRedirectURL == "" {
+		resolvedOIDCRedirectURL = *oidcRedirectURL
+	}
+	resolvedOIDCGroupsClaim := os.Getenv("NGSTONE_OIDC_GROUPS_CLAIM")
+	if resolvedOIDCGroupsClaim == "" {
+		resolvedOIDCGroupsClaim = *oidcGroupsClaim
+	}
+	resolvedOIDCAdminGroups := os.Getenv("NGSTONE_OIDC_ADMIN_GROUPS")
+	if resolvedOIDCAdminGroups == "" {
+		resolvedOIDCAdminGroups = *oidcAdminGroups
+	}
+	resolvedOIDCOperatorGroups := os.Getenv("NGSTONE_OIDC_OPERATOR_GROUPS")
+	if resolvedOIDCOperatorGroups == "" {
+		resolvedOIDCOperatorGroups = *oidcOperatorGroups
+	}
+	resolvedOIDCViewerGroups := os.Getenv("NGSTONE_OIDC_VIEWER_GROUPS")
+	if resolvedOIDCViewerGroups == "" {
+		resolvedOIDCViewerGroups = *oidcViewerGroups
+	}
+	resolvedOIDCAllowedEmailDomains := os.Getenv("NGSTONE_OIDC_ALLOWED_EMAIL_DOMAINS")
+	if resolvedOIDCAllowedEmailDomains == "" {
+		resolvedOIDCAllowedEmailDomains = *oidcAllowedEmailDomains
+	}
+	resolvedOIDCDefaultRole := os.Getenv("NGSTONE_OIDC_DEFAULT_ROLE")
+	if resolvedOIDCDefaultRole == "" {
+		resolvedOIDCDefaultRole = *oidcDefaultRole
+	}
+	resolvedScreenTURNURLs := os.Getenv("NGSTONE_SCREEN_TURN_URLS")
+	if resolvedScreenTURNURLs == "" {
+		resolvedScreenTURNURLs = *screenTURNURLs
+	}
+	resolvedScreenTURNSecret := os.Getenv("NGSTONE_SCREEN_TURN_SHARED_SECRET")
+	if resolvedScreenTURNSecret == "" {
+		resolvedScreenTURNSecret = *screenTURNSecret
+	}
+	resolvedScreenMaxViewers := *screenMaxViewers
+	if raw := strings.TrimSpace(os.Getenv("NGSTONE_SCREEN_MAX_VIEWERS")); raw != "" {
+		parsed, parseErr := strconv.Atoi(raw)
+		if parseErr != nil {
+			logger.Error("ngstoned: invalid NGSTONE_SCREEN_MAX_VIEWERS", "err", parseErr)
+			os.Exit(1)
+		}
+		resolvedScreenMaxViewers = parsed
+	}
+	var oidcConfig *oidc.Config
+	if resolvedOIDCIssuer != "" || resolvedOIDCClientID != "" || resolvedOIDCRedirectURL != "" || resolvedOIDCClientSecret != "" || os.Getenv("NGSTONE_OIDC_GROUPS_CLAIM") != "" || *oidcGroupsClaim != "groups" || resolvedOIDCAdminGroups != "" || resolvedOIDCOperatorGroups != "" || resolvedOIDCViewerGroups != "" || resolvedOIDCAllowedEmailDomains != "" || resolvedOIDCDefaultRole != "" || os.Getenv("NGSTONE_OIDC_COOKIE_SECRET") != "" {
+		cookieSecret, secretErr := oidc.ParseCookieSecret(os.Getenv("NGSTONE_OIDC_COOKIE_SECRET"))
+		if secretErr != nil {
+			logger.Error("ngstoned: invalid OIDC cookie secret", "err", secretErr)
+			os.Exit(1)
+		}
+		oidcConfig = &oidc.Config{
+			Issuer:              resolvedOIDCIssuer,
+			ClientID:            resolvedOIDCClientID,
+			ClientSecret:        resolvedOIDCClientSecret,
+			RedirectURL:         resolvedOIDCRedirectURL,
+			CookieSecret:        cookieSecret,
+			GroupsClaim:         resolvedOIDCGroupsClaim,
+			AdminGroups:         splitCSV(resolvedOIDCAdminGroups),
+			OperatorGroups:      splitCSV(resolvedOIDCOperatorGroups),
+			ViewerGroups:        splitCSV(resolvedOIDCViewerGroups),
+			AllowedEmailDomains: splitCSV(resolvedOIDCAllowedEmailDomains),
+			DefaultRole:         resolvedOIDCDefaultRole,
+			AllowInsecure:       *insecure,
+		}
+	}
+	var sum []byte
+	if databaseURL == "" && credentialsFile == "" && tokenSHA256HexVal == "" {
+		databaseURL = storage.DefaultSQLite
+	}
+	if tokenSHA256HexVal != "" && (databaseURL != "" || credentialsFile != "") {
+		logger.Error("ngstoned: legacy -token-sha256 cannot be combined with -database-url or -credentials-file; choose scoped credentials or legacy authentication")
 		os.Exit(1)
 	}
-	sum, err := hex.DecodeString(tokenSHA256HexVal)
-	if err != nil || len(sum) != sha256.Size {
-		logger.Error("ngstoned: -token-sha256 (or $NGSTONE_TOKEN_SHA256) must be a 64-character hex-encoded SHA-256 digest")
-		os.Exit(1)
+	if databaseURL == "" && credentialsFile == "" {
+		if tokenSHA256HexVal == "" {
+			logger.Error("ngstoned: -database-url, -credentials-file, or -token-sha256 is required")
+			os.Exit(1)
+		}
+		var err error
+		sum, err = hex.DecodeString(tokenSHA256HexVal)
+		if err != nil || len(sum) != sha256.Size {
+			logger.Error("ngstoned: -token-sha256 (or $NGSTONE_TOKEN_SHA256) must be a 64-character hex-encoded SHA-256 digest")
+			os.Exit(1)
+		}
+	}
+	var adminSum []byte
+	if adminTokenSHA256HexVal != "" {
+		var err error
+		adminSum, err = hex.DecodeString(adminTokenSHA256HexVal)
+		if err != nil || len(adminSum) != sha256.Size {
+			logger.Error("ngstoned: -admin-token-sha256 (or $NGSTONE_ADMIN_TOKEN_SHA256) must be a 64-character hex-encoded SHA-256 digest")
+			os.Exit(1)
+		}
 	}
 	if *domain == "" {
 		logger.Error("ngstoned: -domain is required, for example -domain example.com")
@@ -106,6 +249,7 @@ func main() {
 			}
 			return v
 		}
+		var err error
 		provider, err = edge.NewDNSProvider(*dnsProvider, getenv)
 		if err != nil {
 			logger.Error("ngstoned: DNS provider setup failed; run ngstoned -dns-provider help to list providers and their variables", "err", err)
@@ -122,17 +266,28 @@ func main() {
 	defer stop()
 
 	srv, err := edge.New(edge.Config{
-		ControlAddr:  *controlAddr,
-		PublicAddr:   *publicAddr,
-		HTTPAddr:     *httpAddr,
-		OpsAddr:      *opsAddr,
-		Domain:       *domain,
-		TokenSHA256:  sum,
-		PublicScheme: *publicScheme,
-		TCPPortRange: *tcpPortRange,
-		TCPBindAddr:  *tcpBindAddr,
-		MaxShareTTL:  *maxShareTTL,
-
+		ControlAddr:       *controlAddr,
+		PublicAddr:        *publicAddr,
+		HTTPAddr:          *httpAddr,
+		OpsAddr:           *opsAddr,
+		Domain:            *domain,
+		TokenSHA256:       sum,
+		CredentialsFile:   credentialsFile,
+		StorageDriver:     resolvedDatabaseDriver,
+		StorageDSN:        databaseURL,
+		EdgeID:            resolvedEdgeID,
+		LeaseTTL:          *leaseTTL,
+		AdminTokenSHA256:  adminSum,
+		PublicScheme:      *publicScheme,
+		AlertWebhookURL:   resolvedAlertWebhookURL,
+		AlertWebhookToken: alertWebhookToken,
+		OIDC:              oidcConfig,
+		ScreenTURNURLs:    splitCSV(resolvedScreenTURNURLs),
+		ScreenTURNSecret:  resolvedScreenTURNSecret,
+		ScreenMaxViewers:  resolvedScreenMaxViewers,
+		TCPPortRange:      *tcpPortRange,
+		TCPBindAddr:       *tcpBindAddr,
+		MaxShareTTL:       *maxShareTTL,
 		ShareAuditLogPath: *shareAuditLog,
 
 		Insecure:             *insecure,
@@ -168,9 +323,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA, "dns-provider", *dnsProvider, "proxy-protocol", *proxyProtocol)
+	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA, "dns-provider", *dnsProvider, "proxy-protocol", *proxyProtocol, "scoped_credentials", credentialsFile != "", "durable_storage", databaseURL != "", "admin_bearer", adminTokenSHA256HexVal != "", "oidc", oidcConfig != nil, "screen_turn", len(resolvedScreenTURNURLs) > 0, "screen_max_viewers", resolvedScreenMaxViewers)
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("ngstoned: exited with error", "err", err)
 		os.Exit(1)
 	}
+}
+
+func splitCSV(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
 }

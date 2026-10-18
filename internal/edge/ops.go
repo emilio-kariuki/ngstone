@@ -23,6 +23,7 @@ var (
 
 	metricRejectedForbiddenCIDR = expvar.NewInt("ngstoned_rejected_forbidden_cidr_total")
 	metricRejectedUnauthorized  = expvar.NewInt("ngstoned_rejected_unauthorized_total")
+	metricRejectedTrafficPolicy = expvar.NewInt("ngstoned_rejected_traffic_policy_total")
 
 	metricRejectedUpgradeCap = expvar.NewInt("ngstoned_rejected_upgrade_cap_total")
 
@@ -53,28 +54,43 @@ func (s *Server) opsMux() *http.ServeMux {
 	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	mux.HandleFunc("/healthz", s.handleHealthz)
+	mux.HandleFunc("/api/state", s.handleProtectedDashboardState)
+	mux.HandleFunc("/api/v1", s.handleAdminAPI)
+	mux.HandleFunc("/api/v1/", s.handleAdminAPI)
+	mux.HandleFunc("/metrics", s.handleMetrics)
+	mux.HandleFunc("/", s.handleDashboard)
 	return mux
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	resp := healthzResponse{OK: true}
-
-	if s.tlsMgr != nil {
-		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-		defer cancel()
-		apex, wildcard := s.tlsMgr.CertStatus(ctx)
-		resp.Apex = certInfoJSON(apex)
-		resp.Wildcard = certInfoJSON(wildcard)
-		if apex.Err != nil || wildcard.Err != nil {
-			resp.OK = false
-		}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
 	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	resp := s.healthzSnapshot(ctx)
 
 	w.Header().Set("Content-Type", "application/json")
 	if !resp.OK {
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
 	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) healthzSnapshot(ctx context.Context) healthzResponse {
+	resp := healthzResponse{OK: true}
+	if s.tlsMgr == nil {
+		return resp
+	}
+
+	apex, wildcard := s.tlsMgr.CertStatus(ctx)
+	resp.Apex = certInfoJSON(apex)
+	resp.Wildcard = certInfoJSON(wildcard)
+	resp.OK = apex.Err == nil && wildcard.Err == nil
+	return resp
 }
 
 func certInfoJSON(c CertInfo) certStatusJSON {

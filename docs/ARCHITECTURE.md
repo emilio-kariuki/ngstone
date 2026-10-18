@@ -6,6 +6,24 @@ A personal, self-hosted ngrok replacement. Two binaries — `ngstoned` (edge, Li
 
 Guiding principles, in priority order: **stdlib-first, boring over clever, one path per feature, everything flow-controlled, nothing unbounded in memory.**
 
+### Current integration boundaries
+
+`start` converts YAML or JSON configuration into the same per-tunnel settings
+that `up` uses. One builder resolves credentials, access rules, policies, and
+transports; one runner owns agents, TTLs, terminal output, the inspector, and
+HAR capture. Agent lifecycle state also drives `ps`, including expiration.
+Services invoke `start` with the same file and use private credential files
+for durable per-tunnel authentication.
+
+Credential IDs identify secrets; owner principals identify resources.
+Management drain and active connector replacement enforce the principal
+boundary. Durable leases and the in-memory registry compare access rules
+through `internal/access`; inline policy snapshots are reused by owner and
+digest without overwriting other tunnels' policies. Preview credentials bind
+one assigned hostname and cannot expand into named tunnels or pools.
+Database migration v4 preserves older ownership and policy associations;
+see the coordinated upgrade procedure in [deploy/README.md](../deploy/README.md#upgrading-existing-control-plane-databases).
+
 ---
 
 ## 1. System overview & end-to-end data flow

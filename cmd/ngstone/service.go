@@ -115,14 +115,8 @@ func buildServiceSpec(cfgPath string, names []string) (serviceSpec, error) {
 	if err != nil {
 		return serviceSpec{}, err
 	}
-	file, err := config.LoadTunnels(path)
+	tunnels, err := loadConfiguredTunnels(path, names)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return serviceSpec{}, fmt.Errorf("no tunnels file at %s; create it first (see ngstone start)", path)
-		}
-		return serviceSpec{}, err
-	}
-	if _, err := selectTunnels(file.Tunnels, names); err != nil {
 		return serviceSpec{}, err
 	}
 	abs, err := filepath.Abs(path)
@@ -134,8 +128,23 @@ func buildServiceSpec(cfgPath string, names []string) (serviceSpec, error) {
 	if err != nil {
 		return serviceSpec{}, fmt.Errorf("loading config: %w", err)
 	}
-	if saved.Token == "" {
-		return serviceSpec{}, errors.New("the service reads the token saved by 'ngstone auth'; run 'ngstone auth <token> --server <edge>:4443' first")
+	for _, named := range tunnels {
+		tunnel := named.Tunnel
+		if tunnel.MultiConnector && tunnel.ConnectorTokenFile == "" {
+			return serviceSpec{}, fmt.Errorf("tunnel %s: background connector pools require connector_token_file", named.Name)
+		}
+		if tunnel.CredentialEnv != "" {
+			return serviceSpec{}, fmt.Errorf("tunnel %s: background credentials must use credential_file so they survive logout and restart", named.Name)
+		}
+		if tunnel.CredentialFile == "" {
+			if saved.Token == "" {
+				return serviceSpec{}, errors.New("the service needs credential_file for each tunnel or the token saved by 'ngstone auth'")
+			}
+			tunnel.Token = saved.Token
+		}
+		if _, _, err := buildProjectAgent(named.Name, tunnel, filepath.Dir(abs), saved); err != nil {
+			return serviceSpec{}, fmt.Errorf("tunnel %s: %w", named.Name, err)
+		}
 	}
 
 	exe, err := stableExecutable()

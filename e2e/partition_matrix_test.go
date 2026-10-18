@@ -18,7 +18,7 @@ func TestPartitionKillAgentMidRequest(t *testing.T) {
 	}
 
 	edgeBin, agentBin := buildBinaries(t)
-	origin, started := newSlowOrigin(3 * time.Second)
+	origin, _ := newSlowOrigin(3 * time.Second)
 	defer origin.Close()
 
 	token := "tok-kill-mid-request"
@@ -38,6 +38,7 @@ func TestPartitionKillAgentMidRequest(t *testing.T) {
 		bodyErr error
 	}
 	resCh := make(chan result, 1)
+	started := make(chan struct{})
 	go func() {
 		client := &http.Client{Timeout: 10 * time.Second}
 		req, err := http.NewRequest(http.MethodGet, "http://"+publicAddr+"/slow", nil)
@@ -52,6 +53,7 @@ func TestPartitionKillAgentMidRequest(t *testing.T) {
 			return
 		}
 		defer resp.Body.Close()
+		close(started)
 		b, berr := io.ReadAll(resp.Body)
 		resCh <- result{status: resp.StatusCode, body: string(b), bodyErr: berr}
 	}()
@@ -59,7 +61,7 @@ func TestPartitionKillAgentMidRequest(t *testing.T) {
 	select {
 	case <-started:
 	case <-time.After(5 * time.Second):
-		t.Fatal("origin never started responding to the in-flight request")
+		t.Fatal("client never received response headers for the in-flight request")
 	}
 
 	if err := agentProc.cmd.Process.Kill(); err != nil {

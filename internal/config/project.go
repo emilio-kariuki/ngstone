@@ -20,24 +20,28 @@ type Project struct {
 }
 
 type ProjectTunnel struct {
-	Kind              string `json:"kind,omitempty"`
-	Target            string `json:"target"`
-	Subdomain         string `json:"subdomain,omitempty"`
-	HostHeader        string `json:"host_header,omitempty"`
-	HTTP2             bool   `json:"http2,omitempty"`
-	MultiConnector    bool   `json:"multi_connector,omitempty"`
-	RemotePort        int    `json:"remote_port,omitempty"`
-	TTL               string `json:"ttl,omitempty"`
-	Server            string `json:"server,omitempty"`
-	Transport         string `json:"transport,omitempty"`
-	ServerName        string `json:"server_name,omitempty"`
-	Insecure          bool   `json:"insecure,omitempty"`
-	Pin               string `json:"pin,omitempty"`
-	BasicAuthFile     string `json:"basic_auth_file,omitempty"`
-	AllowCIDR         string `json:"allow_cidr,omitempty"`
-	PolicyFile        string `json:"policy_file,omitempty"`
-	ConnectorTokenEnv string `json:"connector_token_env,omitempty"`
-	CredentialEnv     string `json:"credential_env,omitempty"`
+	Token              string   `json:"-"`
+	BasicAuth          []string `json:"-"`
+	CredentialFile     string   `json:"credential_file,omitempty"`
+	ConnectorTokenFile string   `json:"connector_token_file,omitempty"`
+	Kind               string   `json:"kind,omitempty"`
+	Target             string   `json:"target"`
+	Subdomain          string   `json:"subdomain,omitempty"`
+	HostHeader         string   `json:"host_header,omitempty"`
+	HTTP2              bool     `json:"http2,omitempty"`
+	MultiConnector     bool     `json:"multi_connector,omitempty"`
+	RemotePort         int      `json:"remote_port,omitempty"`
+	TTL                string   `json:"ttl,omitempty"`
+	Server             string   `json:"server,omitempty"`
+	Transport          string   `json:"transport,omitempty"`
+	ServerName         string   `json:"server_name,omitempty"`
+	Insecure           bool     `json:"insecure,omitempty"`
+	Pin                string   `json:"pin,omitempty"`
+	BasicAuthFile      string   `json:"basic_auth_file,omitempty"`
+	AllowCIDR          string   `json:"allow_cidr,omitempty"`
+	PolicyFile         string   `json:"policy_file,omitempty"`
+	ConnectorTokenEnv  string   `json:"connector_token_env,omitempty"`
+	CredentialEnv      string   `json:"credential_env,omitempty"`
 }
 
 type NamedProjectTunnel struct {
@@ -128,8 +132,14 @@ func (p Project) Validate() error {
 		if tunnel.MultiConnector && strings.TrimSpace(tunnel.Subdomain) == "" {
 			return fmt.Errorf("tunnel %q multi_connector requires a subdomain", name)
 		}
+		if tunnel.ConnectorTokenEnv != "" && tunnel.ConnectorTokenFile != "" {
+			return fmt.Errorf("tunnel %q must use either connector_token_env or connector_token_file", name)
+		}
 		if tunnel.ConnectorTokenEnv != "" && !validEnvName(tunnel.ConnectorTokenEnv) {
 			return fmt.Errorf("tunnel %q connector_token_env must be a valid environment variable name", name)
+		}
+		if tunnel.CredentialEnv != "" && tunnel.CredentialFile != "" {
+			return fmt.Errorf("tunnel %q must use either credential_env or credential_file", name)
 		}
 		if tunnel.CredentialEnv != "" && !validEnvName(tunnel.CredentialEnv) {
 			return fmt.Errorf("tunnel %q credential_env must be a valid environment variable name", name)

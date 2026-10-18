@@ -923,7 +923,7 @@ func TestTCPBindDisabledWhenRangeEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode bind: %v", err)
 	}
-	s.handleBind(as, server.Control(), msg.ID, bind)
+	s.handleBind(context.Background(), as, server.Control(), msg.ID, bind)
 
 	reply, err := client.Control().Read()
 	if err != nil {

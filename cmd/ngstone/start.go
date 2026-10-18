@@ -2,45 +2,21 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
-	"io/fs"
-	"log/slog"
 	"net"
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
+	"time"
 
 	"ngstone/internal/agent"
 	"ngstone/internal/config"
-	"ngstone/internal/inspect"
-	"ngstone/internal/tui"
 )
-
-const exampleTunnelsFile = `server: example.com:4443
-tunnels:
-  web:
-    port: 3000
-    subdomain: demo
-  api:
-    port: 8080
-  db:
-    kind: tcp
-    port: 5432`
-
-// startOptions holds the connection settings shared by every tunnel.
-type startOptions struct {
-	server     string
-	serverName string
-	token      string
-	insecure   bool
-	pin        string
-}
 
 func cmdStart(args []string) int {
 	flags := flag.NewFlagSet("start", flag.ContinueOnError)
@@ -61,56 +37,38 @@ func cmdStart(args []string) int {
 		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
 		return 1
 	}
-	file, err := config.LoadTunnels(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) && *cfgPath == "" {
-			fmt.Fprintf(os.Stderr, "ngstone: no tunnels file found; create %s, for example:\n\n%s\n", config.TunnelsFileName, exampleTunnelsFile)
-			return 1
-		}
-		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
-		return 1
-	}
-	tunnels, err := selectTunnels(file.Tunnels, names)
+	tunnels, err := loadConfiguredTunnels(path, names)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
 		return 2
 	}
-
 	saved, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ngstone: loading config: %v\n", err)
 		return 1
 	}
-	tok, err := resolveToken(*token, os.Getenv("NGSTONE_TOKEN"), saved)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "ngstone: "+err.Error())
-		return 1
-	}
-	opts := startOptions{
-		server:     firstNonEmpty(*server, file.Server, resolveServer("", saved)),
-		serverName: firstNonEmpty(*serverName, file.ServerName),
-		token:      tok,
-		insecure:   *insecure,
-		pin:        *pin,
-	}
-
-	acfgs := make([]agent.Config, 0, len(tunnels))
-	for _, nt := range tunnels {
-		acfg, err := tunnelAgentConfig(nt, opts)
+	var acfgs []agent.Config
+	var ttls []time.Duration
+	for _, named := range tunnels {
+		tunnel := named.Tunnel
+		tunnel.Server = firstNonEmpty(*server, tunnel.Server)
+		tunnel.ServerName = firstNonEmpty(*serverName, tunnel.ServerName)
+		tunnel.Pin = firstNonEmpty(*pin, tunnel.Pin)
+		tunnel.Insecure = *insecure || tunnel.Insecure
+		tunnel.Token = *token
+		acfg, ttl, err := buildProjectAgent(named.Name, tunnel, filepath.Dir(path), saved)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "ngstone: tunnel %q: %v\n", nt.Name, err)
+			fmt.Fprintf(os.Stderr, "ngstone: tunnel %s: %v\n", named.Name, err)
 			return 2
 		}
 		acfgs = append(acfgs, acfg)
+		ttls = append(ttls, ttl)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if shouldUseTUI(*noTUI) {
-		return runStartTUI(ctx, acfgs)
-	}
-	return runStartPlain(ctx, acfgs)
+	return runTunnelConfigs(ctx, acfgs, ttls, projectRunOptions{Command: "start", TUI: shouldUseTUI(*noTUI)})
 }
 
 // selectTunnels keeps file order, optionally narrowed to the named tunnels.
@@ -141,60 +99,59 @@ func selectTunnels(all []config.NamedTunnel, names []string) ([]config.NamedTunn
 	return out, nil
 }
 
-// tunnelAgentConfig turns one file entry into the same agent.Config that
-// `ngstone port` or `ngstone tcp` would build from flags.
-func tunnelAgentConfig(nt config.NamedTunnel, opts startOptions) (agent.Config, error) {
-	acfg := agent.Config{
-		Name:        nt.Name,
-		ControlAddr: opts.server,
-		Token:       opts.token,
-		Insecure:    opts.insecure,
-		ServerName:  opts.serverName,
-		Pin:         opts.pin,
-	}
-
-	if len(nt.AllowCIDR) > 0 {
-		cidrs, err := parseAllowCIDRs(strings.Join(nt.AllowCIDR, ","))
+func loadConfiguredTunnels(path string, names []string) ([]config.NamedProjectTunnel, error) {
+	var ordered []config.NamedTunnel
+	projects := map[string]config.ProjectTunnel{}
+	if strings.EqualFold(filepath.Ext(path), ".json") {
+		project, err := config.LoadProject(path)
 		if err != nil {
-			return agent.Config{}, err
+			return nil, err
 		}
-		acfg.AllowCIDRs = cidrs
-	}
-
-	switch nt.Kind {
-	case config.KindTCP:
-		target := nt.Address
-		if target == "" {
-			target = net.JoinHostPort("127.0.0.1", strconv.Itoa(nt.Port))
+		for _, named := range project.SortedTunnels() {
+			ordered = append(ordered, config.NamedTunnel{Name: named.Name})
+			projects[named.Name] = named.Tunnel
 		}
-		acfg.Kind = "tcp"
-		acfg.TargetURL = target
-		acfg.RemotePort = nt.RemotePort
-	default:
-		target := nt.URL
-		if target == "" {
-			target = fmt.Sprintf("http://127.0.0.1:%d", nt.Port)
+	} else {
+		file, err := config.LoadTunnels(path)
+		if err != nil {
+			return nil, err
 		}
-		acfg.TargetURL = target
-		acfg.Subdomain = nt.Subdomain
-		acfg.HostHeader = nt.HostHeader
-
-		pairs := nt.BasicAuth
-		if nt.BasicAuthFile != "" {
-			var err error
-			if pairs, err = readBasicAuthFile(nt.BasicAuthFile); err != nil {
-				return agent.Config{}, err
-			}
-		}
-		if len(pairs) > 0 {
-			digests, err := parseBasicAuthCreds(pairs)
-			if err != nil {
-				return agent.Config{}, err
-			}
-			acfg.BasicAuthSHA256 = digests
+		ordered = file.Tunnels
+		for _, named := range ordered {
+			tunnel := projectTunnelFromYAML(named.Tunnel)
+			tunnel.Server = file.Server
+			tunnel.ServerName = file.ServerName
+			projects[named.Name] = tunnel
 		}
 	}
-	return acfg, nil
+	selected, err := selectTunnels(ordered, names)
+	if err != nil {
+		return nil, err
+	}
+	var out []config.NamedProjectTunnel
+	for _, named := range selected {
+		out = append(out, config.NamedProjectTunnel{Name: named.Name, Tunnel: projects[named.Name]})
+	}
+	return out, nil
+}
+
+func projectTunnelFromYAML(t config.Tunnel) config.ProjectTunnel {
+	target := t.URL
+	if t.Kind == config.KindTCP {
+		target = t.Address
+		if target == "" {
+			target = net.JoinHostPort("127.0.0.1", strconv.Itoa(t.Port))
+		}
+	} else if target == "" {
+		target = strconv.Itoa(t.Port)
+	}
+	return config.ProjectTunnel{
+		Kind: t.Kind, Target: target, Subdomain: t.Subdomain, RemotePort: t.RemotePort,
+		HostHeader: t.HostHeader, BasicAuth: t.BasicAuth, BasicAuthFile: t.BasicAuthFile,
+		AllowCIDR: strings.Join(t.AllowCIDR, ","), CredentialEnv: t.CredentialEnv, CredentialFile: t.CredentialFile,
+		HTTP2: t.HTTP2, MultiConnector: t.MultiConnector, ConnectorTokenEnv: t.ConnectorTokenEnv, ConnectorTokenFile: t.ConnectorTokenFile,
+		TTL: t.TTL, PolicyFile: t.PolicyFile, Transport: t.Transport, Insecure: t.Insecure, Pin: t.Pin,
+	}
 }
 
 // tunnelTarget is the local service a tunnel forwards to, for display and
@@ -208,119 +165,6 @@ func tunnelTarget(acfg agent.Config) *url.URL {
 		return nil
 	}
 	return u
-}
-
-// runAgents runs every tunnel until ctx is cancelled. A tunnel that stops
-// with a fatal error, such as a subdomain held by another agent, is logged
-// and the others keep running.
-func runAgents(ctx context.Context, agents []*agent.Agent, names []string) error {
-	var (
-		wg   sync.WaitGroup
-		mu   sync.Mutex
-		errs []error
-	)
-	for i, a := range agents {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := a.Run(ctx); err != nil {
-				slog.Error("ngstone: tunnel stopped", "tunnel", names[i], "err", err)
-				mu.Lock()
-				errs = append(errs, fmt.Errorf("tunnel %s: %w", names[i], err))
-				mu.Unlock()
-			}
-		}()
-	}
-	wg.Wait()
-	return errors.Join(errs...)
-}
-
-func runStartPlain(ctx context.Context, acfgs []agent.Config) int {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	slog.SetDefault(logger)
-
-	events := make(chan agent.StatusEvent, 64)
-	agents, names := newTunnelAgents(acfgs, events, nil)
-	defer publishStatus(ctx, "start", acfgs, agents)()
-
-	targets := map[string]string{}
-	width := 0
-	for _, acfg := range acfgs {
-		targets[acfg.Name] = acfg.TargetURL
-		width = max(width, len(acfg.Name))
-	}
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case ev := <-events:
-				switch {
-				case ev.State == agent.StateOnline && ev.URL != "":
-					fmt.Printf("%-*s  %s -> %s\n", width, ev.Tunnel, ev.URL, targets[ev.Tunnel])
-				case ev.State == agent.StateEvicted:
-					fmt.Printf("%-*s  evicted: another agent took %s\n", width, ev.Tunnel, ev.URL)
-				}
-			}
-		}
-	}()
-
-	logger.Info("ngstone: starting", "control", acfgs[0].ControlAddr, "tunnels", strings.Join(names, ","), "insecure", acfgs[0].Insecure)
-	if err := runAgents(ctx, agents, names); err != nil {
-		logger.Error("ngstone: exited with errors", "err", err)
-		return 1
-	}
-	return 0
-}
-
-func runStartTUI(ctx context.Context, acfgs []agent.Config) int {
-	ring := tui.NewLogRing(500)
-	logger := slog.New(ring)
-	slog.SetDefault(logger)
-
-	store := inspect.NewStore()
-	events := make(chan agent.StatusEvent, 64)
-	agents, names := newTunnelAgents(acfgs, events, store)
-	defer publishStatus(ctx, "start", acfgs, agents)()
-
-	tunnels := make([]tui.Tunnel, len(agents))
-	for i, a := range agents {
-		tunnels[i] = tui.Tunnel{Name: names[i], Target: tunnelTarget(acfgs[i]), RT: a.Transport()}
-	}
-
-	logger.Info("ngstone: starting", "control", acfgs[0].ControlAddr, "tunnels", strings.Join(names, ","), "insecure", acfgs[0].Insecure)
-	status := make(chan tui.StatusEvent, 64)
-
-	res := supervise(ctx, agentShutdownGrace,
-		func(agentCtx context.Context) error {
-			go bridgeStatus(agentCtx, events, status)
-			return runAgents(agentCtx, agents, names)
-		},
-		func(tuiCtx context.Context) error {
-			return tui.Run(tuiCtx, tui.Options{
-				Store:   store,
-				Status:  status,
-				Logs:    ring,
-				Tunnels: tunnels,
-			})
-		})
-
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	return finishPortTUI(os.Stderr, ring.Lines(), res, agentShutdownGrace)
-}
-
-func newTunnelAgents(acfgs []agent.Config, events chan<- agent.StatusEvent, store *inspect.Store) ([]*agent.Agent, []string) {
-	agents := make([]*agent.Agent, len(acfgs))
-	names := make([]string, len(acfgs))
-	for i, acfg := range acfgs {
-		acfg.Events = events
-		if acfg.Kind != "tcp" {
-			acfg.Store = store
-		}
-		agents[i] = agent.New(acfg)
-		names[i] = acfg.Name
-	}
-	return agents, names
 }
 
 func firstNonEmpty(values ...string) string {

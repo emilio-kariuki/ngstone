@@ -7,18 +7,16 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
-	"strings"
-	"unicode"
-	"unicode/utf8"
 
+	"ngstone/internal/access"
 	"ngstone/internal/proto"
 )
 
 const (
-	maxAccessCreds   = 64
-	maxAccessCIDRs   = 64
-	maxRealmLen      = 256
-	defaultAuthRealm = "ngstone"
+	maxAccessCreds   = access.MaxCredentials
+	maxAccessCIDRs   = access.MaxCIDRs
+	maxRealmLen      = access.MaxRealmBytes
+	defaultAuthRealm = access.DefaultRealm
 )
 
 type accessControl struct {
@@ -32,68 +30,26 @@ func buildAccessControl(bind proto.Bind) (*accessControl, error) {
 		return nil, nil
 	}
 
-	if len(bind.BasicAuthSHA256) > maxAccessCreds {
-		return nil, fmt.Errorf("edge: too many basic auth credentials (max %d)", maxAccessCreds)
+	canonical, err := access.Normalize(access.Config{BasicAuthSHA256: bind.BasicAuthSHA256, BasicAuthRealm: bind.BasicAuthRealm, AllowCIDRs: bind.AllowCIDRs})
+	if err != nil {
+		return nil, err
 	}
-	if len(bind.AllowCIDRs) > maxAccessCIDRs {
-		return nil, fmt.Errorf("edge: too many allow_cidrs entries (max %d)", maxAccessCIDRs)
-	}
-
-	ac := &accessControl{}
-
-	for _, s := range bind.BasicAuthSHA256 {
-		raw, err := hex.DecodeString(s)
+	ac := &accessControl{realm: canonical.BasicAuthRealm}
+	for _, encoded := range canonical.BasicAuthSHA256 {
+		raw, err := hex.DecodeString(encoded)
 		if err != nil {
-			return nil, fmt.Errorf("edge: invalid basic_auth_sha256 digest %q: %w", s, err)
+			return nil, fmt.Errorf("edge: decode access digest: %w", err)
 		}
-		if len(raw) != 32 {
-			return nil, fmt.Errorf("edge: invalid basic_auth_sha256 digest %q: must be 32 bytes", s)
-		}
-		var digest [32]byte
-		copy(digest[:], raw)
-		ac.basicDigests = append(ac.basicDigests, digest)
+		ac.basicDigests = append(ac.basicDigests, [32]byte(raw))
 	}
-
-	for _, c := range bind.AllowCIDRs {
-		prefix, err := netip.ParsePrefix(c)
+	for _, cidr := range canonical.AllowCIDRs {
+		prefix, err := netip.ParsePrefix(cidr)
 		if err != nil {
-			return nil, fmt.Errorf("edge: invalid allow_cidrs entry %q: %w", c, err)
+			return nil, fmt.Errorf("edge: decode access CIDR: %w", err)
 		}
 		ac.allow = append(ac.allow, prefix)
 	}
-
-	ac.realm = truncateRealm(sanitizeRealm(bind.BasicAuthRealm), maxRealmLen)
-	if ac.realm == "" {
-		ac.realm = defaultAuthRealm
-	}
-
 	return ac, nil
-}
-
-func sanitizeRealm(realm string) string {
-	var b strings.Builder
-	for _, r := range realm {
-		if r == '"' || r == '\\' || !unicode.IsPrint(r) {
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
-}
-
-func truncateRealm(s string, maxBytes int) string {
-	if len(s) <= maxBytes {
-		return s
-	}
-	b := s[:maxBytes]
-	for len(b) > 0 {
-		r, size := utf8.DecodeLastRuneInString(b)
-		if r != utf8.RuneError || size != 1 {
-			break
-		}
-		b = b[:len(b)-1]
-	}
-	return b
 }
 
 func prefixesContain(ps []netip.Prefix, ip netip.Addr) bool {

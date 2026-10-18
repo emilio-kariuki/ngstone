@@ -45,6 +45,18 @@ type NamedTunnel struct {
 
 // Tunnel describes one tunnel. Kind is "http" (the default) or "tcp".
 type Tunnel struct {
+	CredentialEnv      string `yaml:"credential_env"`
+	CredentialFile     string `yaml:"credential_file"`
+	ConnectorTokenFile string `yaml:"connector_token_file"`
+	HTTP2              bool   `yaml:"http2"`
+	MultiConnector     bool   `yaml:"multi_connector"`
+	ConnectorTokenEnv  string `yaml:"connector_token_env"`
+	TTL                string `yaml:"ttl"`
+	PolicyFile         string `yaml:"policy_file"`
+	Transport          string `yaml:"transport"`
+	Insecure           bool   `yaml:"insecure"`
+	Pin                string `yaml:"pin"`
+
 	Kind string `yaml:"kind"`
 
 	// The local service: Port means 127.0.0.1:Port. HTTP tunnels may give a
@@ -81,6 +93,11 @@ func TunnelsPath(explicit string) (string, error) {
 	}
 	if _, err := os.Stat(TunnelsFileName); err == nil {
 		return TunnelsFileName, nil
+	}
+	for _, name := range []string{DefaultProjectFilename, ".ngstone.json"} {
+		if _, err := os.Stat(name); err == nil {
+			return name, nil
+		}
 	}
 	cfgPath, err := Path()
 	if err != nil {

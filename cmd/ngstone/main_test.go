@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"os"
@@ -146,7 +147,17 @@ func TestVerbFuncDispatch(t *testing.T) {
 		wantVal bool
 	}{
 		{"auth", true, true},
+		{"admin", true, true},
+		{"login", true, true},
+		{"doctor", true, true},
+		{"status", true, true},
+		{"tunnels", true, true},
+		{"observability", true, true},
+		{"drain", true, true},
 		{"port", true, true},
+		{"replay", true, true},
+		{"credentials", true, true},
+		{"credential", true, true},
 		{"config", true, true},
 		{"logout", true, true},
 		{"version", true, true},
@@ -217,6 +228,58 @@ func TestVerbFuncDispatchIncludesTCP(t *testing.T) {
 	fn, ok := verbFunc("tcp")
 	if !ok || fn == nil {
 		t.Fatalf("verbFunc(%q) ok=%v (nil func=%v), want a dispatchable tcp verb", "tcp", ok, fn == nil)
+	}
+}
+
+func TestVerbFuncDispatchIncludesUp(t *testing.T) {
+	fn, ok := verbFunc("up")
+	if !ok || fn == nil {
+		t.Fatalf("verbFunc(%q) ok=%v (nil func=%v), want a dispatchable up verb", "up", ok, fn == nil)
+	}
+}
+
+func TestVerbFuncDispatchIncludesPreview(t *testing.T) {
+	fn, ok := verbFunc("preview")
+	if !ok || fn == nil {
+		t.Fatalf("verbFunc(%q) ok=%v (nil func=%v), want a dispatchable preview verb", "preview", ok, fn == nil)
+	}
+}
+
+func TestCredentialsCommandsIssueListAndRevoke(t *testing.T) {
+	bin := buildNgstoneBinary(t)
+	path := filepath.Join(t.TempDir(), "credentials.json")
+	stdout, stderr, code := runNgstone(t, bin, 10*time.Second, "credentials", "issue", "--file", path, "--subdomain", "demo", "--json")
+	if code != 0 {
+		t.Fatalf("credentials issue exit code = %d; stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	var issued struct {
+		ID    string `json:"id"`
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &issued); err != nil {
+		t.Fatalf("decode issued credential: %v; stdout=%q", err, stdout)
+	}
+	if issued.ID == "" || issued.Token == "" {
+		t.Fatalf("issued credential = %+v, want id and token", issued)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read credential file: %v", err)
+	}
+	if strings.Contains(string(data), issued.Token) {
+		t.Fatal("credential file contains the plaintext token")
+	}
+	stdout, stderr, code = runNgstone(t, bin, 10*time.Second, "credentials", "list", "--file", path, "--json")
+	if code != 0 || !strings.Contains(stdout, issued.ID) || strings.Contains(stdout, issued.Token) {
+		t.Fatalf("credentials list = code %d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	stdout, stderr, code = runNgstone(t, bin, 10*time.Second, "credentials", "revoke", issued.ID, "--file", path)
+	if code != 0 || !strings.Contains(stdout, "revoked") {
+		t.Fatalf("credentials revoke = code %d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	stdout, stderr, code = runNgstone(t, bin, 10*time.Second, "credentials", "list", "--file", path, "--json")
+	if code != 0 || !strings.Contains(stdout, "revoked_at") {
+		t.Fatalf("credentials list after revoke = code %d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
 

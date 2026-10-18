@@ -207,6 +207,9 @@ func TestStalledRequestBodyGets408AndFreesSlot(t *testing.T) {
 	if resp.StatusCode != http.StatusRequestTimeout {
 		t.Fatalf("stalled upload got %d, want 408", resp.StatusCode)
 	}
+	if !resp.Close {
+		t.Fatal("stalled upload connection must be closed after the timeout response")
+	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("stalled upload took %v to be cut off with a 300ms idle timeout", elapsed)
 	}

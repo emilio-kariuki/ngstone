@@ -91,6 +91,28 @@ func TestBuildAccessControlRealmSanitization(t *testing.T) {
 	}
 }
 
+func TestAccessControlEqualIgnoresListOrdering(t *testing.T) {
+	first, err := buildAccessControl(proto.Bind{
+		BasicAuthSHA256: []string{digestFor("user-a", "pass-a"), digestFor("user-b", "pass-b")},
+		BasicAuthRealm:  "shared",
+		AllowCIDRs:      []string{"10.0.0.0/8", "2001:db8::/32"},
+	})
+	if err != nil {
+		t.Fatalf("build first access control: %v", err)
+	}
+	second, err := buildAccessControl(proto.Bind{
+		BasicAuthSHA256: []string{digestFor("user-b", "pass-b"), digestFor("user-a", "pass-a")},
+		BasicAuthRealm:  "shared",
+		AllowCIDRs:      []string{"2001:db8::/32", "10.0.0.0/8"},
+	})
+	if err != nil {
+		t.Fatalf("build second access control: %v", err)
+	}
+	if !accessControlEqual(first, second) {
+		t.Fatal("equivalent access controls with different list ordering should match")
+	}
+}
+
 func TestAllowIPNilReceiver(t *testing.T) {
 	var ac *accessControl
 	if !ac.allowIP(netip.MustParseAddr("1.2.3.4")) {
@@ -224,7 +246,11 @@ func TestCheckBasicAuthMultiCredential(t *testing.T) {
 
 func TestTruncateRealmASCIIOverCap(t *testing.T) {
 	realm := strings.Repeat("a", 500)
-	got := truncateRealm(realm, maxRealmLen)
+	ac, err := buildAccessControl(proto.Bind{BasicAuthRealm: realm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ac.realm
 	if len(got) != maxRealmLen {
 		t.Fatalf("truncateRealm ascii len = %d, want %d", len(got), maxRealmLen)
 	}
@@ -235,7 +261,11 @@ func TestTruncateRealmASCIIOverCap(t *testing.T) {
 
 func TestTruncateRealmMultiByteRunesStaysValidUTF8(t *testing.T) {
 	realm := strings.Repeat("é", 200)
-	got := truncateRealm(realm, maxRealmLen)
+	ac, err := buildAccessControl(proto.Bind{BasicAuthRealm: realm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ac.realm
 	if len(got) > maxRealmLen {
 		t.Fatalf("truncateRealm multi-byte len = %d, want <= %d", len(got), maxRealmLen)
 	}
@@ -246,7 +276,11 @@ func TestTruncateRealmMultiByteRunesStaysValidUTF8(t *testing.T) {
 
 func TestTruncateRealmEmojiStaysValidUTF8(t *testing.T) {
 	realm := strings.Repeat("😀", 200)
-	got := truncateRealm(realm, maxRealmLen)
+	ac, err := buildAccessControl(proto.Bind{BasicAuthRealm: realm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ac.realm
 	if len(got) > maxRealmLen {
 		t.Fatalf("truncateRealm emoji len = %d, want <= %d", len(got), maxRealmLen)
 	}

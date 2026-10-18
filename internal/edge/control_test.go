@@ -53,13 +53,14 @@ func newTestServer(token string) *Server {
 	sum := sha256.Sum256([]byte(token))
 	limits, _ := LimitsConfig{}.withDefaults()
 	s := &Server{
-		cfg:         Config{Domain: "example.com", TokenSHA256: sum[:], PublicScheme: "https", Limits: limits},
-		registry:    NewRegistry(),
-		authLimiter: newAuthRateLimiter(),
-		randomName:  randomSubdomain,
-		perIP:       newPerIPInflight(limits.PerIPInFlight),
-		shares:      newShareRegistry(0),
-		shareSem:    newGlobalSemaphore(maxGlobalShareConns),
+		cfg:          Config{Domain: "example.com", TokenSHA256: sum[:], PublicScheme: "https", Limits: limits},
+		registry:     NewRegistry(),
+		authLimiter:  newAuthRateLimiter(),
+		randomName:   randomSubdomain,
+		perIP:        newPerIPInflight(limits.PerIPInFlight),
+		shares:       newShareRegistry(0),
+		shareSem:     newGlobalSemaphore(maxGlobalShareConns),
+		adminLimiter: newAuthRateLimiter(),
 	}
 	s.shares.onExpire = func(sh *share) { s.closeShare(sh, proto.ShareReasonExpired) }
 	s.shares.onIdle = func(sh *share) { s.closeShare(sh, proto.ShareReasonIdle) }
@@ -81,7 +82,7 @@ func TestAuthWrongTokenRejected(t *testing.T) {
 		})
 	}()
 
-	if _, err := s.authenticate(server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second)); err == nil {
+	if _, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second)); err == nil {
 		t.Fatalf("expected error for wrong token")
 	}
 
@@ -115,7 +116,7 @@ func TestAuthMissingWithinDeadlineCloses(t *testing.T) {
 	s := newTestServer("tok")
 
 	start := time.Now()
-	_, err := s.authenticate(server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(authDeadline))
+	_, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(authDeadline))
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -140,7 +141,7 @@ func TestAuthNoCommonVersion(t *testing.T) {
 		})
 	}()
 
-	if _, err := s.authenticate(server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second)); err == nil {
+	if _, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second)); err == nil {
 		t.Fatalf("expected error for incompatible protocol versions")
 	}
 
@@ -194,7 +195,7 @@ func TestReplyIDsEcho(t *testing.T) {
 		})
 	}()
 
-	as, err := s.authenticate(server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second))
+	as, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second))
 	if err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
@@ -219,7 +220,7 @@ func TestReplyIDsEcho(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode bind: %v", err)
 	}
-	s.handleBind(as, server.Control(), msg.ID, bind)
+	s.handleBind(context.Background(), as, server.Control(), msg.ID, bind)
 
 	bindReply, err := client.Control().Read()
 	if err != nil {
@@ -472,7 +473,7 @@ func TestControlLoopGoodbyeDoesNotLeakReaderGoroutine(t *testing.T) {
 				ProtoVersions: []int{proto.ProtoVersion},
 			})
 		}()
-		as, err := s.authenticate(server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second))
+		as, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second))
 		if err != nil {
 			t.Fatalf("authenticate: %v", err)
 		}
@@ -549,7 +550,7 @@ func TestHandleBindRandomNameNeverTakesOverLiveDifferentInstance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode bind: %v", err)
 	}
-	s.handleBind(as, server.Control(), msg.ID, bind)
+	s.handleBind(context.Background(), as, server.Control(), msg.ID, bind)
 
 	reply, err := client.Control().Read()
 	if err != nil {

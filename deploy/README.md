@@ -15,17 +15,22 @@ sudo ./deploy/install-edge.sh \
   --acme-ca staging
 ```
 
-The script prompts for the DNS provider's credentials without echoing them
+The script prompts for the DNS provider credentials without echoing them
 (see [DNS provider credentials](#dns-provider-credentials)). It downloads and
-verifies the edge binary, generates the tunnel auth token, creates the
-root-only environment file, installs the hardened systemd unit, configures
-UFW, checks DNS, starts `ngstoned`, and prints the laptop commands. Once the
-health output shows both certificates, rerun it with only
+verifies both binaries, creates the root-only environment
+file, installs the hardened systemd unit, configures UFW, checks DNS, starts
+`ngstoned`, and prints the laptop command. Existing installs using the shared
+token hash remain supported; fresh deployments use durable SQLite storage and
+issue scoped credentials through the loopback management API. Set
+`NGSTONE_DATABASE_URL` before running the installer to use PostgreSQL instead.
+Use `--acme-ca staging` first if you are still validating DNS or the VPS.
+
+Once the health output shows both certificates, rerun the installer with
 `--acme-ca production`; the domain, provider, credentials and token are kept.
 
 Other options: `--tcp-ports MIN-MAX` enables raw TCP tunnels and opens that
 range in UFW (`--tcp-ports off` removes it), and `--from-source` builds
-`ngstoned` from the checkout with Go instead of downloading a release. A
+`ngstoned` and `ngstone` from the checkout with Go instead of downloading a release. A
 release that predates a provider cannot use it; the installer checks this
 before replacing the installed binary.
 
@@ -43,6 +48,16 @@ store the plaintext tunnel token on the VPS, so save the token it prints.
 command line (`sudo NGSTONE_CF_API_TOKEN=... ./deploy/install-edge.sh ...`)
 when running non-interactively.
 
+## Upgrading existing control-plane databases
+
+Back up the database and stop every edge process before upgrading to schema
+v4. Start all edges on the new binary; do not leave an older edge writing to
+the migrated database. Migration runs automatically and moves tunnel, lease,
+and policy ownership from credential IDs to their recorded owner principals.
+Identical policies are merged, differing same-name policies are preserved
+under unique names, and custom-domain associations retain their tunnel IDs.
+Credentials without an owner retain their existing identity.
+
 ## Uninstalling
 
 From the checkout on the VPS, remove the service, binary, and root-only
@@ -52,7 +67,8 @@ secrets with a confirmation prompt:
 sudo ./deploy/uninstall.sh
 ```
 
-The default uninstall preserves the certificate and ACME account state under
+The default uninstall removes both installed binaries and preserves the
+certificate, ACME account, and default SQLite control-plane state under
 `/var/lib/private/ngstoned` so a later reinstall can continue using it. To
 remove that state as well, and remove matching public listener allow rules from
 UFW, use the explicit destructive options:
@@ -70,12 +86,19 @@ non-interactively.
 
 ## DNS records
 
-Two records in your zone, here `example.com`. On Cloudflare both must be proxy status "DNS only" (grey cloud), since Cloudflare's proxy would break the TLS termination and the agent's persistent yamux connection:
+Two records in your zone, here `example.com`. On Cloudflare, DNS-only
+records (grey cloud) are the simplest setup:
 
 | Type        | Name            | Value               |
 | ----------- | --------------- | ------------------- |
 | A (or AAAA) | `example.com`   | the VPS's public IP |
 | A (or AAAA) | `*.example.com` | the VPS's public IP |
+
+The agent's default `--transport auto` first uses the raw control listener on
+`:4443`, then falls back to the authenticated WebSocket control endpoint on
+HTTPS `:443`. A proxied Cloudflare record can therefore support the fallback
+when WebSockets are enabled, but DNS-only records remain the least surprising
+setup and are required when forcing `--transport raw`.
 
 ## DNS provider credentials
 
@@ -130,17 +153,173 @@ This token can create and delete `_acme-challenge` TXT records in the one zone a
 
 ## Environment
 
-Create `/etc/ngstoned/env` (mode 0600, owned by root, referenced by the unit's `EnvironmentFile=`). It holds the token hash, the ACME email and your DNS provider's variables, for example for Cloudflare:
+Create `/etc/ngstoned/env` (mode 0600, owned by root, referenced by the unit's `EnvironmentFile=`). It holds the storage settings, ACME email and your DNS provider's variables. Durable SQLite storage is the default; this example uses Cloudflare:
 
 ```
-NGSTONE_TOKEN_SHA256=<sha256 of the agent auth token, hex>
+NGSTONE_DATABASE_URL=sqlite:///var/lib/ngstoned/control.db
+NGSTONE_EDGE_ID=edge-a
 NGSTONE_CERT_EMAIL=<your email, required by Let's Encrypt>
 NGSTONE_CF_API_TOKEN=<the scoped Cloudflare token above>
+# Optional: SHA-256 hash of the management API bearer token
+NGSTONE_ADMIN_TOKEN_SHA256=<64-character hex digest>
+# Optional: browser management login and team RBAC
+NGSTONE_OIDC_ISSUER=https://login.example.com/realms/ngstone
+NGSTONE_OIDC_CLIENT_ID=ngstone-ops
+NGSTONE_OIDC_CLIENT_SECRET=<provider client secret>
+NGSTONE_OIDC_COOKIE_SECRET=<base64 secret from openssl rand -base64 32>
+NGSTONE_OIDC_REDIRECT_URL=https://edge.example.com:4041/api/v1/auth/oidc/callback
+NGSTONE_OIDC_GROUPS_CLAIM=groups
+NGSTONE_OIDC_ADMIN_GROUPS=ngstone-admins
+NGSTONE_OIDC_OPERATOR_GROUPS=ngstone-operators
+NGSTONE_OIDC_VIEWER_GROUPS=ngstone-viewers
+# Optional: restrict login and set an explicit fallback role
+NGSTONE_OIDC_ALLOWED_EMAIL_DOMAINS=example.com
+NGSTONE_OIDC_DEFAULT_ROLE=
+# Optional: lifecycle alert webhook
+NGSTONE_ALERT_WEBHOOK_URL=https://alerts.example.com/ngstone
+NGSTONE_ALERT_WEBHOOK_TOKEN=<webhook secret>
+# Optional: screen-sharing TURN fallback. The shared secret must match
+# coturn's static-auth-secret and is read only from this root-owned file.
+NGSTONE_SCREEN_TURN_URLS=turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349
+NGSTONE_SCREEN_TURN_SHARED_SECRET=<coturn-rest-auth-secret>
+NGSTONE_SCREEN_MAX_VIEWERS=8
 ```
 
-Generate the token pair on the laptop: `token=$(openssl rand -base64 32)` produces the plaintext the agent authenticates with (`ngstone auth "$token"`), and `printf %s "$token" | shasum -a 256 | cut -d' ' -f1` produces the hex digest that goes in `NGSTONE_TOKEN_SHA256`. The plaintext token is never written to disk on the VPS, only its SHA-256 is.
+For multiple edge servers, use the same PostgreSQL URL on every server and a
+different stable `NGSTONE_EDGE_ID` on each one:
 
-Secrets must only ever reach `ngstoned` through `EnvironmentFile=`, never through `ExecStart` flags: `/proc/<pid>/cmdline` is world-readable, so any local user can read a flag value with `ps auxww`, but not the process's environment. `ngstoned` reads `$NGSTONE_TOKEN_SHA256` and `$NGSTONE_CF_API_TOKEN` in preference to the equivalent `-token-sha256`/`-cf-api-token` flags for exactly this reason, and other providers' credentials have no flags at all — do not add those flags to the unit's `ExecStart`. The agent has the same exposure: prefer `$NGSTONE_TOKEN` over `-token` whenever the agent runs somewhere another local user could run `ps`.
+```
+NGSTONE_DATABASE_URL=postgres://ngstone:<password>@db.internal/ngstone?sslmode=require
+NGSTONE_EDGE_ID=edge-b
+```
+
+The shared database coordinates names and leases, but public request routing
+is still local to the edge that receives the request. Use a load balancer or
+DNS strategy that targets the edge holding the connector; inter-edge request
+forwarding is a later layer.
+
+Keep the PostgreSQL URL in the root-only environment file or a secret manager;
+do not put it in `ExecStart`, because a password in a process argument is
+visible through `ps`.
+
+After `ngstoned` is running, issue a tunnel credential through the loopback
+management API:
+
+```
+sudo /usr/local/bin/ngstone admin credentials issue \
+  --server http://127.0.0.1:4041 --subdomain demo --ttl 24h
+```
+
+Copy the printed token to the laptop and run `ngstone auth '<token>'`. Use
+`ngstone admin credentials list` and `ngstone admin credentials revoke` to
+inspect or revoke credentials. The database stores only SHA-256 token hashes,
+and a credential is limited to one exact HTTP subdomain, one exact TCP
+remote port, or one edge-assigned preview hostname. For `ngstone preview`,
+issue with `--kind preview --ttl 2h` and omit `--subdomain` / `--remote-port`.
+The preview credential retains its assigned hostname across reconnects;
+issue another credential for a new URL.
+The edge rechecks active credentials during the heartbeat, so
+revocation and expiry close live sessions shortly afterward.
+
+The file-backed credential mode remains available for existing installations:
+
+```
+NGSTONE_CREDENTIALS_FILE=/var/lib/private/ngstoned/credentials.json
+```
+
+Use it only as a compatibility path while migrating to the database-backed
+store.
+
+For a legacy deployment, `NGSTONE_TOKEN_SHA256=<sha256 of the shared agent auth token, hex>` remains accepted when `NGSTONE_CREDENTIALS_FILE` is absent. Generate that pair on the laptop with `token=$(openssl rand -base64 32)` and `printf %s "$token" | shasum -a 256 | cut -d' ' -f1`. The shared token is not independently revocable, so migrate it to scoped credentials when practical.
+
+## Management API and CLI
+
+The ops listener exposes a versioned management API at `/api/v1`. It is
+loopback-only unless `NGSTONE_ADMIN_TOKEN_SHA256` is configured. Reach the
+default listener from a workstation through SSH:
+
+```
+ssh -L 4041:127.0.0.1:4041 root@example.com
+ngstone admin status
+ngstone admin tunnels --json
+ngstone admin observability --json
+ngstone admin credentials issue --subdomain demo --ttl 24h
+ngstone admin screens create --name demo-screen --ttl 30m --max-viewers 4
+ngstone admin policies list
+ngstone admin domains list
+ngstone admin tunnel drain demo
+```
+
+The credential issue command prints the scoped token once. Revoke it later
+with `ngstone admin credentials revoke <credential-id>`. The available API
+resources are `GET /api/v1/status`, `GET /api/v1/tunnels`, `GET|POST
+/api/v1/credentials`, `DELETE /api/v1/credentials/{id}`, `GET|POST
+/api/v1/policies`, `DELETE /api/v1/policies/{id}`, `GET|POST
+/api/v1/domains`, `DELETE /api/v1/domains/{id}`, and `POST
+/api/v1/tunnels/{hostname}/drain`. Traffic policies are validated and stored
+by digest; custom domains start in `pending` status until DNS and certificate
+automation is attached. The API also exposes `GET
+/api/v1/observability/tunnels` for per-tunnel request counts, approximate
+p50/p95/p99 latency, status-code counts, connector health, reconnects, bytes,
+and credential lifecycle counters. Configure `NGSTONE_ALERT_WEBHOOK_URL` to
+receive lifecycle events for reconnects, lease loss, and expired or revoked
+credentials; the optional webhook token is sent as a bearer header.
+
+For private non-loopback access, generate a high-entropy bearer token, store
+only its SHA-256 hash in `/etc/ngstoned/env`, and keep the plaintext in the
+operator's environment:
+
+```
+ADMIN_TOKEN="$(openssl rand -base64 32)"
+ADMIN_HASH="$(printf '%s' "$ADMIN_TOKEN" | shasum -a 256 | cut -d' ' -f1)"
+printf '%s\n' "$ADMIN_TOKEN"   # save in the operator's secret store
+printf '%s\n' "$ADMIN_HASH"    # put this value in NGSTONE_ADMIN_TOKEN_SHA256
+export NGSTONE_ADMIN_TOKEN="$ADMIN_TOKEN"
+```
+
+The bearer token protects `/api/v1` only. Do not expose `-ops` directly to the
+internet: the dashboard, `/api/state`, metrics, health, and pprof endpoints
+remain separate. Use a private network or a TLS-authenticated proxy and
+firewall when remote access is required.
+
+### OIDC browser login and team roles
+
+Register the exact `NGSTONE_OIDC_REDIRECT_URL` with the provider. Start the
+edge with the OIDC variables in `/etc/ngstoned/env`, then print the login URL
+from an operator workstation:
+
+```
+ngstone login --server https://edge.example.com:4041
+# or
+ngstone admin login --server https://edge.example.com:4041
+```
+
+The provider must return the configured group claim in userinfo. `admin` has
+full management access, `operator` can change credentials, policies, domains,
+and tunnel draining, and `viewer` is read-only. Group matches are evaluated in
+admin/operator/viewer order. With an empty default role, users without a
+configured group are rejected. Set `NGSTONE_OIDC_DEFAULT_ROLE=viewer` only when
+that broad fallback is intentional.
+
+OIDC sessions use encrypted, eight-hour cookies and PKCE. The edge validates
+the signed ID token against the provider JWKS, including issuer, audience,
+nonce, expiry, and subject consistency with userinfo. Browser mutations require
+the session CSRF token. Keep the client secret and cookie secret in the
+root-only environment file; do not put either in `ExecStart` or a shell
+command-line argument. The management bearer token remains useful for CI and
+other non-browser automation.
+
+Screen sessions are direct sender-to-viewer WebRTC by default. `--max-viewers
+N` with `N > 1` enables the edge SFU, which forwards the encoded RTP track to
+each viewer. TURN is supplied by coturn or another external TURN service; the
+edge derives short-lived REST credentials and delivers them only over the
+authenticated screen signaling WebSocket. Open coturn's UDP/TCP and TLS ports
+in the VPS firewall as well as the normal ngstone ports. See
+`docs/PRODUCTION-SCREENCAST.md` for a full coturn setup guide, the exact
+ports and env vars, and a verification procedure that proves the TURN relay
+path actually works before you ship it.
+
+Secrets must only ever reach `ngstoned` through `EnvironmentFile=`, never through `ExecStart` flags: `/proc/<pid>/cmdline` is world-readable, so any local user can read a flag value with `ps auxww`, but not the process's environment. `ngstoned` reads `$NGSTONE_CREDENTIALS_FILE`, the legacy `$NGSTONE_TOKEN_SHA256`, and `$NGSTONE_CF_API_TOKEN` in preference to their equivalent flags for exactly this reason, and other providers' credentials have no flags at all — do not add those flags to the unit's `ExecStart`. The agent has the same exposure: prefer `$NGSTONE_TOKEN` over `-token` whenever the agent runs somewhere another local user could run `ps`.
 
 ## Staging -> production promotion
 
@@ -220,4 +399,14 @@ ssh -L 4041:127.0.0.1:4041 root@example.com
 curl http://127.0.0.1:4041/healthz
 ```
 
-reports both certificates' `not_after` separately. A restart (`systemctl restart ngstoned`, three times in a row) should show no new ACME traffic in the logs — the certs load from the `StateDirectory` cache.
+The same SSH tunnel opens the local operations dashboard at
+`http://127.0.0.1:4041/`. It shows routed tunnels, connector capacity,
+certificate state, request counters, and recent in-memory edge events. Scrape
+`http://127.0.0.1:4041/metrics` through that tunnel for Prometheus-compatible
+global and per-tunnel metrics. The ops listener is read-only and must remain on loopback; do not
+change it to a public address without putting a separately authenticated proxy
+in front of it.
+
+`/healthz` reports both certificates' `not_after` separately. A restart
+(`systemctl restart ngstoned`, three times in a row) should show no new ACME
+traffic in the logs — the certs load from the `StateDirectory` cache.

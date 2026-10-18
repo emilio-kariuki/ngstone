@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 
@@ -385,7 +386,7 @@ func authAs(t *testing.T, s *Server, client, server tunnel.Session, auth proto.A
 	if remote != "" {
 		rp = netip.MustParseAddrPort(remote)
 	}
-	as, err := s.authenticate(server, rp.Addr().String(), rp, time.Now().Add(5*time.Second))
+	as, err := s.authenticate(context.Background(), server, rp.Addr().String(), rp, time.Now().Add(5*time.Second))
 	if err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
@@ -486,7 +487,7 @@ func TestShareRelayEndToEnd(t *testing.T) {
 	go func() {
 		badClient.Control().Write(proto.TypeAuth, 1, proto.Auth{ShareSecret: "nope", InstanceID: "x", ProtoVersions: proto.SupportedVersions})
 	}()
-	if _, err := s.authenticate(badServer, "203.0.113.5", netip.MustParseAddrPort("203.0.113.5:1"), time.Now().Add(5*time.Second)); err == nil {
+	if _, err := s.authenticate(context.Background(), badServer, "203.0.113.5", netip.MustParseAddrPort("203.0.113.5:1"), time.Now().Add(5*time.Second)); err == nil {
 		t.Fatalf("bad share secret must fail auth")
 	}
 	badReply := readType(t, badClient.Control(), proto.TypeAuthErr)
@@ -678,14 +679,32 @@ func TestShareRelayRespectsMaxConns(t *testing.T) {
 	s := newTestServer("tok")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var controlLoops sync.WaitGroup
+	t.Cleanup(func() {
+		done := make(chan struct{})
+		go func() {
+			controlLoops.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("share control loops did not stop during cleanup")
+		}
+	})
 
 	sharerClient, sharerServer, cleanupSharer := newRawSessionPair(t)
 	defer cleanupSharer()
 	sharerAS := authAs(t, s, sharerClient, sharerServer, proto.Auth{Token: "tok", InstanceID: "sharer", ProtoVersions: proto.SupportedVersions}, "")
-	go s.controlLoop(ctx, sharerAS)
+	controlLoops.Add(1)
+	go func() {
+		defer controlLoops.Done()
+		s.controlLoop(ctx, sharerAS)
+	}()
 	sharerLn, _ := tunnel.NewListener(sharerClient)
 	defer sharerLn.Close()
 	hold := make(chan struct{})
+	defer close(hold)
 	go func() {
 		for {
 			c, err := sharerLn.Accept()
@@ -705,7 +724,11 @@ func TestShareRelayRespectsMaxConns(t *testing.T) {
 	connClient, connServer, cleanupConn := newRawSessionPair(t)
 	defer cleanupConn()
 	connAS := authAs(t, s, connClient, connServer, proto.Auth{ShareSecret: "s", InstanceID: "c", ProtoVersions: proto.SupportedVersions}, "203.0.113.9:1")
-	go s.controlLoop(ctx, connAS)
+	controlLoops.Add(1)
+	go func() {
+		defer controlLoops.Done()
+		s.controlLoop(ctx, connAS)
+	}()
 	connClient.Control().Write(proto.TypeConnect, 5, proto.Connect{})
 	readType(t, connClient.Control(), proto.TypeConnectOK)
 	readEvent(t, sharerClient.Control(), proto.ShareEventConnectorJoined)
@@ -730,7 +753,6 @@ func TestShareRelayRespectsMaxConns(t *testing.T) {
 	if _, err := second.Read(make([]byte, 1)); err == nil {
 		t.Fatalf("second stream should have been closed")
 	}
-	close(hold)
 }
 
 var _ net.Conn = (*inflightConn)(nil)

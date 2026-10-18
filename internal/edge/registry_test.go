@@ -241,7 +241,7 @@ func TestAssignRandomHostnameRetriesOnCollision(t *testing.T) {
 		return n
 	}
 
-	hostname, evicted, err := assignRandomHostname(r, requester, false, "example.com", gen, nil)
+	hostname, evicted, err := assignRandomHostname(r, hostnameOptions{Session: requester, Domain: "example.com", Generate: gen})
 	if err != nil {
 		t.Fatalf("assignRandomHostname: %v", err)
 	}

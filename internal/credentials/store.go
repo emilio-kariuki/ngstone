@@ -25,6 +25,7 @@ const (
 	FileVersion    = 1
 	KindHTTP       = "http"
 	KindTCP        = "tcp"
+	KindPreview    = "preview"
 	MaxTTL         = 30 * 24 * time.Hour
 	GlobalOwnerID  = "__ngstone_global_admin__"
 	InvalidOwnerID = "__ngstone_invalid_owner__"
@@ -383,6 +384,10 @@ func normalizeSpec(spec Spec) (Spec, error) {
 		spec.Kind = KindHTTP
 	}
 	switch spec.Kind {
+	case KindPreview:
+		if spec.Subdomain != "" || spec.RemotePort != 0 {
+			return Spec{}, errors.New("credentials: preview credentials use a server-assigned HTTP subdomain")
+		}
 	case KindHTTP:
 		spec.Subdomain = NormalizeSubdomain(spec.Subdomain)
 		if !ValidateSubdomain(spec.Subdomain) {
@@ -399,7 +404,7 @@ func normalizeSpec(spec Spec) (Spec, error) {
 			return Spec{}, errors.New("credentials: TCP credentials require a remote port between 1 and 65535")
 		}
 	default:
-		return Spec{}, fmt.Errorf("credentials: kind must be %q or %q", KindHTTP, KindTCP)
+		return Spec{}, fmt.Errorf("credentials: kind must be %q, %q, or %q", KindHTTP, KindTCP, KindPreview)
 	}
 	return spec, nil
 }

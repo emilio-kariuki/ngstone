@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/net/websocket"
+
 	"ngstone/internal/proto"
 	"ngstone/internal/tunnel"
 )
@@ -25,6 +27,12 @@ func connectFakeAgent(t *testing.T, controlAddr, subdomain string) (sess tunnel.
 	if err != nil {
 		t.Fatalf("dial control: %v", err)
 	}
+	return connectFakeAgentConn(t, conn, subdomain)
+}
+
+func connectFakeAgentConn(t *testing.T, conn net.Conn, subdomain string) (sess tunnel.Session, goodbyeAt *atomic.Int64) {
+	t.Helper()
+	var err error
 	sess, err = tunnel.Client(conn)
 	if err != nil {
 		t.Fatalf("tunnel client: %v", err)
@@ -86,6 +94,15 @@ func connectFakeAgent(t *testing.T, controlAddr, subdomain string) (sess tunnel.
 // before Run tracked control sessions it returned immediately and the process
 // exited mid-drain.
 func TestRunWaitsForControlSessionsToDrainOnShutdown(t *testing.T) {
+	testRunWaitsForControlSessionsToDrain(t, "raw")
+}
+
+func TestRunWaitsForWebSocketControlSessionsToDrainOnShutdown(t *testing.T) {
+	testRunWaitsForControlSessionsToDrain(t, "websocket")
+}
+
+func testRunWaitsForControlSessionsToDrain(t *testing.T, transport string) {
+	t.Helper()
 	prevDrain := drainTimeout
 	drainTimeout = time.Second
 	t.Cleanup(func() { drainTimeout = prevDrain })
@@ -117,7 +134,21 @@ func TestRunWaitsForControlSessionsToDrainOnShutdown(t *testing.T) {
 	waitTCPUp(t, controlAddr)
 	waitTCPUp(t, publicAddr)
 
-	_, goodbyeAt := connectFakeAgent(t, controlAddr, "ws")
+	var goodbyeAt *atomic.Int64
+	if transport == "websocket" {
+		wsConfig, err := websocket.NewConfig("ws://"+publicAddr+controlWebSocketPath, "http://"+publicAddr)
+		if err != nil {
+			t.Fatalf("websocket config: %v", err)
+		}
+		wsConfig.Protocol = []string{controlWebSocketSubprotocol}
+		conn, err := websocket.DialConfig(wsConfig)
+		if err != nil {
+			t.Fatalf("websocket dial: %v", err)
+		}
+		_, goodbyeAt = connectFakeAgentConn(t, conn, "ws")
+	} else {
+		_, goodbyeAt = connectFakeAgent(t, controlAddr, "ws")
+	}
 
 	client, err := net.Dial("tcp", publicAddr)
 	if err != nil {

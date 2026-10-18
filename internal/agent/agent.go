@@ -242,6 +242,13 @@ func (a *Agent) setEvicted(hostname string) {
 }
 
 func (a *Agent) Run(ctx context.Context) error {
+	defer func() {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			a.emitState(StateExpired, "")
+		} else if ctx.Err() != nil {
+			a.emitState(StateOffline, "")
+		}
+	}()
 	bo := newBackoff(reconnectBase, reconnectCap)
 	defer a.transport.CloseIdleConnections()
 	defer func() {

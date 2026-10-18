@@ -283,6 +283,13 @@ func (s *globalSemaphore) release() {
 	}
 }
 
+func semaphoreStats(s *globalSemaphore) (active, capacity int64) {
+	if s == nil {
+		return 0, 0
+	}
+	return int64(len(s.slots)), int64(cap(s.slots))
+}
+
 func writeTooManyRequests(w http.ResponseWriter) {
 	w.Header().Set("Retry-After", "1")
 	w.WriteHeader(http.StatusTooManyRequests)

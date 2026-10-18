@@ -5,6 +5,8 @@ import (
 	"math/rand/v2"
 	"regexp"
 	"strconv"
+
+	"ngstone/internal/policy"
 )
 
 const maxRandomAttempts = 20
@@ -49,15 +51,36 @@ func randomSubdomain() string {
 
 var errNoFreeName = errors.New("edge: could not assign a free subdomain")
 
-func assignRandomHostname(r *Registry, as *AgentSession, takeover bool, domain string, genName func() string, ac *accessControl) (hostname string, evicted *AgentSession, err error) {
+type hostnameOptions struct {
+	Session              *AgentSession
+	Takeover             bool
+	Domain               string
+	Generate             func() string
+	Access               *accessControl
+	TrafficPolicy        *policy.Policy
+	HTTP2                bool
+	MultiConnector       bool
+	ConnectorTokenDigest string
+}
+
+func assignRandomHostname(r *Registry, opts hostnameOptions) (hostname string, evicted *AgentSession, err error) {
 	for attempt := 0; attempt < maxRandomAttempts; attempt++ {
-		candidate := genName()
-		hostname = candidate + "." + domain
-		_, evicted, err = r.Bind(hostname, as, takeover, ac)
+		candidate := opts.Generate()
+		hostname = candidate + "." + opts.Domain
+		_, evicted, err = r.BindWithOptions(BindOptions{
+			Host:                 hostname,
+			Session:              opts.Session,
+			Takeover:             opts.Takeover,
+			Access:               opts.Access,
+			TrafficPolicy:        opts.TrafficPolicy,
+			HTTP2:                opts.HTTP2,
+			MultiConnector:       opts.MultiConnector,
+			ConnectorTokenDigest: opts.ConnectorTokenDigest,
+		})
 		if err == nil {
 			return hostname, evicted, nil
 		}
-		if !errors.Is(err, ErrSubdomainTaken) {
+		if !errors.Is(err, ErrSubdomainTaken) && !errors.Is(err, ErrConnectorConfigMismatch) {
 			return "", nil, err
 		}
 	}

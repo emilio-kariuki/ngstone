@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +33,7 @@ var (
 	metricTCPRejectedBindCap       = expvar.NewInt("ngstoned_tcp_rejected_bind_cap_total")
 	metricTCPRejectedRateLimited   = expvar.NewInt("ngstoned_tcp_rejected_rate_limited_total")
 	metricTCPRejectedForbiddenCIDR = expvar.NewInt("ngstoned_tcp_rejected_forbidden_cidr_total")
+	metricTCPRejectedUnhealthy     = expvar.NewInt("ngstoned_tcp_rejected_unhealthy_total")
 )
 
 type tcpConn struct {
@@ -40,11 +42,13 @@ type tcpConn struct {
 }
 
 type tcpTunnel struct {
-	port     int
-	hostname string
-	ln       net.Listener
-	session  *AgentSession
-	allow    []netip.Prefix
+	port      int
+	hostname  string
+	durableID atomic.Value
+	boundAt   time.Time
+	ln        net.Listener
+	session   *AgentSession
+	allow     []netip.Prefix
 
 	acceptDone chan struct{}
 	closed     chan struct{}
@@ -71,6 +75,21 @@ type tcpManager struct {
 	bySession map[*AgentSession]map[int]struct{}
 	conns     map[*AgentSession]map[*tcpConn]struct{}
 	releasing map[*AgentSession]struct{}
+	observe   func(string, string, time.Duration, int64, int64)
+}
+
+type tcpTunnelInfo struct {
+	Hostname         string
+	Port             int
+	BoundAt          time.Time
+	SessionID        string
+	InstanceID       string
+	Remote           string
+	Alive            bool
+	Healthy          bool
+	AccessRestricted bool
+	ActiveStreams    int64
+	StreamCapacity   int64
 }
 
 func parseTCPPortRange(s string) (int, int, error) {
@@ -152,18 +171,122 @@ func (tm *tcpManager) registerTunnelLocked(as *AgentSession, port int, hostname 
 	tt := &tcpTunnel{
 		port:       port,
 		hostname:   hostname,
+		boundAt:    time.Now(),
 		ln:         ln,
 		session:    as,
 		allow:      allow,
 		acceptDone: make(chan struct{}),
 		closed:     make(chan struct{}),
 	}
+	tt.durableID.Store("")
 	tm.byPort[port] = tt
 	if tm.bySession[as] == nil {
 		tm.bySession[as] = make(map[int]struct{})
 	}
 	tm.bySession[as][port] = struct{}{}
 	return tt
+}
+
+func (tm *tcpManager) dashboardSnapshot() []tcpTunnelInfo {
+	if tm == nil {
+		return nil
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	out := make([]tcpTunnelInfo, 0, len(tm.byPort))
+	for _, tunnel := range tm.byPort {
+		if tunnel == nil || tunnel.session == nil {
+			continue
+		}
+		active, capacity := semaphoreStats(tunnel.session.streamSem)
+		remote := ""
+		if tunnel.session.Remote.IsValid() {
+			remote = tunnel.session.Remote.String()
+		}
+		out = append(out, tcpTunnelInfo{
+			Hostname:         tunnel.hostname,
+			Port:             tunnel.port,
+			BoundAt:          tunnel.boundAt,
+			SessionID:        tunnel.session.ID,
+			InstanceID:       tunnel.session.InstanceID,
+			Remote:           remote,
+			Alive:            !isSessionDead(tunnel.session),
+			Healthy:          tunnel.session.healthy(time.Now()),
+			AccessRestricted: len(tunnel.allow) > 0,
+			ActiveStreams:    active,
+			StreamCapacity:   capacity,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Port < out[j].Port })
+	return out
+}
+
+func (tm *tcpManager) sessionsForHostname(host string) []*AgentSession {
+	if tm == nil {
+		return nil
+	}
+	host = normalizeHost(host)
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	seen := make(map[*AgentSession]struct{})
+	var sessions []*AgentSession
+	for _, tunnel := range tm.byPort {
+		if tunnel == nil || tunnel.session == nil || normalizeHost(tunnel.hostname) != host {
+			continue
+		}
+		if _, ok := seen[tunnel.session]; ok {
+			continue
+		}
+		seen[tunnel.session] = struct{}{}
+		sessions = append(sessions, tunnel.session)
+	}
+	return sessions
+}
+
+func (tm *tcpManager) setTunnelID(as *AgentSession, port int, tunnelID string) {
+	if tm == nil {
+		return
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	if tunnel := tm.byPort[port]; tunnel != nil && tunnel.session == as {
+		tunnel.durableID.Store(tunnelID)
+	}
+}
+
+func (tm *tcpManager) setObserver(observer func(string, string, time.Duration, int64, int64)) {
+	if tm == nil {
+		return
+	}
+	tm.mu.Lock()
+	tm.observe = observer
+	tm.mu.Unlock()
+}
+
+func (tm *tcpManager) observabilityTargetsForSession(as *AgentSession) []observabilityTarget {
+	if tm == nil || as == nil {
+		return nil
+	}
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	seen := make(map[string]struct{})
+	var targets []observabilityTarget
+	for port := range tm.bySession[as] {
+		tunnel := tm.byPort[port]
+		if tunnel == nil {
+			continue
+		}
+		durableID, _ := tunnel.durableID.Load().(string)
+		target := observabilityTarget{TunnelID: durableID, Hostname: tunnel.hostname}
+		key := metricKey(target.TunnelID, target.Hostname+":"+strconv.Itoa(port))
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		targets = append(targets, target)
+	}
+	return targets
 }
 
 func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string, allow []netip.Prefix) (int, error) {
@@ -281,12 +404,21 @@ func (tm *tcpManager) acceptLoop(tt *tcpTunnel) {
 		tc := &tcpConn{client: c}
 		tt.session.inflight.Add(1)
 		tm.register(tt.session, tc)
-		go tm.handleConn(tt.session, tt.hostname, tt.allow, tc)
+		durableID, _ := tt.durableID.Load().(string)
+		go tm.handleConn(tt.session, tt.hostname, durableID, tt.allow, tc)
 	}
 }
 
-func (tm *tcpManager) handleConn(as *AgentSession, hostname string, allow []netip.Prefix, tc *tcpConn) {
+func (tm *tcpManager) handleConn(as *AgentSession, hostname, durableID string, allow []netip.Prefix, tc *tcpConn) {
 	client := tc.client
+	started := time.Now()
+	if !as.healthy(started) {
+		metricTCPRejectedUnhealthy.Add(1)
+		client.Close()
+		as.inflight.Done()
+		tm.deregister(as, tc)
+		return
+	}
 
 	if tm.limiter != nil && !tm.limiter.allow(remoteIP(client)) {
 		metricTCPRejectedRateLimited.Add(1)
@@ -381,20 +513,27 @@ func (tm *tcpManager) handleConn(as *AgentSession, hostname string, allow []neti
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	var bytesIn, bytesOut int64
 	go func() {
-		io.Copy(stream, idle.reader(client))
+		bytesIn, _ = io.Copy(stream, idle.reader(client))
 		wg.Done()
 		closeWrite(stream)
 	}()
 
 	go func() {
-		io.Copy(client, idle.reader(stream))
+		bytesOut, _ = io.Copy(client, idle.reader(stream))
 		wg.Done()
 		closeWrite(client)
 	}()
 
 	wg.Wait()
 	release()
+	tm.mu.Lock()
+	observer := tm.observe
+	tm.mu.Unlock()
+	if observer != nil {
+		observer(durableID, hostname, time.Since(started), bytesIn, bytesOut)
+	}
 	stream.Close()
 	client.Close()
 }
@@ -541,5 +680,36 @@ func (tm *tcpManager) releaseSession(as *AgentSession) {
 	}
 	tm.mu.Lock()
 	delete(tm.releasing, as)
+	tm.mu.Unlock()
+}
+
+func (tm *tcpManager) releasePort(as *AgentSession, port int) {
+	tm.mu.Lock()
+	ports, ok := tm.bySession[as]
+	if !ok {
+		tm.mu.Unlock()
+		return
+	}
+	tunnel, ok := tm.byPort[port]
+	if !ok || tunnel.session != as {
+		tm.mu.Unlock()
+		return
+	}
+	delete(tm.byPort, port)
+	delete(ports, port)
+	if len(ports) == 0 {
+		delete(tm.bySession, as)
+	}
+	select {
+	case <-tunnel.closed:
+	default:
+		close(tunnel.closed)
+	}
+	tm.mu.Unlock()
+
+	tunnel.ln.Close()
+	<-tunnel.acceptDone
+	tm.mu.Lock()
+	delete(tm.allocated, port)
 	tm.mu.Unlock()
 }

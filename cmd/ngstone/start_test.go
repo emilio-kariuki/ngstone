@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"ngstone/internal/agent"
 	"ngstone/internal/config"
 )
 
@@ -39,7 +40,7 @@ func TestTunnelAgentConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 		if acfg.Name != "web" || acfg.TargetURL != "http://127.0.0.1:3000" || acfg.Subdomain != "demo" ||
-			acfg.HostHeader != "demo.localhost" || acfg.ControlAddr != "example.com:4443" || acfg.Token != "tok" || acfg.Kind != "" {
+			acfg.HostHeader != "demo.localhost" || acfg.ControlAddr != "example.com:4443" || acfg.Token != "tok" || acfg.Kind != "http" {
 			t.Fatalf("unexpected config: %+v", acfg)
 		}
 	})
@@ -87,4 +88,13 @@ func TestFirstNonEmpty(t *testing.T) {
 	if got := firstNonEmpty("", ""); got != "" {
 		t.Fatalf("got %q", got)
 	}
+}
+
+type startOptions struct{ server, token, serverName string }
+
+func tunnelAgentConfig(nt config.NamedTunnel, opts startOptions) (agent.Config, error) {
+	tunnel := projectTunnelFromYAML(nt.Tunnel)
+	tunnel.Token, tunnel.Server, tunnel.ServerName = opts.token, opts.server, opts.serverName
+	cfg, _, err := buildProjectAgent(nt.Name, tunnel, ".", config.Config{})
+	return cfg, err
 }

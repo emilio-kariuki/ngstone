@@ -12,8 +12,12 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"strings"
 	"sync/atomic"
 	"time"
+
+	"ngstone/internal/inspect"
+	"ngstone/internal/policy"
 )
 
 type ctxKey int
@@ -47,6 +51,17 @@ func (r *statusRecorder) disarmWrite() {
 	if r.idle > 0 {
 		_ = http.NewResponseController(r.ResponseWriter).SetWriteDeadline(time.Time{})
 	}
+}
+
+type countingReadCloser struct {
+	io.ReadCloser
+	bytes atomic.Int64
+}
+
+func (r *countingReadCloser) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	r.bytes.Add(int64(n))
+	return n, err
 }
 
 func (r *statusRecorder) WriteHeader(code int) {
@@ -104,8 +119,23 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		writeError(rec, http.StatusNotFound)
 		return
 	}
+	var requestBytes countingReadCloser
+	started := time.Now()
+	defer func() {
+		s.observability.observeRequest(b.durableTunnelID(), host, rec.status, time.Since(started), requestBytes.bytes.Load(), rec.bytes)
+	}()
 
-	ac := b.access.Load()
+	snapshot := b.snapshot.Load()
+	var ac *accessControl
+	var trafficPolicy *policy.Policy
+	var http2Mode bool
+	if snapshot != nil {
+		ac = snapshot.access
+		trafficPolicy = snapshot.trafficPolicy
+		http2Mode = snapshot.http2
+	} else {
+		ac = b.access.Load()
+	}
 
 	ip := stripPort(r.RemoteAddr)
 	if addr, err := netip.ParseAddr(ip); err == nil {
@@ -132,6 +162,11 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		http.Error(rec, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	if trafficPolicy != nil && !trafficPolicy.Decide(r).Allowed {
+		metricRejectedTrafficPolicy.Add(1)
+		http.Error(rec, "forbidden", http.StatusForbidden)
+		return
+	}
 	if ac.hasBasicAuth() {
 		r.Header.Del("Authorization")
 	}
@@ -150,14 +185,23 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !b.Sess.tryAcquireStream() {
+	connector, selected := b.selectConnector(http2Mode)
+	if !selected {
 		s.globalSem.release()
 		metricRejectedSessionCap.Add(1)
 		writeTooManyRequests(rec)
 		return
 	}
 
-	slot := newReqSlot(s, b.Sess)
+	proxy := connector.proxyFor(http2Mode)
+	if proxy == nil {
+		s.globalSem.release()
+		connector.sess.releaseStream()
+		proxyErrorHandler(rec, r, errors.New("edge: binding proxy unavailable"))
+		return
+	}
+
+	slot := newReqSlot(s, connector.sess)
 	defer slot.release()
 
 	if r.ContentLength > limits.MaxBodyBytes {
@@ -167,8 +211,9 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	if r.Body != nil && r.Body != http.NoBody {
+		requestBytes.ReadCloser = r.Body
 		body := &idleBody{
-			ReadCloser: http.MaxBytesReader(w, r.Body, limits.MaxBodyBytes),
+			ReadCloser: http.MaxBytesReader(w, &requestBytes, limits.MaxBodyBytes),
 			rc:         http.NewResponseController(w),
 			idle:       limits.ClientIdleTimeout,
 		}
@@ -181,7 +226,7 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	ctx = context.WithValue(ctx, ctxKeyReqID, reqID)
 	ctx = context.WithValue(ctx, ctxKeyReqSlot, slot)
 
-	b.proxy.ServeHTTP(rec, r.WithContext(ctx))
+	proxy.ServeHTTP(rec, r.WithContext(ctx))
 }
 
 // errClientIdle reports that the public client stopped sending its request
@@ -206,11 +251,11 @@ func (b *idleBody) Read(p []byte) (int, error) {
 	}
 	_ = b.rc.SetReadDeadline(time.Now().Add(b.idle))
 	n, err := b.ReadCloser.Read(p)
-	_ = b.rc.SetReadDeadline(time.Time{})
 	if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
 		b.stalled.Store(true)
 		return n, fmt.Errorf("%w: %w", errClientIdle, err)
 	}
+	_ = b.rc.SetReadDeadline(time.Time{})
 	return n, err
 }
 
@@ -231,7 +276,15 @@ func (b *idleBody) Close() error {
 	return err
 }
 
-func newBindingProxy(transport *http.Transport) *httputil.ReverseProxy {
+func newBindingProxy(transport http.RoundTripper) *httputil.ReverseProxy {
+	return newBindingProxyWithMetadata(transport, false)
+}
+
+func newBindingHTTP2Proxy(transport http.RoundTripper) *httputil.ReverseProxy {
+	return newBindingProxyWithMetadata(transport, true)
+}
+
+func newBindingProxyWithMetadata(transport http.RoundTripper, includeMetadata bool) *httputil.ReverseProxy {
 	return &httputil.ReverseProxy{
 		Transport:     transport,
 		FlushInterval: -1,
@@ -240,6 +293,14 @@ func newBindingProxy(transport *http.Transport) *httputil.ReverseProxy {
 			pr.Out.Host = pr.In.Host
 			pr.SetXForwarded()
 			pr.Out.Header.Del("X-Real-IP")
+			if includeMetadata {
+				if reqID, _ := pr.Out.Context().Value(ctxKeyReqID).(string); reqID != "" {
+					pr.Out.Header.Set(inspect.RequestIDHeader, reqID)
+				}
+				if clientAddr, _ := pr.Out.Context().Value(ctxKeyClientAddr).(string); clientAddr != "" {
+					pr.Out.Header.Set(inspect.ClientAddrHeader, clientAddr)
+				}
+			}
 		},
 		ModifyResponse: modifyResponse,
 		ErrorHandler:   proxyErrorHandler,
@@ -249,6 +310,9 @@ func newBindingProxy(transport *http.Transport) *httputil.ReverseProxy {
 var errUpgradeCapExceeded = errors.New("edge: upgrade capacity exceeded")
 
 func modifyResponse(resp *http.Response) error {
+	if body, ok := resp.Request.Context().Value(ctxKeyIdleBody).(*idleBody); ok && body.stalled.Load() {
+		return errClientIdle
+	}
 	slot, ok := resp.Request.Context().Value(ctxKeyReqSlot).(*reqSlot)
 	if !ok || slot == nil {
 		return nil
@@ -276,7 +340,7 @@ func isLongLivedResponse(resp *http.Response) bool {
 	if err != nil {
 		return false
 	}
-	return mediaType == "text/event-stream"
+	return mediaType == "text/event-stream" || strings.HasPrefix(mediaType, "application/grpc")
 }
 
 func proxyErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
@@ -292,6 +356,9 @@ func proxyErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	body, _ := r.Context().Value(ctxKeyIdleBody).(*idleBody)
 	if errors.Is(err, errClientIdle) || (body != nil && body.stalled.Load()) {
 		metricRejectedClientIdle.Add(1)
+		if r.ProtoMajor == 1 {
+			w.Header().Set("Connection", "close")
+		}
 		writeError(w, http.StatusRequestTimeout)
 		return
 	}
