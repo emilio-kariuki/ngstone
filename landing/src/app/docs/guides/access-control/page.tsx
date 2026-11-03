@@ -18,6 +18,7 @@ const TOC: TocItem[] = [
   { id: "allow-cidr", title: "IP allowlisting" },
   { id: "combining-both", title: "Combining both" },
   { id: "traffic-policies", title: "Traffic policies" },
+  { id: "oidc-login", title: "OIDC visitor login" },
   { id: "security-notes", title: "Security notes" },
   { id: "requires-v2", title: "Requires protocol v2" },
 ]
@@ -197,9 +198,71 @@ $ ngstone preview 3000 --ttl 30m --policy-file traffic-policy.json`}
       </ParamTable>
       <Callout variant="warning" title="Policies are not authentication">
         A policy can hide paths or restrict methods, but it does not identify
-        callers. Combine it with <code>--basic-auth</code> or{" "}
-        <code>--allow-cidr</code> when the tunnel must be private. Policies{" "}
+        callers. Combine it with <code>--basic-auth</code>,{" "}
+        <code>--allow-cidr</code>, or <code>--oidc</code> when the tunnel must
+        be private. Policies{" "}
         are HTTP-only; TCP tunnels reject them.
+      </Callout>
+
+      <Anchor id="oidc-login">OIDC visitor login</Anchor>
+      <p>
+        Require visitors to sign in with your identity provider (Google,
+        Keycloak, Okta, Auth0, Dex in front of GitHub, and so on) before the
+        edge forwards anything to an HTTP tunnel:
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone port 3000 --oidc --oidc-allow-domain example.com --oidc-allow-email contractor@gmail.com`}
+      />
+      <ParamTable>
+        <Property name="--oidc" type="bool" defaultValue="false">
+          Turn on the login wall. Without an allow list, any account the
+          provider authenticates is let in.
+        </Property>
+        <Property name="--oidc-allow-email" type="string">
+          Verified emails allowed in. Comma-separated or repeatable.
+        </Property>
+        <Property name="--oidc-allow-domain" type="string">
+          Email domains allowed in. Exact domain match only, so subdomains do
+          not match. Comma-separated or repeatable.
+        </Property>
+        <Property name="oidc, oidc_allow_email, oidc_allow_domain" type="project keys">
+          The same settings in <code>ngstone.json</code> and{" "}
+          <code>ngstone.yml</code>. HTTP tunnels only;{" "}
+          <code>kind: tcp</code> rejects them.
+        </Property>
+      </ParamTable>
+      <p>
+        A browser <code>GET</code> without a session is redirected to{" "}
+        <code>/.ngstone/auth/start</code> on the apex host. Other requests get{" "}
+        <code>401</code>. After the provider calls back to the apex host, the
+        edge checks the allow list and returns the browser to the tunnel with
+        a one-minute, single-use ticket. The tunnel host then sets an
+        encrypted, host-only <code>ngstone_visitor_session</code> cookie. The
+        edge strips that cookie before proxying. It also deletes any{" "}
+        <code>X-Ngstone-User-*</code> header the client sent and sets{" "}
+        <code>X-Ngstone-User-Email</code>, <code>X-Ngstone-User-Subject</code>,
+        and <code>X-Ngstone-User-Name</code> for your app. Sign out at{" "}
+        <code>/.ngstone/auth/logout</code>.
+      </p>
+      <p>
+        The edge operator configures one dedicated OIDC client for visitors,
+        separate from the ops-dashboard login:
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`export NGSTONE_VISITOR_OIDC_ISSUER=https://accounts.google.com
+export NGSTONE_VISITOR_OIDC_CLIENT_ID=ngstone-visitors
+export NGSTONE_VISITOR_OIDC_CLIENT_SECRET='provider-client-secret'
+export NGSTONE_VISITOR_OIDC_COOKIE_SECRET="$(openssl rand -base64 32)"
+# register https://example.com/.ngstone/auth/callback with the provider
+ngstoned -domain example.com -cert-email you@example.com`}
+      />
+      <Callout variant="note" title="Order of checks">
+        Source CIDR, then the per-IP rate limit, then basic auth, then the
+        login wall, then the traffic policy. Policies see the verified{" "}
+        <code>X-Ngstone-User-Email</code> header, so a policy rule can limit a
+        path to specific people.
       </Callout>
 
       <Anchor id="security-notes">Security notes</Anchor>

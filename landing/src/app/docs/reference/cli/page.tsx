@@ -614,6 +614,15 @@ $ ngstone port 3000 --subdomain demo --multi-connector`}
           Comma-separated CIDRs allowed to reach the tunnel. Empty allows
           any source.
         </Property>
+        <Property name="--oidc" type="bool">
+          Require visitors to sign in with the edge&apos;s OIDC provider. See{" "}
+          <a href="/docs/guides/access-control#oidc-login">OIDC visitor
+          login</a>.
+        </Property>
+        <Property name="--oidc-allow-email, --oidc-allow-domain" type="string">
+          With <code>--oidc</code>, allow only these verified emails or email
+          domains. Comma-separated or repeatable.
+        </Property>
         <Property name="--policy-file" type="string">
           Load a strict JSON HTTP traffic policy. Rules are evaluated in order
           at the edge; a denied request gets <code>403</code> and is never

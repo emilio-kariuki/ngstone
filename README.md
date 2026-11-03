@@ -273,8 +273,8 @@ Preview requires a positive local TTL; the default is two hours. Credential
 expiration or revocation can end it sooner. Pass `--json` for a
 machine-readable link with `expires_at`, or
 `--no-tui` when you want plain logs instead of the inspector.
-The URL is public while it is live; add `--basic-auth` or `--allow-cidr` for
-private previews.
+The URL is public while it is live; add `--basic-auth`, `--allow-cidr`, or
+`--oidc` for private previews.
 
 ### Inspector workflows
 
@@ -405,8 +405,91 @@ or set `"policy_file": "traffic-policy.json"` on an HTTP tunnel in
 Rules are evaluated in order and the first match wins; an unmatched request
 uses `default_action`, which defaults to `allow`. A denied request receives
 `403` and never reaches the local app. Policies are HTTP-only and are not
-access control by themselves: combine them with `--basic-auth` or
-`--allow-cidr` when the tunnel must be private.
+access control by themselves: combine them with `--basic-auth`,
+`--allow-cidr`, or `--oidc` when the tunnel must be private.
+
+### Visitor login (OIDC)
+
+Put an edge-enforced login wall in front of an HTTP tunnel. Visitors sign in
+with your OIDC provider (Google, Keycloak, Okta, Auth0, Dex in front of GitHub,
+and so on) before any request reaches the local app:
+
+```
+ngstone port 3000 --oidc --oidc-allow-domain example.com --oidc-allow-email contractor@gmail.com
+```
+
+`--oidc-allow-email` and `--oidc-allow-domain` are comma-separated or
+repeatable. A visitor is let in when their **verified** email matches one of
+the emails exactly or belongs to one of the domains (subdomains do not match).
+With `--oidc` and no allow list, any account the provider authenticates is let
+in, so only do that with a provider limited to your own organization. The same
+settings work in project files:
+
+```json
+{"tunnels": {"web": {"target": "3000", "oidc": true, "oidc_allow_domain": ["example.com"]}}}
+```
+
+```yaml
+tunnels:
+  web:
+    port: 3000
+    oidc: true
+    oidc_allow_email: [alice@example.com]
+```
+
+Visitor login is HTTP-only; `kind: tcp` tunnels reject it. The agent refuses to
+start if the edge does not acknowledge the login wall, so an old edge can never
+silently serve the tunnel without it.
+
+On the edge, visitor login uses its own OIDC client, separate from the
+[ops-dashboard OIDC login](#oidc-login-and-team-rbac):
+
+```
+export NGSTONE_VISITOR_OIDC_ISSUER=https://accounts.google.com
+export NGSTONE_VISITOR_OIDC_CLIENT_ID=ngstone-visitors
+export NGSTONE_VISITOR_OIDC_CLIENT_SECRET='provider-client-secret'
+export NGSTONE_VISITOR_OIDC_COOKIE_SECRET="$(openssl rand -base64 32)"
+ngstoned -domain example.com -cert-email you@example.com
+```
+
+Register `https://example.com/.ngstone/auth/callback` (the apex of `-domain`)
+as the client's redirect URI. Set `NGSTONE_VISITOR_OIDC_REDIRECT_URL` or
+`-visitor-oidc-redirect-url` to use another host under `-domain`.
+`NGSTONE_VISITOR_OIDC_ALLOWED_EMAIL_DOMAINS` sets an edge-wide floor that every
+visitor must meet in addition to the tunnel's own list. The issuer and client
+ID can also be passed as `-visitor-oidc-issuer` and `-visitor-oidc-client-id`;
+the secrets are read only from the environment. The settings are kept separate
+from `NGSTONE_OIDC_*` on purpose. The ops client maps groups to admin roles and
+calls back to the loopback ops listener, while visitor login serves tunnel
+audiences on the public apex host and often uses a different provider. You can
+point both at the same provider client by registering both redirect URIs.
+
+How it works:
+
+- An unauthenticated `GET`/`HEAD` that accepts `text/html` is redirected to
+  `/.ngstone/auth/start` on the apex host. Other requests (APIs, `fetch`,
+  websockets without a session) get `401`.
+- The apex start step sets a short-lived state cookie and sends the browser to
+  the provider with PKCE. The callback on the apex host validates the ID token,
+  checks the tunnel's allow list, and redirects back to the tunnel host with a
+  sealed one-minute, single-use ticket. The original path travels inside sealed
+  state, never as a plain query parameter, so it cannot be used as an open
+  redirect.
+- The tunnel host trades the ticket for an encrypted, host-only, `HttpOnly`,
+  `SameSite=Lax` `ngstone_visitor_session` cookie (8 hours). A cookie for one
+  tunnel is rejected on every other tunnel.
+- On each request the edge strips the session cookie, deletes every
+  client-supplied `X-Ngstone-User-*` header (on all tunnels, with or without
+  `--oidc`), and sets `X-Ngstone-User-Email`, `X-Ngstone-User-Subject`, and
+  `X-Ngstone-User-Name` for the local app.
+- `/.ngstone/auth/finish` and `/.ngstone/auth/logout` are reserved on tunnels
+  that use `--oidc`. Visit `/.ngstone/auth/logout` to sign out.
+
+Visitor login composes with the other controls. `--allow-cidr` and the per-IP
+rate limit are checked first, then `--basic-auth`, then the login wall, then the
+traffic policy. The policy sees the verified identity headers, so a rule such
+as `{"action": "allow", "path_prefix": "/admin", "header": "X-Ngstone-User-Email", "header_value": "alice@example.com"}`
+followed by a `deny` for `/admin` limits a path to one person.
 
 This assumes you (or someone) already has `ngstoned` running on a VPS with a
 domain pointed at it — see [Self-hosting](#self-hosting) below. `ngstoned` is
@@ -645,6 +728,9 @@ ownership is derived from the authenticated OIDC subject, not from an
 `owner_id` request field. Keep the client secret and cookie secret in the
 root-only systemd environment file. The bearer-token API remains available for
 non-browser automation.
+
+This login protects the ops dashboard and management API only. To require a
+login in front of tunnels, see [Visitor login (OIDC)](#visitor-login-oidc).
 
 ## Self-hosting
 
