@@ -606,6 +606,7 @@ func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 				}
 				s.registry.Unbind(ub.Hostname, as)
 				s.releaseDurableLease(as, durableLeaseKey("http", ub.Hostname, 0), "")
+				s.releaseDurableLease(as, durableLeaseKey("tls", ub.Hostname, 0), "")
 				ctrl.Write(proto.TypeUnbindOK, m.ID, proto.UnbindOK{Hostname: ub.Hostname})
 			case proto.TypePing:
 				p, err := proto.Decode[proto.Ping](m)
@@ -789,6 +790,10 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 		s.handleBindTCP(as, ctrl, id, bind)
 		return
 	}
+	if bind.Kind == proto.KindTLS {
+		s.handleBindTLS(as, ctrl, id, bind)
+		return
+	}
 	if bind.Kind != proto.KindHTTP {
 		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeKindUnsupported, Message: "kind not supported"})
 		return
@@ -913,6 +918,10 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 	if err != nil {
 		if lease.ID != "" {
 			s.releaseDurableLease(as, durableLeaseKey("http", hostname, 0), lease.ID)
+		}
+		if errors.Is(err, ErrKindConflict) {
+			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeKindConflict, Message: "subdomain is already bound to a tls tunnel"})
+			return
 		}
 		if errors.Is(err, ErrSubdomainTaken) {
 			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeSubdomainTaken, Message: "subdomain already in use"})

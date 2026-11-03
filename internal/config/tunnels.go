@@ -43,7 +43,7 @@ type NamedTunnel struct {
 	Tunnel
 }
 
-// Tunnel describes one tunnel. Kind is "http" (the default) or "tcp".
+// Tunnel describes one tunnel. Kind is "http" (the default), "tcp", or "tls".
 type Tunnel struct {
 	CredentialEnv      string `yaml:"credential_env"`
 	CredentialFile     string `yaml:"credential_file"`
@@ -80,6 +80,7 @@ type Tunnel struct {
 const (
 	KindHTTP = "http"
 	KindTCP  = "tcp"
+	KindTLS  = "tls"
 )
 
 var tunnelNameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
@@ -229,8 +230,27 @@ func (t *NamedTunnel) validate() error {
 		if t.URL != "" || t.Subdomain != "" || t.HostHeader != "" || len(t.BasicAuth) > 0 || t.BasicAuthFile != "" {
 			return errors.New("url, subdomain, host_header and basic auth are only for kind: http")
 		}
+	case KindTLS:
+		if (t.Port == 0) == (t.Address == "") {
+			return errors.New("set exactly one of port or address")
+		}
+		if t.Address != "" {
+			host, port, err := net.SplitHostPort(t.Address)
+			if err != nil || host == "" {
+				return fmt.Errorf("address %q must look like app.local:8443", t.Address)
+			}
+			if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+				return fmt.Errorf("address %q has an invalid port", t.Address)
+			}
+		}
+		if t.URL != "" || t.HostHeader != "" || len(t.BasicAuth) > 0 || t.BasicAuthFile != "" || t.PolicyFile != "" || t.HTTP2 || t.MultiConnector {
+			return errors.New("url, host_header, basic auth, policy_file, http2 and multi_connector are not valid for kind: tls")
+		}
+		if t.RemotePort != 0 {
+			return errors.New("remote_port is only for kind: tcp")
+		}
 	default:
-		return fmt.Errorf("kind %q must be http or tcp", t.Kind)
+		return fmt.Errorf("kind %q must be http, tcp, or tls", t.Kind)
 	}
 	return nil
 }

@@ -440,7 +440,7 @@ func (a *Agent) newServer() (tunnelServer, error) {
 		}
 		return srv, nil
 	}
-	if a.bindKind() == proto.KindTCP {
+	if a.bindKind() == proto.KindTCP || a.bindKind() == proto.KindTLS {
 		return newTCPServer(a.cfg.TargetURL), nil
 	}
 	target := a.Target()
@@ -567,6 +567,10 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		return proto.BindOK{}, fmt.Errorf("%w: basic auth, traffic policies, HTTP/2, and multiple connectors are not supported for tcp tunnels", errFatalHandshake)
 	}
 
+	if a.bindKind() == proto.KindTLS && (len(a.cfg.BasicAuthSHA256) > 0 || a.cfg.Policy != nil || a.cfg.HTTP2 || a.cfg.MultiConnector || a.cfg.RemotePort != 0 || a.cfg.HostHeader != "") {
+		return proto.BindOK{}, fmt.Errorf("%w: basic auth, host header rewriting, traffic policies, HTTP/2, multiple connectors, and remote ports are not supported for tls tunnels", errFatalHandshake)
+	}
+
 	policyDigest := ""
 	if a.cfg.Policy != nil {
 		policyDigest = a.cfg.Policy.Digest()
@@ -587,7 +591,7 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		Name:                 a.cfg.Name,
 		Subdomain:            a.cfg.Subdomain,
 		RemotePort:           a.cfg.RemotePort,
-		Takeover:             a.bindKind() == proto.KindHTTP,
+		Takeover:             a.bindKind() == proto.KindHTTP || a.bindKind() == proto.KindTLS,
 		HTTP2:                a.cfg.HTTP2,
 		MultiConnector:       a.cfg.MultiConnector,
 		ConnectorTokenSHA256: connectorTokenDigest,
@@ -613,7 +617,7 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 	switch msg.Type {
 	case proto.TypeBindErr:
 		e, _ := proto.Decode[proto.BindErr](msg)
-		if e.Code == proto.CodeInvalidSubdomain || e.Code == proto.CodeKindUnsupported || e.Code == proto.CodeInvalidAccess || e.Code == proto.CodeConnectorConfigMismatch || e.Code == proto.CodeCredentialScope {
+		if e.Code == proto.CodeInvalidSubdomain || e.Code == proto.CodeKindUnsupported || e.Code == proto.CodeInvalidAccess || e.Code == proto.CodeConnectorConfigMismatch || e.Code == proto.CodeCredentialScope || e.Code == proto.CodeKindConflict {
 			return proto.BindOK{}, fmt.Errorf("%w: bind failed: %s: %s", errFatalHandshake, e.Code, e.Message)
 		}
 		if e.Code == proto.CodeSubdomainTaken && a.cfg.Subdomain != "" {

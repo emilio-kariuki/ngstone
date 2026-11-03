@@ -26,6 +26,7 @@ const dialBudget = 5 * time.Second
 var ErrSubdomainTaken = errors.New("edge: subdomain_taken")
 var ErrConnectorConfigMismatch = errors.New("edge: connector_config_mismatch")
 var ErrConnectorTokenRequired = errors.New("edge: connector_token_required")
+var ErrKindConflict = fmt.Errorf("%w: hostname is bound to a tunnel of another kind", ErrSubdomainTaken)
 
 type dialError struct{ err error }
 
@@ -58,6 +59,7 @@ type bindingSnapshot struct {
 	multiConnector       bool
 	connectorTokenDigest string
 	proxy                *httputil.ReverseProxy
+	tls                  bool
 }
 
 type bindingConnector struct {
@@ -121,6 +123,7 @@ type BindOptions struct {
 	HTTP2                bool
 	MultiConnector       bool
 	ConnectorTokenDigest string
+	TLS                  bool
 }
 
 type registryConnectorInfo struct {
@@ -141,6 +144,7 @@ type registryBindingInfo struct {
 	MultiConnector   bool                    `json:"multi_connector"`
 	AccessRestricted bool                    `json:"access_restricted"`
 	PolicyEnabled    bool                    `json:"policy_enabled"`
+	TLS              bool                    `json:"tls,omitempty"`
 	Connectors       []registryConnectorInfo `json:"connectors"`
 }
 
@@ -175,6 +179,7 @@ func (r *Registry) dashboardSnapshot() []registryBindingInfo {
 			binding.HTTP2 = snapshot.http2
 			binding.MultiConnector = snapshot.multiConnector
 			binding.PolicyEnabled = snapshot.trafficPolicy != nil
+			binding.TLS = snapshot.tls
 		}
 		access := b.access.Load()
 		binding.AccessRestricted = access != nil && (len(access.basicDigests) > 0 || len(access.allow) > 0)
@@ -273,7 +278,20 @@ func (r *Registry) Route(host string) (*Binding, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	b, ok := r.byHost[normalizeHost(host)]
+	if ok && b.tlsMode() {
+		return nil, false
+	}
 	return b, ok
+}
+
+func (r *Registry) RouteTLS(host string) (*Binding, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	b, ok := r.byHost[normalizeHost(host)]
+	if !ok || !b.tlsMode() {
+		return nil, false
+	}
+	return b, true
 }
 
 func (r *Registry) Bind(host string, s *AgentSession, takeover bool, ac *accessControl) (*Binding, *AgentSession, error) {
@@ -288,6 +306,9 @@ func (r *Registry) BindWithOptions(opts BindOptions) (*Binding, *AgentSession, e
 		return nil, nil, ErrConnectorTokenRequired
 	}
 	if !opts.MultiConnector && opts.ConnectorTokenDigest != "" {
+		return nil, nil, ErrConnectorConfigMismatch
+	}
+	if opts.TLS && (opts.MultiConnector || opts.HTTP2 || opts.TrafficPolicy != nil) {
 		return nil, nil, ErrConnectorConfigMismatch
 	}
 	opts.Host = normalizeHost(opts.Host)
@@ -378,6 +399,7 @@ func newBinding(opts BindOptions, limits LimitsConfig) *Binding {
 		multiConnector:       opts.MultiConnector,
 		connectorTokenDigest: opts.ConnectorTokenDigest,
 		proxy:                connector.proxyFor(opts.HTTP2),
+		tls:                  opts.TLS,
 	})
 	return b
 }
@@ -385,6 +407,17 @@ func newBinding(opts BindOptions, limits LimitsConfig) *Binding {
 func (r *Registry) bindExistingLocked(existing *Binding, opts BindOptions) (*Binding, *AgentSession, error) {
 	if !sameSessionOwner(existing.Sess, opts.Session) {
 		return nil, nil, ErrSubdomainTaken
+	}
+	if existing.tlsMode() != opts.TLS {
+		if !isSessionDead(existing.Sess) {
+			return nil, nil, ErrKindConflict
+		}
+		evicted := existing.Sess
+		r.removeBindingLocked(opts.Host, existing)
+		b := newBinding(opts, r.limits)
+		r.byHost[opts.Host] = b
+		r.addSessionHostLocked(opts.Session, opts.Host)
+		return b, evicted, nil
 	}
 	if existing.connectorForSession(opts.Session) != nil {
 		if existing.multiConnectorMode() && !bindingConfigMatches(existing.snapshot.Load(), opts.Access, opts.TrafficPolicy, opts.HTTP2, opts.MultiConnector, opts.ConnectorTokenDigest) {
@@ -403,6 +436,7 @@ func (r *Registry) bindExistingLocked(existing *Binding, opts BindOptions) (*Bin
 			multiConnector:       opts.MultiConnector,
 			connectorTokenDigest: opts.ConnectorTokenDigest,
 			proxy:                existing.primaryProxy(opts.HTTP2),
+			tls:                  opts.TLS,
 		})
 		return existing, nil, nil
 	}
@@ -602,6 +636,11 @@ func newBindingHTTP2Transport(host string, s *AgentSession, limits LimitsConfig)
 func (b *Binding) http2Mode() bool {
 	snapshot := b.snapshot.Load()
 	return snapshot != nil && snapshot.http2
+}
+
+func (b *Binding) tlsMode() bool {
+	snapshot := b.snapshot.Load()
+	return snapshot != nil && snapshot.tls
 }
 
 func (b *Binding) multiConnectorMode() bool {

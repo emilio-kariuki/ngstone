@@ -39,6 +39,7 @@ var (
 	ErrPolicyConflict          = errors.New("storage: traffic policy conflict")
 	ErrNotFound                = errors.New("storage: record not found")
 	ErrInvalid                 = errors.New("storage: invalid record")
+	ErrHostnameKindConflict    = fmt.Errorf("%w: hostname is used by a tunnel of another kind", ErrTunnelConflict)
 	domainRE                   = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
 )
 
@@ -706,13 +707,13 @@ func (s *Store) acquireLeaseOnce(ctx context.Context, request LeaseRequest) (Lea
 	if request.Hostname == "" || request.Kind == "" || request.OwnerID == "" || request.InstanceID == "" || request.SessionID == "" || request.EdgeID == "" {
 		return Lease{}, ErrInvalid
 	}
-	if request.Kind != "http" && request.Kind != "tcp" {
+	if request.Kind != "http" && request.Kind != "tcp" && request.Kind != "tls" {
 		return Lease{}, ErrInvalid
 	}
 	if request.Kind == "tcp" && (request.RemotePort < 1 || request.RemotePort > 65535) {
 		return Lease{}, ErrInvalid
 	}
-	if request.Kind == "http" && request.RemotePort != 0 {
+	if (request.Kind == "http" || request.Kind == "tls") && request.RemotePort != 0 {
 		return Lease{}, ErrInvalid
 	}
 	if request.MultiConnector && request.ConnectorTokenDigest == "" {
@@ -756,6 +757,9 @@ func (s *Store) acquireLeaseOnce(ctx context.Context, request LeaseRequest) (Lea
 	query := `SELECT id, name, hostname, kind, remote_port, owner_id, status, edge_id, instance_id, session_id, http2, multi_connector, connector_token_digest, allow_cidrs_json, access_json, policy_id, policy_digest, created_at, updated_at, expires_at FROM tunnels WHERE hostname = $1 AND kind = $2 AND remote_port = $3`
 	if s.driver == DriverPostgres {
 		query += ` FOR UPDATE`
+	}
+	if err := s.checkHostnameKindConflict(ctx, tx, request, now); err != nil {
+		return Lease{}, err
 	}
 	var existing storedTunnel
 	err = tx.QueryRowContext(ctx, s.bind(query), request.Hostname, request.Kind, request.RemotePort).Scan(
@@ -839,6 +843,27 @@ func (s *Store) acquireLeaseOnce(ctx context.Context, request LeaseRequest) (Lea
 		return Lease{}, fmt.Errorf("storage: commit lease: %w", err)
 	}
 	return Lease{ID: leaseID, TunnelID: tunnelID, Hostname: request.Hostname, Kind: request.Kind, RemotePort: request.RemotePort, InstanceID: request.InstanceID, SessionID: request.SessionID, EdgeID: request.EdgeID, OwnerID: request.OwnerID, AcquiredAt: now, RenewedAt: now, ExpiresAt: request.ExpiresAt, Reconnected: reconnected}, nil
+}
+
+func (s *Store) checkHostnameKindConflict(ctx context.Context, tx *sql.Tx, request LeaseRequest, now time.Time) error {
+	other := ""
+	switch request.Kind {
+	case "http":
+		other = "tls"
+	case "tls":
+		other = "http"
+	default:
+		return nil
+	}
+	var active int
+	err := tx.QueryRowContext(ctx, s.bind(`SELECT COUNT(*) FROM connector_leases l JOIN tunnels t ON t.id = l.tunnel_id WHERE t.hostname = $1 AND t.kind = $2 AND l.expires_at > $3`), request.Hostname, other, nowString(now)).Scan(&active)
+	if err != nil {
+		return fmt.Errorf("storage: inspect hostname kind: %w", err)
+	}
+	if active > 0 {
+		return ErrHostnameKindConflict
+	}
+	return nil
 }
 
 func (s *Store) policyForLease(ctx context.Context, request LeaseRequest) (string, string, error) {

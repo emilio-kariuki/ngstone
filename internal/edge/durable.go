@@ -51,8 +51,11 @@ func (s *Server) acquireDurableLease(as *AgentSession, bind proto.Bind, hostname
 		return storage.Lease{}, nil
 	}
 	kind := "http"
-	if bind.Kind == proto.KindTCP {
+	switch bind.Kind {
+	case proto.KindTCP:
 		kind = "tcp"
+	case proto.KindTLS:
+		kind = "tls"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -172,6 +175,8 @@ func (s *Server) renewDurableSession(as *AgentSession) error {
 
 func durableLeaseError(err error) (string, string) {
 	switch {
+	case errors.Is(err, storage.ErrHostnameKindConflict):
+		return proto.CodeKindConflict, "tunnel name is already used by a tunnel of another kind"
 	case errors.Is(err, storage.ErrTunnelConflict):
 		return proto.CodeSubdomainTaken, "tunnel name is already in use"
 	case errors.Is(err, storage.ErrConnectorConfigMismatch):

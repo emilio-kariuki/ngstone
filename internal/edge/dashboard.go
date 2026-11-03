@@ -149,8 +149,12 @@ func (s *Server) dashboardTunnels() []dashboardTunnel {
 	var out []dashboardTunnel
 	if s.registry != nil {
 		for _, binding := range s.registry.dashboardSnapshot() {
+			kind := "http"
+			if binding.TLS {
+				kind = "tls"
+			}
 			out = append(out, dashboardTunnel{
-				Kind:             "http",
+				Kind:             kind,
 				Hostname:         binding.Hostname,
 				BoundAt:          binding.BoundAt,
 				HTTP2:            binding.HTTP2,

@@ -80,6 +80,7 @@ const (
 	CodeInvalidAccess           = "invalid_access"
 	CodeConnectorConfigMismatch = "connector_config_mismatch"
 	CodeCredentialScope         = "credential_scope"
+	CodeKindConflict            = "kind_conflict"
 
 	// v3 share codes.
 	CodeBadShare           = "bad_share"            // AuthErr: unknown, expired or revoked share secret
@@ -133,6 +134,7 @@ const (
 	KindHTTP  = "http"
 	KindHTTP2 = "h2"
 	KindTCP   = "tcp"
+	KindTLS   = "tls"
 	// KindShare marks a data stream a connector opens toward the edge; the
 	// edge relays it to the sharer as a KindTCP stream.
 	KindShare = "share"

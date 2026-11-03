@@ -137,7 +137,7 @@ func loadConfiguredTunnels(path string, names []string) ([]config.NamedProjectTu
 
 func projectTunnelFromYAML(t config.Tunnel) config.ProjectTunnel {
 	target := t.URL
-	if t.Kind == config.KindTCP {
+	if t.Kind == config.KindTCP || t.Kind == config.KindTLS {
 		target = t.Address
 		if target == "" {
 			target = net.JoinHostPort("127.0.0.1", strconv.Itoa(t.Port))
@@ -157,8 +157,8 @@ func projectTunnelFromYAML(t config.Tunnel) config.ProjectTunnel {
 // tunnelTarget is the local service a tunnel forwards to, for display and
 // for replaying captured HTTP requests.
 func tunnelTarget(acfg agent.Config) *url.URL {
-	if acfg.Kind == "tcp" {
-		return &url.URL{Scheme: "tcp", Host: acfg.TargetURL}
+	if acfg.Kind == "tcp" || acfg.Kind == "tls" {
+		return &url.URL{Scheme: acfg.Kind, Host: acfg.TargetURL}
 	}
 	u, err := url.Parse(acfg.TargetURL)
 	if err != nil {

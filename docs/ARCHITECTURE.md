@@ -138,7 +138,7 @@ type AuthErr struct {
 
 // ---- tunnel lifecycle ----
 type Bind struct {
-    Kind         string `json:"kind"`                // "http" or "tcp".
+    Kind         string `json:"kind"`                // "http", "tcp", or "tls".
     Subdomain    string `json:"subdomain,omitempty"` // "" → server assigns random (e.g. "amber-fox-42")
     Takeover     bool   `json:"takeover,omitempty"`  // reclaim a binding; authorized by identity, not
                                                      // liveness — see conflict rules below
@@ -200,7 +200,7 @@ type Goodbye struct {
 
 // ---- data-stream preamble (first & only frame before raw bytes) ----
 type StreamOpen struct {
-    Kind       string `json:"kind"`        // "http", "h2", or "tcp"
+    Kind       string `json:"kind"`        // "http", "h2", "tcp", or "tls"
     Host       string `json:"host"`        // which binding this request targets
     ReqID      string `json:"req_id"`      // edge-minted ULID; correlates edge logs ↔ inspector entries
     ClientAddr string `json:"client_addr"` // public client ip:port — Kind:"tcp" has no
@@ -209,6 +209,8 @@ type StreamOpen struct {
 ```
 
 **Raw TCP tunnels.** `Bind{Kind:"tcp", …}` returns an allocated port in `BindOK`, and `StreamOpen{Kind:"tcp"}` is followed by raw bytes; `ClientAddr` carries what XFF cannot. Allocation is per-tunnel from the operator-configured `-tcp-ports` range (`internal/edge/tcpmanager.go`): a specific port can be requested, or the edge picks the first free one in range. The edge binds each allocated port directly on `-tcp-bind` — a real listener, not routed through the `:443` reverse proxy or any front proxy in front of it — so the range needs its own firewall opening. There is no TLS termination for `Kind:"tcp"`: it's raw pass-through end to end, so the tunneled protocol is only as encrypted as it makes itself. Each TCP connection reuses the same per-session stream-acquisition cap (`tryAcquireStream`) and `inflight` drain accounting that HTTP streams use (§5), so a TCP tunnel counts against the same per-session concurrency budget as HTTP requests. The feature is off entirely unless `-tcp-ports` is set. Native gRPC and h2c are available through the explicit HTTP/2 mode on HTTP binds; TCP remains protocol-agnostic raw pass-through.
+
+**TLS passthrough tunnels.** `Bind{Kind:"tls", Subdomain, AllowCIDRs}` claims `<subdomain>.<domain>` (or a server-assigned name) in the same `Registry` as HTTP binds, flagged as passthrough, and `BindOK.URL` is `tls://<hostname>` (with the public port when it is not 443). Basic auth, traffic policies, HTTP/2, multiple connectors and `RemotePort` are rejected with `invalid_access`, because the edge never sees the plaintext. A hostname belongs to one kind at a time: an HTTP bind over a live `tls` binding, or the reverse, is refused with `kind_conflict` (also reported by durable storage, where `http` and `tls` leases share one hostname namespace). Each accepted connection becomes `StreamOpen{Kind:"tls", Host, ClientAddr}` followed by the raw client bytes, starting with the replayed ClientHello; the agent reuses its TCP pipe to dial the local address and splice. See §5 for the listener.
 
 **Sharing (protocol v3).** `ngstone share` and `ngstone connect` add a second kind of session: a *connector* authenticates with a share-link secret instead of the token, and the edge relays its streams to the sharer's session. The message set, the edge's share registry and the admission rules are in [SHARE-DESIGN.md](SHARE-DESIGN.md).
 
@@ -249,7 +251,7 @@ Token hygiene: issue with `ngstone credentials issue` on the edge host, save the
 
 | Addr | Purpose |
 |---|---|
-| `:443` | Public traffic. `tls.Config` from certmagic; `NextProtos: ["h2","http/1.1"]`. One `http.Server`. |
+| `:443` | Public traffic. Every accepted connection first passes the SNI router (`internal/edge/tlspassthrough.go`): a ClientHello whose SNI is a `tls` binding is spliced to the agent untouched; everything else continues to `tls.Config` from certmagic; `NextProtos: ["h2","http/1.1"]`. One `http.Server`. |
 | `:80` | `301` → `https://` (same host+path). Nothing else — DNS-01 means no ACME traffic here. |
 | `:4443` | Control plane. Raw `tls.Listener`; accept → 5 s handshake deadline → yamux server session → control-stream auth loop. |
 | `127.0.0.1:4041` | Ops endpoint: local dashboard, versioned management API at `/api/v1`, `/api/state`, Prometheus `/metrics`, `expvar`, `/healthz`, pprof. The management API is loopback-only unless a bearer-token hash or OIDC is configured; OIDC sessions map provider groups to viewer/operator/admin roles. Reach it via `ssh -L` by default. |
@@ -348,6 +350,17 @@ until an inter-edge forwarding layer is introduced.
 - **WebSocket:** `ReverseProxy` handles `Connection: Upgrade` natively (hijacks, completes the 101, then bidirectional-copies) — the upgraded byte stream rides the same per-request yamux stream, which lives as long as the socket. **Caveat:** WS-over-h2 (RFC 8441 extended CONNECT) is not enabled; browsers fall back to HTTP/1.1 for WS automatically. Documented, not worked around.
 - **Header rewriting — use `Rewrite` + `SetXForwarded()` here, and understand *why* it works.** When `Rewrite != nil`, `ReverseProxy` **unconditionally deletes** `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host` and `X-Forwarded-Proto` from the outbound request *before* calling your func. On the edge that delete is exactly what we want: it destroys inbound spoof attempts, and `pr.SetXForwarded()` then stamps the truth. (`SetXForwarded` *appends* to any prior XFF — it is only safe because the delete already ran. Do **not** "improve" the edge by switching to `Director`; you would silently start trusting attacker-supplied XFF.) `X-Real-IP` is not in the delete set — strip it explicitly. **`Host` is preserved** (forwarded as the public hostname) — ngrok's default, and what OAuth callbacks/vhost routers expect; `--host-header=localhost:3000` on the agent rewrites it for picky apps. **The agent-side proxy needs the opposite treatment** — see §6, where this same behavior is a footgun.
 - **Streaming:** `FlushInterval: -1`; request and response bodies are never buffered on the edge.
+
+### TLS passthrough on `:443`
+
+The listener chain is `net.Listener` → PROXY protocol (when enabled) → SNI router → `tls.NewListener` (unless `-insecure`) → `http.Server`. The SNI router accepts in its own goroutine and classifies each connection concurrently, so one slow client cannot stall `Accept`:
+
+1. Set a read deadline of `-read-header-timeout`. With PROXY protocol, the header is resolved first, so the real client address is what every later check sees.
+2. Peek the ClientHello by running `crypto/tls`'s own server parser over a recording reader and stopping in `GetConfigForClient`. That handles a ClientHello fragmented across records and reads without any hand-written parser. The recorder caps the peek at 16 KiB; nothing is written to the client.
+3. If the SNI names a `tls` binding (`Registry.RouteTLS`), clear the deadline and splice: `allow_cidr`, the per-IP rate limiter, the shared per-IP in-flight cap, a 256-connection passthrough cap, and the per-session stream slot apply in that order, then the edge opens `StreamOpen{Kind:"tls"}`, replays the peeked bytes, and copies both ways with the TCP idle timeout and half-close. A matching name with no healthy connector is closed rather than answered with the edge certificate.
+4. Otherwise (no SNI, another hostname, an oversized ClientHello, or not TLS at all, as with plain HTTP under `-insecure`), hand the connection with its peeked bytes replayed to the TLS-terminating path, which therefore sees exactly the bytes the client sent. A read error or timeout during the peek closes the connection, as the TLS handshake timeout would have.
+
+`Registry.Route`, which serves HTTP, ignores `tls` bindings, so a plaintext or domain-fronted request for a passthrough hostname gets `404` from the HTTP path. The apex never matches a binding, so the `/_ngstone/control` WebSocket fallback is unaffected.
 
 ### Timeouts & limits (all flag-overridable)
 

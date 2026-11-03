@@ -353,6 +353,7 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		publicLn = newProxyProtoListener(publicLn, proxyProtoTimeout, s.proxyProtoTrusted)
 	}
+	publicLn = s.newSNIListener(publicLn)
 
 	var httpLn net.Listener
 	var opsLn net.Listener
