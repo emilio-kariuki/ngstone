@@ -59,11 +59,12 @@ type Config struct {
 }
 
 type Principal struct {
-	Subject string   `json:"subject"`
-	Email   string   `json:"email,omitempty"`
-	Name    string   `json:"name,omitempty"`
-	Groups  []string `json:"groups,omitempty"`
-	Role    string   `json:"role"`
+	Subject       string   `json:"subject"`
+	Email         string   `json:"email,omitempty"`
+	EmailVerified bool     `json:"email_verified,omitempty"`
+	Name          string   `json:"name,omitempty"`
+	Groups        []string `json:"groups,omitempty"`
+	Role          string   `json:"role"`
 }
 
 type State struct {
@@ -346,14 +347,18 @@ func (p *Provider) Exchange(ctx context.Context, state State, code string) (Prin
 	if principal.Subject != claimString(idClaims, "sub") {
 		return Principal{}, errors.New("oidc userinfo subject does not match the ID token")
 	}
+	if !principal.EmailVerified && principal.Email != "" && strings.EqualFold(claimString(idClaims, "email"), principal.Email) && claimBool(idClaims, "email_verified") {
+		principal.EmailVerified = true
+	}
 	return principal, nil
 }
 
 func (p *Provider) principalFromClaims(claims map[string]json.RawMessage) (Principal, error) {
 	principal := Principal{
-		Subject: claimString(claims, "sub"),
-		Email:   claimString(claims, "email"),
-		Name:    claimString(claims, "name"),
+		Subject:       claimString(claims, "sub"),
+		Email:         claimString(claims, "email"),
+		EmailVerified: claimBool(claims, "email_verified"),
+		Name:          claimString(claims, "name"),
 	}
 	if principal.Subject == "" {
 		return Principal{}, errors.New("oidc userinfo response is missing sub")

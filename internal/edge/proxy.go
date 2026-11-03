@@ -114,6 +114,15 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	defer recordRequestMetrics(rec)
 
 	host := stripPort(r.Host)
+	if s.visitor.servesHost(host) && s.visitor.handlesApexPath(r.URL.Path) {
+		if !s.perIPLimiter.allow(stripPort(r.RemoteAddr)) {
+			metricRejectedRateLimited.Add(1)
+			writeTooManyRequests(rec)
+			return
+		}
+		s.serveVisitorApex(rec, r)
+		return
+	}
 	b, ok := s.registry.Route(host)
 	if !ok {
 		writeError(rec, http.StatusNotFound)
@@ -162,6 +171,13 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		http.Error(rec, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	stripVisitorIdentityHeaders(r.Header)
+	if rule := ac.loginRule(); rule != nil {
+		if !s.authorizeVisitor(rec, r, rule) {
+			return
+		}
+	}
+	stripVisitorSessionCookie(r.Header)
 	if trafficPolicy != nil && !trafficPolicy.Decide(r).Allowed {
 		metricRejectedTrafficPolicy.Add(1)
 		http.Error(rec, "forbidden", http.StatusForbidden)

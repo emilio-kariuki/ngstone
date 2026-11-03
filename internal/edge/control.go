@@ -753,7 +753,7 @@ func (s *Server) waitInflight(as *AgentSession) {
 }
 
 func bindHasAccessFields(bind proto.Bind) bool {
-	return len(bind.BasicAuthSHA256) > 0 || bind.BasicAuthRealm != "" || len(bind.AllowCIDRs) > 0 || bind.Policy != nil || bind.PolicyDigest != "" || bind.HTTP2 || bind.MultiConnector || bind.ConnectorTokenSHA256 != ""
+	return len(bind.BasicAuthSHA256) > 0 || bind.BasicAuthRealm != "" || len(bind.AllowCIDRs) > 0 || bind.Policy != nil || bind.PolicyDigest != "" || bind.HTTP2 || bind.MultiConnector || bind.ConnectorTokenSHA256 != "" || bind.OIDC != nil
 }
 
 func validateConnectorTokenDigest(bind proto.Bind) (string, error) {
@@ -799,6 +799,10 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 		return
 	}
 
+	if bind.OIDC != nil && s.visitor == nil {
+		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInvalidAccess, Message: "OIDC visitor login is not configured on this edge"})
+		return
+	}
 	ac, err := buildAccessControl(bind)
 	if err != nil {
 		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInvalidAccess, Message: err.Error()})
@@ -853,7 +857,7 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 				binding.setDurableID(lease.TunnelID)
 				as.rememberDurableLease(durableLeaseKey("http", hostname, 0), lease.ID)
 				s.recordLeaseAcquired(as, lease)
-				s.finishBind(finishBindOptions{ID: id, Control: ctrl, Hostname: hostname, Evicted: evicted, PolicyDigest: bind.PolicyDigest, HTTP2: bind.HTTP2, MultiConnector: bind.MultiConnector})
+				s.finishBind(finishBindOptions{ID: id, Control: ctrl, Hostname: hostname, Evicted: evicted, PolicyDigest: bind.PolicyDigest, HTTP2: bind.HTTP2, MultiConnector: bind.MultiConnector, OIDC: bind.OIDC != nil})
 				s.recordEvent("info", "tunnel bound", map[string]string{
 					"hostname":   hostname,
 					"session_id": as.ID,
@@ -876,7 +880,7 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInternal, Message: err.Error()})
 			return
 		}
-		s.finishBind(finishBindOptions{ID: id, Control: ctrl, Hostname: hostname, Evicted: evicted, PolicyDigest: bind.PolicyDigest, HTTP2: bind.HTTP2, MultiConnector: bind.MultiConnector})
+		s.finishBind(finishBindOptions{ID: id, Control: ctrl, Hostname: hostname, Evicted: evicted, PolicyDigest: bind.PolicyDigest, HTTP2: bind.HTTP2, MultiConnector: bind.MultiConnector, OIDC: bind.OIDC != nil})
 		s.recordEvent("info", "tunnel bound", map[string]string{
 			"hostname":   hostname,
 			"session_id": as.ID,
@@ -928,7 +932,7 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 	binding.setDurableID(lease.TunnelID)
 	as.rememberDurableLease(durableLeaseKey("http", hostname, 0), lease.ID)
 	s.recordLeaseAcquired(as, lease)
-	s.finishBind(finishBindOptions{ID: id, Control: ctrl, Hostname: hostname, Evicted: evicted, PolicyDigest: bind.PolicyDigest, HTTP2: bind.HTTP2, MultiConnector: bind.MultiConnector})
+	s.finishBind(finishBindOptions{ID: id, Control: ctrl, Hostname: hostname, Evicted: evicted, PolicyDigest: bind.PolicyDigest, HTTP2: bind.HTTP2, MultiConnector: bind.MultiConnector, OIDC: bind.OIDC != nil})
 	s.recordEvent("info", "tunnel bound", map[string]string{
 		"hostname":   hostname,
 		"session_id": as.ID,
@@ -972,8 +976,8 @@ func (s *Server) handleBindTCP(as *AgentSession, ctrl *proto.Conn, id uint64, bi
 		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeKindUnsupported, Message: "tcp tunnels not enabled"})
 		return
 	}
-	if len(bind.BasicAuthSHA256) > 0 || bind.Policy != nil || bind.PolicyDigest != "" || bind.HTTP2 || bind.MultiConnector || bind.ConnectorTokenSHA256 != "" {
-		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInvalidAccess, Message: "basic auth, traffic policies, HTTP/2, and multiple connectors are not supported for tcp tunnels"})
+	if len(bind.BasicAuthSHA256) > 0 || bind.Policy != nil || bind.PolicyDigest != "" || bind.HTTP2 || bind.MultiConnector || bind.ConnectorTokenSHA256 != "" || bind.OIDC != nil {
+		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInvalidAccess, Message: "basic auth, OIDC visitor login, traffic policies, HTTP/2, and multiple connectors are not supported for tcp tunnels"})
 		return
 	}
 	ac, err := buildAccessControl(bind)
@@ -1038,6 +1042,7 @@ type finishBindOptions struct {
 	PolicyDigest   string
 	HTTP2          bool
 	MultiConnector bool
+	OIDC           bool
 }
 
 func (s *Server) finishBind(opts finishBindOptions) {
@@ -1054,5 +1059,6 @@ func (s *Server) finishBind(opts finishBindOptions) {
 		HTTP2:          opts.HTTP2,
 		MultiConnector: opts.MultiConnector,
 		PolicyDigest:   opts.PolicyDigest,
+		OIDC:           opts.OIDC,
 	})
 }

@@ -177,7 +177,7 @@ func (r *Registry) dashboardSnapshot() []registryBindingInfo {
 			binding.PolicyEnabled = snapshot.trafficPolicy != nil
 		}
 		access := b.access.Load()
-		binding.AccessRestricted = access != nil && (len(access.basicDigests) > 0 || len(access.allow) > 0)
+		binding.AccessRestricted = access != nil && (len(access.basicDigests) > 0 || len(access.allow) > 0 || access.login != nil)
 
 		b.mu.Lock()
 		binding.BoundAt = b.BoundAt
@@ -487,7 +487,7 @@ func accessControlEqual(a, b *accessControl) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	if a.realm != b.realm || len(a.basicDigests) != len(b.basicDigests) || len(a.allow) != len(b.allow) {
+	if a.realm != b.realm || len(a.basicDigests) != len(b.basicDigests) || len(a.allow) != len(b.allow) || !visitorLoginRuleEqual(a.login, b.login) {
 		return false
 	}
 	for i := range a.basicDigests {
