@@ -617,7 +617,10 @@ $ ngstone port 3000 --subdomain demo --multi-connector`}
         <Property name="--policy-file" type="string">
           Load a strict JSON HTTP traffic policy. Rules are evaluated in order
           at the edge; a denied request gets <code>403</code> and is never
-          forwarded.
+          forwarded. Policies can also redirect, rewrite request and response
+          headers, and answer CORS; see{" "}
+          <a href="/docs/guides/access-control#traffic-policies">Traffic
+          policies</a>.
         </Property>
         <Property name="--ttl" type="duration">
           Stop the tunnel after a positive duration such as{" "}

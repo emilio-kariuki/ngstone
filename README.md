@@ -386,27 +386,80 @@ as `"multi_connector": true` in a project tunnel.
 
 ### Traffic policies
 
-Use an edge-enforced policy file to allow or deny HTTP requests by method, path
-prefix, and request-header presence or exact value:
+Use an edge-enforced policy file to allow, deny or redirect HTTP requests by
+method, path prefix, and request-header presence or exact value, to rewrite
+request and response headers, and to answer CORS at the edge:
 
 ```json
 {
   "default_action": "deny",
   "rules": [
+    {"action": "redirect", "path_prefix": "/old", "redirect_url": "/new$path", "redirect_status": 308},
     {"action": "allow", "path_prefix": "/public"},
-    {"action": "allow", "method": "GET", "header": "X-Preview", "header_value": "yes", "path_prefix": "/preview"}
-  ]
+    {"action": "allow", "method": "GET", "header": "X-Preview", "header_value": "yes", "path_prefix": "/preview"},
+    {"action": "transform", "path_prefix": "/public",
+     "request_headers": {"set": {"X-Env": "preview"}, "remove": ["X-Debug"]},
+     "response_headers": {"set": {"Cache-Control": "no-store"}, "add": {"X-Robots-Tag": "noindex"}, "remove": ["Server"]}}
+  ],
+  "cors": {
+    "allowed_origins": ["https://app.example.com"],
+    "allowed_methods": ["GET", "POST"],
+    "allowed_headers": ["Content-Type"],
+    "exposed_headers": ["X-Total-Count"],
+    "allow_credentials": true,
+    "max_age": 600
+  }
 }
 ```
 
 Start a direct tunnel with `ngstone port 3000 --policy-file traffic-policy.json`,
 or set `"policy_file": "traffic-policy.json"` on an HTTP tunnel in
 `ngstone.json`. Relative project paths are resolved from the project file.
-Rules are evaluated in order and the first match wins; an unmatched request
-uses `default_action`, which defaults to `allow`. A denied request receives
-`403` and never reaches the local app. Policies are HTTP-only and are not
-access control by themselves: combine them with `--basic-auth` or
-`--allow-cidr` when the tunnel must be private.
+Policies saved with `ngstone admin policies apply` keep every field.
+
+How rules combine:
+
+- `allow`, `deny` and `redirect` are evaluated in order and the **first
+  match wins**; an unmatched request uses `default_action` (`allow` or
+  `deny`, default `allow`). A denied request receives `403` and never
+  reaches the local app.
+- `transform` rules never decide anything. **Every** matching transform
+  rule applies, in file order, wherever it sits relative to the deciding
+  rule, but only to requests that are proxied (not denied or redirected).
+  All rules match against the request as the client sent it, so one
+  transform cannot make another rule match.
+- Within one header block, `remove` runs first, then `set` (replace), then
+  `add` (append). Request header actions are applied before the request is
+  sent to the agent, so the local app and the terminal inspector see the
+  rewritten headers. Response header actions are applied to the response
+  from the agent before it reaches the client; the inspector shows the
+  response as the local app sent it. Edge-generated responses (403, 502,
+  redirects, CORS preflights) are not transformed.
+- `redirect` answers at the edge with `redirect_status` (`301`, `302`,
+  `307` or `308`, default `302`) and `Location: redirect_url`.
+  `redirect_url` is an absolute path or an `http(s)` URL; `$path` (or
+  `${path}`) expands to the request path with the rule's `path_prefix`
+  removed, so `/old/a/b` becomes `/new/a/b` above. The request's query
+  string is always appended.
+- `cors` answers preflight requests (`OPTIONS` with `Origin` and
+  `Access-Control-Request-Method`) at the edge with `204`, before basic
+  auth and before rules run, because browsers never send credentials on a
+  preflight. On proxied responses the edge removes any `Access-Control-*`
+  headers the app set and adds its own for allowed origins.
+  `allowed_origins` lists exact `scheme://host[:port]` origins, or is
+  `["*"]` (not allowed with `allow_credentials`). `allowed_methods`
+  defaults to `GET, HEAD, POST`; `allowed_headers` may be `["*"]` to echo
+  the requested headers; `max_age` is in seconds (max 86400).
+
+Header actions cannot touch hop-by-hop headers (`Connection`, `Keep-Alive`,
+`TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Proxy-*`), or headers
+the edge owns: `Host`, `Content-Length`, `Authorization`, `Forwarded`,
+`X-Real-IP`, `X-Forwarded-*` and `X-Ngstone-*`. With `cors` set,
+`Access-Control-*` response headers are reserved for it. Such a policy is
+rejected when the tunnel starts.
+
+Policies are HTTP-only and are not access control by themselves: combine
+them with `--basic-auth` or `--allow-cidr` when the tunnel must be private.
 
 This assumes you (or someone) already has `ngstoned` running on a VPS with a
 domain pointed at it — see [Self-hosting](#self-hosting) below. `ngstoned` is

@@ -149,7 +149,8 @@ tcp://amber-fox-42.example.com:14201 -> 127.0.0.1:22`}
       <Anchor id="traffic-policies">Traffic policies</Anchor>
       <p>
         Add request-level rules to an HTTP tunnel with a strict JSON policy
-        file. The edge evaluates rules in order and stops at the first match:
+        file. Rules can allow, deny or redirect a request, rewrite request
+        and response headers, and the policy can answer CORS at the edge:
       </p>
       <CodeBlock
         filename="traffic-policy.json"
@@ -157,9 +158,20 @@ tcp://amber-fox-42.example.com:14201 -> 127.0.0.1:22`}
         code={`{
   "default_action": "deny",
   "rules": [
+    {"action": "redirect", "path_prefix": "/old", "redirect_url": "/new$path", "redirect_status": 308},
     {"action": "allow", "path_prefix": "/public"},
-    {"action": "allow", "method": "GET", "path_prefix": "/preview", "header": "X-Preview", "header_value": "yes"}
-  ]
+    {"action": "allow", "method": "GET", "path_prefix": "/preview", "header": "X-Preview", "header_value": "yes"},
+    {"action": "transform", "path_prefix": "/public",
+     "request_headers": {"set": {"X-Env": "preview"}, "remove": ["X-Debug"]},
+     "response_headers": {"set": {"Cache-Control": "no-store"}, "remove": ["Server"]}}
+  ],
+  "cors": {
+    "allowed_origins": ["https://app.example.com"],
+    "allowed_methods": ["GET", "POST"],
+    "allowed_headers": ["Content-Type"],
+    "allow_credentials": true,
+    "max_age": 600
+  }
 }`}
       />
       <CodeBlock
@@ -167,14 +179,23 @@ tcp://amber-fox-42.example.com:14201 -> 127.0.0.1:22`}
         code={`$ ngstone port 3000 --policy-file traffic-policy.json
 $ ngstone preview 3000 --ttl 30m --policy-file traffic-policy.json`}
       />
+      <p>
+        <code>allow</code>, <code>deny</code> and <code>redirect</code> rules
+        are evaluated in order and the first match wins. <code>transform</code>{" "}
+        rules never decide: every matching transform rule applies, in file
+        order, to requests that are proxied. All rules match against the
+        request as the client sent it, so a transform cannot make another
+        rule match.
+      </p>
       <ParamTable>
         <Property name="default_action" type="string" defaultValue="allow">
-          Action for requests that match no rule: <code>allow</code> or{" "}
-          <code>deny</code>.
+          Action for requests that match no deciding rule: <code>allow</code>{" "}
+          or <code>deny</code>.
         </Property>
         <Property name="action" type="string" required>
-          Each rule uses <code>allow</code> or <code>deny</code>. A denied
-          request receives <code>403 Forbidden</code> and is never forwarded.
+          <code>allow</code>, <code>deny</code>, <code>redirect</code> or{" "}
+          <code>transform</code>. A denied request receives{" "}
+          <code>403 Forbidden</code> and is never forwarded.
         </Property>
         <Property name="method" type="string">
           Optional HTTP method match, such as <code>GET</code> or{" "}
@@ -189,12 +210,62 @@ $ ngstone preview 3000 --ttl 30m --policy-file traffic-policy.json`}
           Optional case-insensitive header name and exact value. Omit{" "}
           <code>header_value</code> to match header presence.
         </Property>
+        <Property name="redirect_url" type="string">
+          Required for <code>redirect</code>. An absolute path or an{" "}
+          <code>http(s)</code> URL. <code>$path</code> (or{" "}
+          <code>{"${path}"}</code>) expands to the request path with the
+          rule&apos;s <code>path_prefix</code> removed, so{" "}
+          <code>/old/a/b</code> becomes <code>/new/a/b</code> above. The query
+          string is always appended.
+        </Property>
+        <Property name="redirect_status" type="int" defaultValue="302">
+          <code>301</code>, <code>302</code>, <code>307</code> or{" "}
+          <code>308</code>.
+        </Property>
+        <Property name="request_headers, response_headers" type="object">
+          Only on <code>transform</code> rules. Each holds{" "}
+          <code>remove</code> (a list of names), <code>set</code> (replace)
+          and <code>add</code> (append) maps, applied in that order. Request
+          headers change before the request reaches the agent, so your app
+          and the inspector see the result; response headers change after
+          the agent answers, and the inspector shows what your app sent.
+        </Property>
+        <Property name="cors" type="object">
+          <code>allowed_origins</code> (exact{" "}
+          <code>scheme://host[:port]</code> origins, or <code>[&quot;*&quot;]</code>{" "}
+          without credentials), <code>allowed_methods</code> (default{" "}
+          <code>GET, HEAD, POST</code>), <code>allowed_headers</code>{" "}
+          (<code>[&quot;*&quot;]</code> echoes the requested headers),{" "}
+          <code>exposed_headers</code>, <code>allow_credentials</code> and{" "}
+          <code>max_age</code> in seconds (max 86400).
+        </Property>
         <Property name="--policy-file" type="string">
           Load the policy for <code>port</code> or <code>preview</code>. In{" "}
           <code>ngstone.json</code>, use <code>policy_file</code>; relative{" "}
           paths resolve from the project file directory.
         </Property>
       </ParamTable>
+      <Callout variant="note" title="CORS at the edge">
+        Preflight requests (<code>OPTIONS</code> with <code>Origin</code> and{" "}
+        <code>Access-Control-Request-Method</code>) are answered with{" "}
+        <code>204</code> before basic auth and before rules run, because
+        browsers never send credentials on a preflight; they never reach
+        your app. On proxied responses the edge drops any{" "}
+        <code>Access-Control-*</code> headers your app set and adds its own
+        for allowed origins.
+      </Callout>
+      <Callout variant="warning" title="Reserved headers">
+        Header actions cannot change hop-by-hop headers (
+        <code>Connection</code>, <code>Keep-Alive</code>, <code>TE</code>,{" "}
+        <code>Trailer</code>, <code>Transfer-Encoding</code>,{" "}
+        <code>Upgrade</code>, <code>Proxy-*</code>) or headers the edge owns:{" "}
+        <code>Host</code>, <code>Content-Length</code>,{" "}
+        <code>Authorization</code>, <code>Forwarded</code>,{" "}
+        <code>X-Real-IP</code>, <code>X-Forwarded-*</code> and{" "}
+        <code>X-Ngstone-*</code>. With <code>cors</code> set,{" "}
+        <code>Access-Control-*</code> response headers belong to it. Such a
+        policy is rejected when the tunnel starts.
+      </Callout>
       <Callout variant="warning" title="Policies are not authentication">
         A policy can hide paths or restrict methods, but it does not identify
         callers. Combine it with <code>--basic-auth</code> or{" "}
