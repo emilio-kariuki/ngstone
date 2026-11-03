@@ -178,11 +178,6 @@ NGSTONE_OIDC_DEFAULT_ROLE=
 # Optional: lifecycle alert webhook
 NGSTONE_ALERT_WEBHOOK_URL=https://alerts.example.com/ngstone
 NGSTONE_ALERT_WEBHOOK_TOKEN=<webhook secret>
-# Optional: screen-sharing TURN fallback. The shared secret must match
-# coturn's static-auth-secret and is read only from this root-owned file.
-NGSTONE_SCREEN_TURN_URLS=turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349
-NGSTONE_SCREEN_TURN_SHARED_SECRET=<coturn-rest-auth-secret>
-NGSTONE_SCREEN_MAX_VIEWERS=8
 ```
 
 For multiple edge servers, use the same PostgreSQL URL on every server and a
@@ -244,7 +239,6 @@ ngstone admin status
 ngstone admin tunnels --json
 ngstone admin observability --json
 ngstone admin credentials issue --subdomain demo --ttl 24h
-ngstone admin screens create --name demo-screen --ttl 30m --max-viewers 4
 ngstone admin policies list
 ngstone admin domains list
 ngstone admin tunnel drain demo
@@ -308,16 +302,6 @@ the session CSRF token. Keep the client secret and cookie secret in the
 root-only environment file; do not put either in `ExecStart` or a shell
 command-line argument. The management bearer token remains useful for CI and
 other non-browser automation.
-
-Screen sessions are direct sender-to-viewer WebRTC by default. `--max-viewers
-N` with `N > 1` enables the edge SFU, which forwards the encoded RTP track to
-each viewer. TURN is supplied by coturn or another external TURN service; the
-edge derives short-lived REST credentials and delivers them only over the
-authenticated screen signaling WebSocket. Open coturn's UDP/TCP and TLS ports
-in the VPS firewall as well as the normal ngstone ports. See
-`docs/PRODUCTION-SCREENCAST.md` for a full coturn setup guide, the exact
-ports and env vars, and a verification procedure that proves the TURN relay
-path actually works before you ship it.
 
 Secrets must only ever reach `ngstoned` through `EnvironmentFile=`, never through `ExecStart` flags: `/proc/<pid>/cmdline` is world-readable, so any local user can read a flag value with `ps auxww`, but not the process's environment. `ngstoned` reads `$NGSTONE_CREDENTIALS_FILE`, the legacy `$NGSTONE_TOKEN_SHA256`, and `$NGSTONE_CF_API_TOKEN` in preference to their equivalent flags for exactly this reason, and other providers' credentials have no flags at all — do not add those flags to the unit's `ExecStart`. The agent has the same exposure: prefer `$NGSTONE_TOKEN` over `-token` whenever the agent runs somewhere another local user could run `ps`.
 

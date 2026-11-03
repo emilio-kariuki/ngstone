@@ -47,9 +47,6 @@ type Config struct {
 	AlertWebhookURL   string
 	AlertWebhookToken string
 	OIDC              *oidc.Config
-	ScreenTURNURLs    []string
-	ScreenTURNSecret  string
-	ScreenMaxViewers  int
 
 	Insecure bool
 
@@ -97,28 +94,21 @@ type Server struct {
 	upgradeSem   *globalSemaphore
 	handshakeSem *globalSemaphore
 	unauthSem    *globalSemaphore
-	screenSem    *globalSemaphore
 	fallbackSem  *globalSemaphore
 
 	tlsMgr *TLSManager
 	tcpMgr *tcpManager
 
-	shares           *shareRegistry
-	shareSem         *globalSemaphore
-	shareAudit       *shareAuditLog
-	observability    *observabilityRegistry
-	alerts           *alertDispatcher
-	oidc             *oidc.Provider
-	oidcCodec        *oidc.Codec
-	screens          *screenRegistry
-	screenTURNURLs   []string
-	screenTURNSecret string
-	screenMaxViewers int
-	screenSFUMu      sync.Mutex
-	screenSFUs       map[string]*screenSFU
-	auditCh          chan storage.AuditEvent
-	auditStop        chan struct{}
-	auditWG          sync.WaitGroup
+	shares        *shareRegistry
+	shareSem      *globalSemaphore
+	shareAudit    *shareAuditLog
+	observability *observabilityRegistry
+	alerts        *alertDispatcher
+	oidc          *oidc.Provider
+	oidcCodec     *oidc.Codec
+	auditCh       chan storage.AuditEvent
+	auditStop     chan struct{}
+	auditWG       sync.WaitGroup
 
 	proxyProtoTrusted []netip.Prefix
 
@@ -150,17 +140,6 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("edge: invalid limits config: %w", err)
 	}
 	cfg.Limits = limits
-	turnURLs, err := normalizeScreenTURNURLs(cfg.ScreenTURNURLs, cfg.ScreenTURNSecret)
-	if err != nil {
-		return nil, fmt.Errorf("edge: invalid screen TURN configuration: %w", err)
-	}
-	cfg.ScreenTURNURLs = turnURLs
-	if cfg.ScreenMaxViewers == 0 {
-		cfg.ScreenMaxViewers = defaultScreenMaxViewers
-	}
-	if cfg.ScreenMaxViewers < 1 || cfg.ScreenMaxViewers > defaultScreenMaxViewers {
-		return nil, fmt.Errorf("edge: screen max viewers must be between 1 and %d", defaultScreenMaxViewers)
-	}
 
 	registry := NewRegistry()
 	registry.SetLimits(limits)
@@ -269,18 +248,12 @@ func New(cfg Config) (*Server, error) {
 		upgradeSem:        newGlobalSemaphore(limits.UpgradeInFlight),
 		handshakeSem:      newGlobalSemaphore(int64(limits.HandshakeConcurrency)),
 		unauthSem:         newGlobalSemaphore(int64(limits.UnauthSessions)),
-		screenSem:         newGlobalSemaphore(int64(limits.UnauthSessions)),
 		fallbackSem:       newGlobalSemaphore(int64(limits.UnauthSessions)),
 		tcpMgr:            tcpMgr,
 		observability:     newObservabilityRegistry(),
 		alerts:            alerts,
 		oidc:              oidcProvider,
 		oidcCodec:         oidcCodec,
-		screens:           newScreenRegistry(),
-		screenTURNURLs:    append([]string(nil), cfg.ScreenTURNURLs...),
-		screenTURNSecret:  cfg.ScreenTURNSecret,
-		screenMaxViewers:  cfg.ScreenMaxViewers,
-		screenSFUs:        make(map[string]*screenSFU),
 		proxyProtoTrusted: trustedPrefixes,
 		shares:            newShareRegistry(cfg.MaxShareTTL),
 		shareSem:          newGlobalSemaphore(maxGlobalShareConns),
@@ -300,7 +273,6 @@ func New(cfg Config) (*Server, error) {
 		}
 		srv.shareAudit = audit
 	}
-	srv.screens.onExpire = srv.expireScreenSFUs
 	if durableStore != nil && cfg.Storage == nil {
 		srv.auditCh = make(chan storage.AuditEvent, 256)
 		srv.auditStop = make(chan struct{})
@@ -311,16 +283,6 @@ func New(cfg Config) (*Server, error) {
 		tcpMgr.setObserver(srv.observability.observeTCP)
 	}
 	return srv, nil
-}
-
-func (s *Server) screenAdmission() *globalSemaphore {
-	if s == nil {
-		return nil
-	}
-	if s.screenSem == nil {
-		return s.unauthSem
-	}
-	return s.screenSem
 }
 
 func (s *Server) fallbackAdmission() *globalSemaphore {
@@ -476,7 +438,6 @@ func (s *Server) Run(ctx context.Context) error {
 		controlLn.Close()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout+5*time.Second)
 		defer cancel()
-		s.closeAllScreenSFUs()
 		publicSrv.Shutdown(shutdownCtx)
 		if httpSrv != nil {
 			httpSrv.Shutdown(shutdownCtx)

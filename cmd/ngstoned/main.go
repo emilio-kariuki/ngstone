@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 
@@ -43,9 +42,6 @@ func main() {
 	oidcViewerGroups := flag.String("oidc-viewer-groups", "", "comma-separated OIDC groups mapped to the viewer role")
 	oidcAllowedEmailDomains := flag.String("oidc-allowed-email-domains", "", "comma-separated email domains allowed to log in")
 	oidcDefaultRole := flag.String("oidc-default-role", "", "optional role for authenticated OIDC users without a matching group; empty requires a configured group")
-	screenTURNURLs := flag.String("screen-turn-urls", "", "comma-separated STUN/TURN URLs delivered to authenticated screen participants (defaults to $NGSTONE_SCREEN_TURN_URLS)")
-	screenTURNSecret := flag.String("screen-turn-secret", "", "coturn REST shared secret (defaults to $NGSTONE_SCREEN_TURN_SHARED_SECRET; prefer the environment)")
-	screenMaxViewers := flag.Int("screen-max-viewers", edge.DefaultScreenMaxViewers, "maximum viewers allowed for an SFU screen session (1 keeps direct mode)")
 	domain := flag.String("domain", "", "base domain used to build tunnel hostnames and the two managed certificates (required), for example example.com")
 	publicScheme := flag.String("public-scheme", "https", "scheme advertised in BindOK.URL (http or https)")
 	tcpPortRange := flag.String("tcp-ports", "", "port range for raw TCP tunnels, e.g. \"10000-10999\"; empty disables TCP tunnels. These ports are exposed directly to the internet (not behind a reverse proxy) and must be opened in the firewall.")
@@ -163,23 +159,6 @@ func main() {
 	if resolvedOIDCDefaultRole == "" {
 		resolvedOIDCDefaultRole = *oidcDefaultRole
 	}
-	resolvedScreenTURNURLs := os.Getenv("NGSTONE_SCREEN_TURN_URLS")
-	if resolvedScreenTURNURLs == "" {
-		resolvedScreenTURNURLs = *screenTURNURLs
-	}
-	resolvedScreenTURNSecret := os.Getenv("NGSTONE_SCREEN_TURN_SHARED_SECRET")
-	if resolvedScreenTURNSecret == "" {
-		resolvedScreenTURNSecret = *screenTURNSecret
-	}
-	resolvedScreenMaxViewers := *screenMaxViewers
-	if raw := strings.TrimSpace(os.Getenv("NGSTONE_SCREEN_MAX_VIEWERS")); raw != "" {
-		parsed, parseErr := strconv.Atoi(raw)
-		if parseErr != nil {
-			logger.Error("ngstoned: invalid NGSTONE_SCREEN_MAX_VIEWERS", "err", parseErr)
-			os.Exit(1)
-		}
-		resolvedScreenMaxViewers = parsed
-	}
 	var oidcConfig *oidc.Config
 	if resolvedOIDCIssuer != "" || resolvedOIDCClientID != "" || resolvedOIDCRedirectURL != "" || resolvedOIDCClientSecret != "" || os.Getenv("NGSTONE_OIDC_GROUPS_CLAIM") != "" || *oidcGroupsClaim != "groups" || resolvedOIDCAdminGroups != "" || resolvedOIDCOperatorGroups != "" || resolvedOIDCViewerGroups != "" || resolvedOIDCAllowedEmailDomains != "" || resolvedOIDCDefaultRole != "" || os.Getenv("NGSTONE_OIDC_COOKIE_SECRET") != "" {
 		cookieSecret, secretErr := oidc.ParseCookieSecret(os.Getenv("NGSTONE_OIDC_COOKIE_SECRET"))
@@ -282,9 +261,6 @@ func main() {
 		AlertWebhookURL:   resolvedAlertWebhookURL,
 		AlertWebhookToken: alertWebhookToken,
 		OIDC:              oidcConfig,
-		ScreenTURNURLs:    splitCSV(resolvedScreenTURNURLs),
-		ScreenTURNSecret:  resolvedScreenTURNSecret,
-		ScreenMaxViewers:  resolvedScreenMaxViewers,
 		TCPPortRange:      *tcpPortRange,
 		TCPBindAddr:       *tcpBindAddr,
 		MaxShareTTL:       *maxShareTTL,
@@ -323,7 +299,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA, "dns-provider", *dnsProvider, "proxy-protocol", *proxyProtocol, "scoped_credentials", credentialsFile != "", "durable_storage", databaseURL != "", "admin_bearer", adminTokenSHA256HexVal != "", "oidc", oidcConfig != nil, "screen_turn", len(resolvedScreenTURNURLs) > 0, "screen_max_viewers", resolvedScreenMaxViewers)
+	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA, "dns-provider", *dnsProvider, "proxy-protocol", *proxyProtocol, "scoped_credentials", credentialsFile != "", "durable_storage", databaseURL != "", "admin_bearer", adminTokenSHA256HexVal != "", "oidc", oidcConfig != nil)
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("ngstoned: exited with error", "err", err)
 		os.Exit(1)

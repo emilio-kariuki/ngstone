@@ -65,10 +65,6 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleAdminDomains(w, r)
 	case strings.HasPrefix(path, "/domains/"):
 		s.handleAdminDomain(w, r, strings.TrimPrefix(path, "/domains/"))
-	case path == "/screen-sessions":
-		s.handleAdminScreenSessions(w, r)
-	case strings.HasPrefix(path, "/screen-sessions/"):
-		s.handleAdminScreenSession(w, r, strings.TrimPrefix(path, "/screen-sessions/"))
 	case strings.HasPrefix(path, "/tunnels/") && strings.HasSuffix(path, "/drain"):
 		rawHost := strings.TrimSuffix(strings.TrimPrefix(path, "/tunnels/"), "/drain")
 		s.handleAdminDrain(w, r, rawHost)
@@ -154,7 +150,7 @@ func (s *Server) handleAdminIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	writeAdminData(w, http.StatusOK, map[string]any{
 		"version":   1,
-		"resources": []string{"status", "tunnels", "observability/tunnels", "credentials", "policies", "domains", "screen-sessions"},
+		"resources": []string{"status", "tunnels", "observability/tunnels", "credentials", "policies", "domains"},
 	})
 }
 

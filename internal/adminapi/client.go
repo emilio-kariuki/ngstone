@@ -31,34 +31,6 @@ type CredentialIssueResponse struct {
 	Token      string                 `json:"token"`
 }
 
-type ScreenSessionRequest struct {
-	Name       string `json:"name,omitempty"`
-	TTL        string `json:"ttl,omitempty"`
-	MaxViewers int    `json:"max_viewers,omitempty"`
-}
-
-type ScreenSession struct {
-	ID              string    `json:"id"`
-	Name            string    `json:"name,omitempty"`
-	OwnerID         string    `json:"owner_id"`
-	Status          string    `json:"status"`
-	ViewerURL       string    `json:"viewer_url"`
-	MaxViewers      int       `json:"max_viewers"`
-	ViewerCount     int       `json:"viewer_count"`
-	SFU             bool      `json:"sfu"`
-	CreatedAt       time.Time `json:"created_at"`
-	ExpiresAt       time.Time `json:"expires_at"`
-	SenderConnected bool      `json:"sender_connected"`
-	ViewerConnected bool      `json:"viewer_connected"`
-}
-
-type ScreenSessionCreateResponse struct {
-	Session     ScreenSession `json:"session"`
-	SenderToken string        `json:"sender_token"`
-	ViewerToken string        `json:"viewer_token"`
-	ViewerURL   string        `json:"viewer_url"`
-}
-
 type TrafficPolicyRequest struct {
 	Name    string          `json:"name"`
 	OwnerID string          `json:"owner_id,omitempty"`

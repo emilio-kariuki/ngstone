@@ -497,8 +497,6 @@ ngstone admin credentials revoke <credential-id>
 ngstone admin policies list
 ngstone admin domains list
 ngstone admin tunnel drain demo
-ngstone admin screens create --name demo --ttl 30m --max-viewers 4
-ngstone admin screens list
 ```
 
 For the common read-only operations, shorter aliases are available:
@@ -522,31 +520,6 @@ The CLI defaults to `http://127.0.0.1:4041`; use `--server` or
 `DELETE /api/v1/domains/{id}`, and `GET /api/v1/observability/tunnels`.
 Successful responses are wrapped in
 `{"data": ...}` and errors in `{"error": {"code": ..., "message": ...}}`.
-
-### Screen sharing
-
-The default screen-sharing path is direct WebRTC between one native sender and
-one browser viewer. Sessions created with `--max-viewers > 1` use the edge's
-Pion SFU to forward one encoded RTP track to multiple viewers. The edge
-creates short-lived sessions, authenticates participants, and delivers
-short-lived STUN/TURN credentials over the authenticated signaling socket.
-Reusable native senders for Android and iOS are in `android/` and `ios/`. See
-[Screen sharing](docs/SCREENCAST.md) for the protocol and Android/KMM/iOS
-integration.
-
-Create a session from the edge management API or CLI:
-
-```
-ngstone admin screens create --name demo --ttl 30m --max-viewers 4
-```
-
-The command prints a sender token for the Android client and a viewer URL.
-Treat both as secrets. The viewer token is in the URL fragment, so it is not
-sent as an HTTP query parameter or included in edge request paths. Configure
-`NGSTONE_SCREEN_TURN_URLS` and
-`NGSTONE_SCREEN_TURN_SHARED_SECRET` for TURN fallback. The Android and iOS
-senders adapt bitrate, frame rate, and resolution from WebRTC
-loss/RTT/bandwidth samples on weak links. Remote control remains a later stage.
 
 The observability endpoint returns durable counters plus current connector
 health. Latency percentiles are approximate histogram percentiles, so they are

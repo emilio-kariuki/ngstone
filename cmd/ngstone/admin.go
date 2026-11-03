@@ -34,8 +34,6 @@ func cmdAdmin(args []string) int {
 		return cmdAdminPolicies(args[1:])
 	case "domains":
 		return cmdAdminDomains(args[1:])
-	case "screens":
-		return cmdAdminScreens(args[1:])
 	case "tunnel":
 		return cmdAdminTunnel(args[1:])
 	default:
@@ -46,7 +44,7 @@ func cmdAdmin(args []string) int {
 }
 
 func printAdminUsage(w *os.File) {
-	fmt.Fprintln(w, "usage: ngstone admin <login|status|tunnels|observability|credentials|policies|domains|screens|tunnel>")
+	fmt.Fprintln(w, "usage: ngstone admin <login|status|tunnels|observability|credentials|policies|domains|tunnel>")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "commands:")
 	fmt.Fprintln(w, "  login                                       print the browser URL for OIDC login")
@@ -62,9 +60,6 @@ func printAdminUsage(w *os.File) {
 	fmt.Fprintln(w, "  domains list                               list durable custom domains")
 	fmt.Fprintln(w, "  domains add --domain NAME                  register a custom domain")
 	fmt.Fprintln(w, "  domains delete <id>                        delete a custom domain")
-	fmt.Fprintln(w, "  screens create [--name NAME] [--ttl TTL] [--max-viewers N]   create an ephemeral screen session")
-	fmt.Fprintln(w, "  screens list                               list screen sessions")
-	fmt.Fprintln(w, "  screens revoke <id>                       revoke a screen session")
 	fmt.Fprintln(w, "  tunnel drain <hostname|subdomain>          gracefully drain a tunnel")
 }
 
@@ -503,108 +498,6 @@ func cmdAdminDomains(args []string) int {
 		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "ngstone: unknown admin domains subcommand %q\n", args[0])
-		return 2
-	}
-}
-
-func cmdAdminScreens(args []string) int {
-	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
-		fmt.Fprintln(os.Stderr, "usage: ngstone admin screens <create|list|revoke>")
-		return 2
-	}
-	switch args[0] {
-	case "create":
-		fs, flags := newAdminFlagSet("admin screens create")
-		name := fs.String("name", "", "screen session name")
-		ttl := fs.String("ttl", "30m", "screen session lifetime, up to 24h")
-		maxViewers := fs.Int("max-viewers", 1, "maximum viewers; values above 1 use the edge SFU")
-		positionals, err := parsePermissive(fs, args[1:])
-		if err != nil || len(positionals) != 0 {
-			fmt.Fprintln(os.Stderr, "usage: ngstone admin screens create [--name NAME] [--ttl TTL] [--server URL] [--token TOKEN] [--json]")
-			return 2
-		}
-		parsedTTL, err := time.ParseDuration(*ttl)
-		if err != nil || parsedTTL <= 0 || parsedTTL > 24*time.Hour {
-			fmt.Fprintln(os.Stderr, "ngstone: screen session ttl must be positive and no longer than 24h")
-			return 2
-		}
-		if *maxViewers < 1 || *maxViewers > 8 {
-			fmt.Fprintln(os.Stderr, "ngstone: max-viewers must be between 1 and 8")
-			return 2
-		}
-		client, err := adminClient(flags)
-		if err != nil {
-			return printAdminClientError(err)
-		}
-		var created adminapi.ScreenSessionCreateResponse
-		if err := client.Post(adminapi.APIPrefix+"/screen-sessions", adminapi.ScreenSessionRequest{Name: *name, TTL: *ttl, MaxViewers: *maxViewers}, &created); err != nil {
-			return printAdminClientError(err)
-		}
-		if flags.json {
-			return printAdminJSON(created)
-		}
-		fmt.Printf("screen session %s created\n", created.Session.ID)
-		fmt.Printf("expires: %s\n", created.Session.ExpiresAt.UTC().Format(time.RFC3339))
-		mode := "direct"
-		if created.Session.SFU {
-			mode = "sfu"
-		}
-		fmt.Printf("mode: %s (%d viewer(s))\n", mode, created.Session.MaxViewers)
-		fmt.Printf("sender token: %s\n", created.SenderToken)
-		fmt.Printf("viewer URL: %s\n", created.ViewerURL)
-		fmt.Fprintln(os.Stderr, "save the sender token and viewer URL now; they cannot be recovered from the edge")
-		return 0
-	case "list":
-		fs, flags := newAdminFlagSet("admin screens list")
-		positionals, err := parsePermissive(fs, args[1:])
-		if err != nil || len(positionals) != 0 {
-			fmt.Fprintln(os.Stderr, "usage: ngstone admin screens list [--server URL] [--token TOKEN] [--json]")
-			return 2
-		}
-		client, err := adminClient(flags)
-		if err != nil {
-			return printAdminClientError(err)
-		}
-		var list []adminapi.ScreenSession
-		if err := client.Get(adminapi.APIPrefix+"/screen-sessions", &list); err != nil {
-			return printAdminClientError(err)
-		}
-		if flags.json {
-			return printAdminJSON(list)
-		}
-		if len(list) == 0 {
-			fmt.Println("no screen sessions")
-			return 0
-		}
-		for _, session := range list {
-			mode := "direct"
-			if session.SFU {
-				mode = "sfu"
-			}
-			fmt.Printf("%s\t%s\t%s\t%s\tviewers=%d/%d\tsender=%t\texpires=%s\n", session.ID, session.Name, session.Status, mode, session.ViewerCount, session.MaxViewers, session.SenderConnected, session.ExpiresAt.UTC().Format(time.RFC3339))
-		}
-		return 0
-	case "revoke":
-		fs, flags := newAdminFlagSet("admin screens revoke")
-		positionals, err := parsePermissive(fs, args[1:])
-		if err != nil || len(positionals) != 1 {
-			fmt.Fprintln(os.Stderr, "usage: ngstone admin screens revoke <id> [--server URL] [--token TOKEN] [--json]")
-			return 2
-		}
-		client, err := adminClient(flags)
-		if err != nil {
-			return printAdminClientError(err)
-		}
-		if err := client.Delete(adminapi.APIPrefix + "/screen-sessions/" + url.PathEscape(positionals[0])); err != nil {
-			return printAdminClientError(err)
-		}
-		if flags.json {
-			return printAdminJSON(map[string]string{"id": positionals[0], "status": "revoked"})
-		}
-		fmt.Printf("screen session %s revoked\n", positionals[0])
-		return 0
-	default:
-		fmt.Fprintf(os.Stderr, "ngstone: unknown admin screens subcommand %q\n", args[0])
 		return 2
 	}
 }

@@ -38,10 +38,6 @@ func (s *Server) handlePublicListener(ctx context.Context, w http.ResponseWriter
 		s.handleWebSocketControl(ctx, w, r)
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, screenPathPrefix) {
-		s.handleScreenPublic(w, r)
-		return
-	}
 	s.handlePublic(w, r)
 }
 
