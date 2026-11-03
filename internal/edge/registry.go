@@ -19,6 +19,7 @@ import (
 
 	"ngstone/internal/policy"
 	"ngstone/internal/proto"
+	"ngstone/internal/webhook"
 )
 
 const dialBudget = 5 * time.Second
@@ -58,6 +59,7 @@ type bindingSnapshot struct {
 	multiConnector       bool
 	connectorTokenDigest string
 	proxy                *httputil.ReverseProxy
+	webhook              *webhook.Verifier
 }
 
 type bindingConnector struct {
@@ -121,6 +123,7 @@ type BindOptions struct {
 	HTTP2                bool
 	MultiConnector       bool
 	ConnectorTokenDigest string
+	Webhook              *webhook.Verifier
 }
 
 type registryConnectorInfo struct {
@@ -141,6 +144,7 @@ type registryBindingInfo struct {
 	MultiConnector   bool                    `json:"multi_connector"`
 	AccessRestricted bool                    `json:"access_restricted"`
 	PolicyEnabled    bool                    `json:"policy_enabled"`
+	WebhookProvider  string                  `json:"webhook_provider,omitempty"`
 	Connectors       []registryConnectorInfo `json:"connectors"`
 }
 
@@ -175,6 +179,7 @@ func (r *Registry) dashboardSnapshot() []registryBindingInfo {
 			binding.HTTP2 = snapshot.http2
 			binding.MultiConnector = snapshot.multiConnector
 			binding.PolicyEnabled = snapshot.trafficPolicy != nil
+			binding.WebhookProvider = snapshot.webhook.Provider()
 		}
 		access := b.access.Load()
 		binding.AccessRestricted = access != nil && (len(access.basicDigests) > 0 || len(access.allow) > 0)
@@ -377,6 +382,7 @@ func newBinding(opts BindOptions, limits LimitsConfig) *Binding {
 		http2:                opts.HTTP2,
 		multiConnector:       opts.MultiConnector,
 		connectorTokenDigest: opts.ConnectorTokenDigest,
+		webhook:              opts.Webhook,
 		proxy:                connector.proxyFor(opts.HTTP2),
 	})
 	return b
@@ -387,7 +393,7 @@ func (r *Registry) bindExistingLocked(existing *Binding, opts BindOptions) (*Bin
 		return nil, nil, ErrSubdomainTaken
 	}
 	if existing.connectorForSession(opts.Session) != nil {
-		if existing.multiConnectorMode() && !bindingConfigMatches(existing.snapshot.Load(), opts.Access, opts.TrafficPolicy, opts.HTTP2, opts.MultiConnector, opts.ConnectorTokenDigest) {
+		if existing.multiConnectorMode() && !bindingConfigMatches(existing.snapshot.Load(), opts) {
 			return nil, nil, ErrConnectorConfigMismatch
 		}
 		old := existing.replaceConnector(opts.Host, opts.Session, r.limits, opts.HTTP2)
@@ -402,13 +408,14 @@ func (r *Registry) bindExistingLocked(existing *Binding, opts BindOptions) (*Bin
 			http2:                opts.HTTP2,
 			multiConnector:       opts.MultiConnector,
 			connectorTokenDigest: opts.ConnectorTokenDigest,
+			webhook:              opts.Webhook,
 			proxy:                existing.primaryProxy(opts.HTTP2),
 		})
 		return existing, nil, nil
 	}
 
 	if existing.multiConnectorMode() {
-		if !opts.MultiConnector || !bindingConfigMatches(existing.snapshot.Load(), opts.Access, opts.TrafficPolicy, opts.HTTP2, opts.MultiConnector, opts.ConnectorTokenDigest) {
+		if !opts.MultiConnector || !bindingConfigMatches(existing.snapshot.Load(), opts) {
 			return nil, nil, ErrConnectorConfigMismatch
 		}
 		if old := existing.connectorForInstance(opts.Session.InstanceID); old != nil {
@@ -424,6 +431,7 @@ func (r *Registry) bindExistingLocked(existing *Binding, opts BindOptions) (*Bin
 				http2:                opts.HTTP2,
 				multiConnector:       opts.MultiConnector,
 				connectorTokenDigest: opts.ConnectorTokenDigest,
+				webhook:              opts.Webhook,
 				proxy:                existing.primaryProxy(opts.HTTP2),
 			})
 			return existing, oldSession, nil
@@ -466,8 +474,9 @@ func sameSessionOwner(a, b *AgentSession) bool {
 	return durableOwnerID(a) == durableOwnerID(b)
 }
 
-func bindingConfigMatches(snapshot *bindingSnapshot, ac *accessControl, trafficPolicy *policy.Policy, http2Mode, multiConnector bool, connectorTokenDigest string) bool {
-	if snapshot == nil || snapshot.http2 != http2Mode || snapshot.multiConnector != multiConnector || !connectorTokenDigestEqual(snapshot.connectorTokenDigest, connectorTokenDigest) || !accessControlEqual(snapshot.access, ac) {
+func bindingConfigMatches(snapshot *bindingSnapshot, opts BindOptions) bool {
+	trafficPolicy := opts.TrafficPolicy
+	if snapshot == nil || snapshot.http2 != opts.HTTP2 || snapshot.multiConnector != opts.MultiConnector || !connectorTokenDigestEqual(snapshot.connectorTokenDigest, opts.ConnectorTokenDigest) || !accessControlEqual(snapshot.access, opts.Access) || !snapshot.webhook.Equal(opts.Webhook) {
 		return false
 	}
 	if snapshot.trafficPolicy == nil || trafficPolicy == nil {
