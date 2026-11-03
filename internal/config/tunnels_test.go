@@ -59,6 +59,8 @@ func TestParseTunnelsRejectsBadInput(t *testing.T) {
 		"bad cidr":             "tunnels:\n  web:\n    port: 3000\n    allow_cidr: [not-a-cidr]\n",
 		"duplicate subdomain":  "tunnels:\n  a:\n    port: 1000\n    subdomain: x\n  b:\n    port: 2000\n    subdomain: x\n",
 		"both auth sources":    "tunnels:\n  web:\n    port: 3000\n    basic_auth: [u:p]\n    basic_auth_file: f\n",
+		"tcp with oidc":        "tunnels:\n  db:\n    kind: tcp\n    port: 5432\n    oidc: true\n",
+		"allow without oidc":   "tunnels:\n  web:\n    port: 3000\n    oidc_allow_email: [a@example.com]\n",
 	}
 	for name, src := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -75,6 +75,11 @@ func cmdServe(args []string) int {
 		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
 		return 2
 	}
+	oidcLogin, err := parseOIDCLogin(pf.oidc, pf.oidcAllowEmail, pf.oidcAllowDomain)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
+		return 2
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -95,6 +100,7 @@ func cmdServe(args []string) int {
 
 		BasicAuthSHA256: basicAuthDigests,
 		AllowCIDRs:      allowCIDRs,
+		OIDC:            oidcLogin,
 
 		Insecure:   pf.insecure,
 		ServerName: pf.serverName,

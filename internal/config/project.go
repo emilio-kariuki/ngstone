@@ -40,6 +40,9 @@ type ProjectTunnel struct {
 	BasicAuthFile      string   `json:"basic_auth_file,omitempty"`
 	AllowCIDR          string   `json:"allow_cidr,omitempty"`
 	PolicyFile         string   `json:"policy_file,omitempty"`
+	OIDC               bool     `json:"oidc,omitempty"`
+	OIDCAllowEmail     []string `json:"oidc_allow_email,omitempty"`
+	OIDCAllowDomain    []string `json:"oidc_allow_domain,omitempty"`
 	ConnectorTokenEnv  string   `json:"connector_token_env,omitempty"`
 	CredentialEnv      string   `json:"credential_env,omitempty"`
 }
@@ -149,6 +152,12 @@ func (p Project) Validate() error {
 		}
 		if kind == "tcp" && tunnel.PolicyFile != "" {
 			return fmt.Errorf("tunnel %q policy_file is only valid for http tunnels", name)
+		}
+		if kind == "tcp" && (tunnel.OIDC || len(tunnel.OIDCAllowEmail) > 0 || len(tunnel.OIDCAllowDomain) > 0) {
+			return fmt.Errorf("tunnel %q oidc is only valid for http tunnels", name)
+		}
+		if !tunnel.OIDC && (len(tunnel.OIDCAllowEmail) > 0 || len(tunnel.OIDCAllowDomain) > 0) {
+			return fmt.Errorf("tunnel %q oidc_allow_email and oidc_allow_domain require oidc: true", name)
 		}
 		if kind == "http" && tunnel.RemotePort != 0 {
 			return fmt.Errorf("tunnel %q remote_port is only valid for tcp tunnels", name)

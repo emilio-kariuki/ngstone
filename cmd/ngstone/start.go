@@ -151,6 +151,7 @@ func projectTunnelFromYAML(t config.Tunnel) config.ProjectTunnel {
 		AllowCIDR: strings.Join(t.AllowCIDR, ","), CredentialEnv: t.CredentialEnv, CredentialFile: t.CredentialFile,
 		HTTP2: t.HTTP2, MultiConnector: t.MultiConnector, ConnectorTokenEnv: t.ConnectorTokenEnv, ConnectorTokenFile: t.ConnectorTokenFile,
 		TTL: t.TTL, PolicyFile: t.PolicyFile, Transport: t.Transport, Insecure: t.Insecure, Pin: t.Pin,
+		OIDC: t.OIDC, OIDCAllowEmail: t.OIDCAllowEmail, OIDCAllowDomain: t.OIDCAllowDomain,
 	}
 }
 

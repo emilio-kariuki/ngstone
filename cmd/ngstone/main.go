@@ -409,6 +409,9 @@ type portFlags struct {
 	basicAuthFile       string
 	allowCIDR           string
 	policyFile          string
+	oidc                bool
+	oidcAllowEmail      stringSliceValue
+	oidcAllowDomain     stringSliceValue
 	ttl                 time.Duration
 	json                bool
 	harPath             string
@@ -440,6 +443,9 @@ func newPortFlagSetWithTTL(defaultTTL time.Duration) (*flag.FlagSet, *portFlags)
 	fs.StringVar(&pf.basicAuthFile, "basic-auth-file", "", "path to a file with one user:pass credential per line (blank lines and lines starting with # are ignored); safer than -basic-auth")
 	fs.StringVar(&pf.allowCIDR, "allow-cidr", "", "comma-separated CIDRs allowed to reach the tunnel (empty = allow all)")
 	fs.StringVar(&pf.policyFile, "policy-file", "", "path to a JSON traffic policy file")
+	fs.BoolVar(&pf.oidc, "oidc", false, "require visitors to sign in with the edge's OIDC provider before requests reach the local app")
+	fs.Var(&pf.oidcAllowEmail, "oidc-allow-email", "with --oidc, allow only these verified emails (comma-separated or repeatable)")
+	fs.Var(&pf.oidcAllowDomain, "oidc-allow-domain", "with --oidc, allow verified emails in these domains (comma-separated or repeatable)")
 	fs.DurationVar(&pf.ttl, "ttl", defaultTTL, "stop the tunnel after this duration (for example, 2h)")
 	fs.BoolVar(&pf.json, "json", false, "emit JSON Lines status events instead of the inspector UI")
 	fs.StringVar(&pf.harPath, "har", "", "write captured HTTP exchanges as a HAR file when the tunnel exits")
@@ -594,6 +600,11 @@ func runPortFlags(positionals []string, pf *portFlags, preview bool) int {
 			return 2
 		}
 	}
+	oidcLogin, err := parseOIDCLogin(pf.oidc, pf.oidcAllowEmail, pf.oidcAllowDomain)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
+		return 2
+	}
 
 	acfg := agent.Config{
 		ControlAddr:    server,
@@ -610,6 +621,7 @@ func runPortFlags(positionals []string, pf *portFlags, preview bool) int {
 		BasicAuthSHA256: basicAuthDigests,
 		AllowCIDRs:      allowCIDRs,
 		Policy:          trafficPolicy,
+		OIDC:            oidcLogin,
 
 		Insecure:   pf.insecure,
 		ServerName: pf.serverName,
