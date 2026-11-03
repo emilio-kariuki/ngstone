@@ -75,6 +75,8 @@ type Tunnel struct {
 	RemotePort int `yaml:"remote_port"`
 
 	AllowCIDR []string `yaml:"allow_cidr"`
+
+	Webhook *TunnelWebhook `yaml:"webhook"`
 }
 
 const (
@@ -232,5 +234,5 @@ func (t *NamedTunnel) validate() error {
 	default:
 		return fmt.Errorf("kind %q must be http or tcp", t.Kind)
 	}
-	return nil
+	return t.Webhook.Validate(t.Kind)
 }

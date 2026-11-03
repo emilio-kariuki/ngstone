@@ -23,6 +23,7 @@ import (
 	"ngstone/internal/proto"
 	"ngstone/internal/tunnel"
 	"ngstone/internal/version"
+	"ngstone/internal/webhook"
 )
 
 const (
@@ -91,6 +92,7 @@ type Config struct {
 	BasicAuthRealm  string
 	AllowCIDRs      []string
 	Policy          *policy.Policy
+	Webhook         *webhook.Config
 
 	InstanceID string
 
@@ -567,6 +569,11 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		return proto.BindOK{}, fmt.Errorf("%w: basic auth, traffic policies, HTTP/2, and multiple connectors are not supported for tcp tunnels", errFatalHandshake)
 	}
 
+	webhookBind, err := a.webhookBind(negotiated)
+	if err != nil {
+		return proto.BindOK{}, err
+	}
+
 	policyDigest := ""
 	if a.cfg.Policy != nil {
 		policyDigest = a.cfg.Policy.Digest()
@@ -594,6 +601,7 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		AllowCIDRs:           a.cfg.AllowCIDRs,
 		Policy:               a.cfg.Policy,
 		PolicyDigest:         policyDigest,
+		Webhook:              webhookBind,
 	}
 	if a.bindKind() == proto.KindHTTP {
 		bindMsg.BasicAuthSHA256 = a.cfg.BasicAuthSHA256
@@ -633,6 +641,9 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		}
 		if a.cfg.MultiConnector && !bindOK.MultiConnector {
 			return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge multiple-connector mode; upgrade ngstoned", errFatalHandshake)
+		}
+		if webhookBind != nil && bindOK.Webhook != webhookBind.Provider {
+			return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge webhook verification; upgrade ngstoned", errFatalHandshake)
 		}
 		return bindOK, nil
 	default:
@@ -795,4 +806,29 @@ func Verify(ctx context.Context, cfg Config) error {
 		}
 	}
 	return fmt.Errorf("%w: %v", ErrUnreachable, lastErr)
+}
+
+func (a *Agent) webhookBind(negotiated int) (*proto.WebhookVerification, error) {
+	if a.cfg.Webhook == nil {
+		return nil, nil
+	}
+	if a.bindKind() != proto.KindHTTP {
+		return nil, fmt.Errorf("%w: webhook verification is only supported for http tunnels", errFatalHandshake)
+	}
+	if negotiated < 2 {
+		return nil, fmt.Errorf("%w: edge does not support webhook verification (negotiated protocol v%d); upgrade ngstoned", errFatalHandshake, negotiated)
+	}
+	cfg, err := a.cfg.Webhook.Normalize()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errFatalHandshake, err)
+	}
+	return &proto.WebhookVerification{
+		Provider:         cfg.Provider,
+		Secret:           cfg.Secret,
+		PathPrefix:       cfg.PathPrefix,
+		Header:           cfg.Header,
+		Encoding:         cfg.Encoding,
+		Prefix:           cfg.Prefix,
+		ToleranceSeconds: int64(cfg.Tolerance / time.Second),
+	}, nil
 }

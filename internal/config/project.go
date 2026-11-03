@@ -42,6 +42,8 @@ type ProjectTunnel struct {
 	PolicyFile         string   `json:"policy_file,omitempty"`
 	ConnectorTokenEnv  string   `json:"connector_token_env,omitempty"`
 	CredentialEnv      string   `json:"credential_env,omitempty"`
+
+	Webhook *TunnelWebhook `json:"webhook,omitempty"`
 }
 
 type NamedProjectTunnel struct {
@@ -149,6 +151,9 @@ func (p Project) Validate() error {
 		}
 		if kind == "tcp" && tunnel.PolicyFile != "" {
 			return fmt.Errorf("tunnel %q policy_file is only valid for http tunnels", name)
+		}
+		if err := tunnel.Webhook.Validate(kind); err != nil {
+			return fmt.Errorf("tunnel %q: %w", name, err)
 		}
 		if kind == "http" && tunnel.RemotePort != 0 {
 			return fmt.Errorf("tunnel %q remote_port is only valid for tcp tunnels", name)
