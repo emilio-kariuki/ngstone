@@ -441,9 +441,20 @@ $ docker compose logs -f ngstoned`}
         language="ini"
         code={`NGSTONE_DATABASE_URL=sqlite:///var/lib/ngstoned/control.db
 NGSTONE_EDGE_ID=edge-a
-NGSTONE_PEER_ADDR=10.0.0.11:7443
 NGSTONE_CERT_EMAIL=you@example.com
 NGSTONE_CF_API_TOKEN=cf_fake_token_value_goes_here`}
+      />
+      <p>
+        For active/active edges, point every edge at the same PostgreSQL URL
+        and add <code>NGSTONE_PEER_ADDR</code>; the edge refuses to start with
+        it on SQLite:
+      </p>
+      <CodeBlock
+        filename="/etc/ngstoned/env"
+        language="ini"
+        code={`NGSTONE_DATABASE_URL=postgres://ngstone:<password>@db.internal/ngstone?sslmode=require
+NGSTONE_EDGE_ID=edge-a
+NGSTONE_PEER_ADDR=10.0.0.11:4043`}
       />
       <ParamTable>
         <Property name="NGSTONE_DATABASE_URL" type="env" required>

@@ -183,14 +183,17 @@ the ingress edge for its lifetime, and closes after the TCP idle timeout (30
 minutes by default) of silence in both directions. An ingress edge carries at
 most 1024 concurrent forwarded connections. Edge clocks must agree to within
 about two thirds of the lease TTL (30 s with the default TTL); beyond that,
-peer registrations look expired and forwarding fails closed. After the owner
-closes a forwarded connection the ingress closes its side within five seconds. Long-lived WebSocket and
-SSE connections need traffic or keep-alives within that window. With
+peer registrations look expired and forwarding fails closed. Long-lived
+WebSocket and SSE connections that stay silent need traffic or keep-alives
+within that 30-minute idle timeout. Once the owner side closes or half-closes
+its sending direction, the ingress closes the client's side five seconds later;
+a TLS-passthrough backend that half-closes while still reading sees the
+client's upload cut after five seconds when reached through another edge. With
 forwarding enabled, a database outage closes connections for tunnel hostnames
 not bound on the receiving edge, where a single edge would answer 404.
 
 Under Docker's bridge network, set `-peer-listen` (or `NGSTONE_PEER_LISTEN`) to
-the address inside the container, for example `:7443`, and publish that port;
+the address inside the container, for example `:4043`, and publish that port;
 `NGSTONE_PEER_ADDR` stays the address the other edges dial.
 
 For multiple edge servers, point every process at PostgreSQL and give each

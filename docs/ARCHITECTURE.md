@@ -383,8 +383,10 @@ Failure behaviour: a not-owner answer or a failed handshake means the cached
 owners are stale, so the ingress drops the cache entry, resolves again and
 retries once against the first candidate that is not marked down and is not the
 identical registration (same edge, address and pin) that just failed, so a stale
-pin or a moved tunnel is retried once against the refreshed registration. A TCP dial failure marks the edge down for a short time without
-a new lookup and moves to the next candidate. If owners exist but none is
+pin or a moved tunnel is retried once against the refreshed registration. A TCP dial failure marks the peer address down for a short time and moves to
+the next candidate; when none is left, the ingress resolves once more if the
+cached entry was resolved before that failure or is older than the down
+window, and otherwise closes without a lookup. If owners exist but none is
 reachable the connection is closed; only a hostname with no live owner in
 storage gets the normal 404. A storage error closes the connection and is
 never cached as a miss, so with forwarding enabled a database outage closes
@@ -399,9 +401,11 @@ in-flight slots on the ingress edge for its lifetime and closes after the TCP
 idle timeout (30 minutes by default) of silence in both directions. An ingress
 edge carries at most 1024 concurrent forwarded connections. Edge clocks must
 agree to within about two thirds of the lease TTL (30 s with the default TTL);
-beyond that, peer registrations look expired and forwarding fails closed. After
-the owner closes a forwarded connection the ingress closes its side within five
-seconds. Each edge
+beyond that, peer registrations look expired and forwarding fails closed. Once
+the owner side closes or half-closes its sending direction, the ingress closes
+the client's side five seconds later; a TLS-passthrough backend that half-closes
+while still reading sees the client's upload cut after five seconds when reached
+through another edge. Each edge
 needs a distinct `NGSTONE_EDGE_ID`; two edges with the same id overwrite each
 other's registration. Pins carry the registration expiry, so a pin whose row
 expired or was deleted stops being accepted once its cached expiry passes,

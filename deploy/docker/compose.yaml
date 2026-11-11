@@ -43,7 +43,7 @@ services:
       # NGSTONE_EDGE_ID and NGSTONE_PEER_ADDR in .env, then uncomment this and
       # the peer port under "ports". The edge listens on all container
       # interfaces and advertises NGSTONE_PEER_ADDR to the other edges.
-      # - -peer-listen=:7443
+      # - -peer-listen=:4043
 
     ports:
       - "80:8080"
@@ -52,7 +52,7 @@ services:
       # Raw TCP tunnel range; it must match -tcp-ports exactly.
       # - "10000-10100:10000-10100"
       # Peer port for inter-edge forwarding; firewall it to the other edges.
-      # - "7443:7443"
+      # - "4043:4043"
 
     # Certificates and the ACME account. The image creates /data owned by
     # uid 65532, so a new named volume is writable by the container's
