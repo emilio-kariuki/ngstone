@@ -483,7 +483,8 @@ How rules combine:
   `redirect_url` is an absolute path or an `http(s)` URL; `$path` (or
   `${path}`) expands to the request path with the rule's `path_prefix`
   removed, so `/old/a/b` becomes `/new/a/b` above. The request's query
-  string is always appended.
+  string is appended only when `redirect_url` has no query of its own, and
+  `$path` after a `?` is query-escaped.
 - `cors` answers preflight requests (`OPTIONS` with `Origin` and
   `Access-Control-Request-Method`) at the edge with `204`, before basic
   auth and before rules run, because browsers never send credentials on a

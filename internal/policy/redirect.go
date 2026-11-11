@@ -58,8 +58,28 @@ func validRedirectTarget(target string) bool {
 }
 
 func substitutePath(target, path string) string {
-	target = strings.ReplaceAll(target, "${path}", path)
-	return strings.ReplaceAll(target, "$path", path)
+	queryAt := strings.IndexByte(target, '?')
+	var b strings.Builder
+	for i := 0; i < len(target); {
+		n := 0
+		if strings.HasPrefix(target[i:], "${path}") {
+			n = len("${path}")
+		} else if strings.HasPrefix(target[i:], "$path") {
+			n = len("$path")
+		}
+		if n == 0 {
+			b.WriteByte(target[i])
+			i++
+			continue
+		}
+		if queryAt >= 0 && i > queryAt {
+			b.WriteString(url.QueryEscape(path))
+		} else {
+			b.WriteString((&url.URL{Path: path}).EscapedPath())
+		}
+		i += n
+	}
+	return b.String()
 }
 
 func collapseLeadingSlashes(target string) string {
@@ -87,14 +107,10 @@ func (r *Rule) redirectTarget(req *http.Request) string {
 	if strings.HasSuffix(rawPath, "/") && !strings.HasSuffix(rest, "/") {
 		rest += "/"
 	}
-	target := substitutePath(r.RedirectURL, (&url.URL{Path: rest}).EscapedPath())
+	target := substitutePath(r.RedirectURL, rest)
 	target = collapseLeadingSlashes(target)
-	if rawQuery != "" {
-		if strings.Contains(target, "?") {
-			target += "&" + rawQuery
-		} else {
-			target += "?" + rawQuery
-		}
+	if rawQuery != "" && !strings.Contains(r.RedirectURL, "?") {
+		target += "?" + rawQuery
 	}
 	return target
 }

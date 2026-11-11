@@ -118,14 +118,34 @@ func TestRedirectFirstMatchWinsAndSubstitutesPath(t *testing.T) {
 	}
 }
 
-func TestRedirectQueryIsMergedWithTargetQuery(t *testing.T) {
-	p, err := Parse([]byte(`{"rules":[{"action":"redirect","redirect_url":"https://example.com/login?from=tunnel"}]}`))
+func TestRedirectQueryIsNotAppendedWhenTargetHasQuery(t *testing.T) {
+	p, err := Parse([]byte(`{"rules":[
+  {"action":"redirect","path_prefix":"/login","redirect_url":"https://idp.example/authorize?client_id=abc&redirect_uri=https://safe.example/cb"},
+  {"action":"redirect","path_prefix":"/go","redirect_url":"https://idp.example/authorize?next=$path"},
+  {"action":"redirect","path_prefix":"/plain","redirect_url":"https://example.com/landing"}
+]}`))
 	if err != nil {
 		t.Fatalf("Parse: %v", err)
 	}
-	d := p.Decide(httptestRequest(http.MethodGet, "/x?next=1"))
-	if d.RedirectURL != "https://example.com/login?from=tunnel&next=1" {
-		t.Fatalf("RedirectURL = %q", d.RedirectURL)
+	cases := []struct{ target, want string }{
+		{"/login?redirect_uri=https://evil.example/cb&client_id=evil", "https://idp.example/authorize?client_id=abc&redirect_uri=https://safe.example/cb"},
+		{"/go/a&redirect_uri=https:%2F%2Fevil.example", "https://idp.example/authorize?next=%2Fa%26redirect_uri%3Dhttps%3A%2Fevil.example"},
+		{"/plain/x?next=1", "https://example.com/landing?next=1"},
+	}
+	for _, tc := range cases {
+		if got := p.Decide(httptestRequest(http.MethodGet, tc.target)).RedirectURL; got != tc.want {
+			t.Fatalf("%s: RedirectURL = %q, want %q", tc.target, got, tc.want)
+		}
+	}
+}
+
+func TestRedirectDoesNotExpandVisitorText(t *testing.T) {
+	p, err := Parse([]byte(`{"rules":[{"action":"redirect","path_prefix":"/old","redirect_url":"/new${path}"}]}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := p.Decide(httptestRequest(http.MethodGet, "/old/$path")).RedirectURL; got != "/new/$path" {
+		t.Fatalf("RedirectURL = %q, want /new/$path", got)
 	}
 }
 

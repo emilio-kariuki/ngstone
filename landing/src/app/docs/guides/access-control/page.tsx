@@ -216,8 +216,10 @@ $ ngstone preview 3000 --ttl 30m --policy-file traffic-policy.json`}
           <code>http(s)</code> URL. <code>$path</code> (or{" "}
           <code>{"${path}"}</code>) expands to the request path with the
           rule&apos;s <code>path_prefix</code> removed, so{" "}
-          <code>/old/a/b</code> becomes <code>/new/a/b</code> above. The query
-          string is always appended.
+          <code>/old/a/b</code> becomes <code>/new/a/b</code> above. The request
+          query string is appended only when <code>redirect_url</code> has no
+          query of its own, and <code>$path</code> after a <code>?</code> is
+          query-escaped.
         </Property>
         <Property name="redirect_status" type="int" defaultValue="302">
           <code>301</code>, <code>302</code>, <code>307</code> or{" "}
