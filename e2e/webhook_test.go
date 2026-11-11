@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"ngstone/internal/webhook"
+	"ngstone/internal/webhook/webhooktest"
 )
 
 type webhookOrigin struct {
@@ -104,7 +105,7 @@ func TestWebhookVerificationStripeViaPortFlags(t *testing.T) {
 
 	body := `{"id":"evt_e2e","type":"invoice.paid"}`
 	now := time.Now().Unix()
-	valid := webhook.StripeSignature(secret, now, []byte(body))
+	valid := webhooktest.StripeSignature(secret, now, []byte(body))
 
 	status, resp := postWebhook(t, publicAddr, host, "/stripe/events", body, map[string]string{webhook.StripeSignatureHeader: valid})
 	expectWebhook(t, "valid", status, resp, http.StatusOK, "origin-ok")
@@ -112,11 +113,11 @@ func TestWebhookVerificationStripeViaPortFlags(t *testing.T) {
 	status, resp = postWebhook(t, publicAddr, host, "/stripe/events", strings.Replace(body, "invoice.paid", "invoice.voided", 1), map[string]string{webhook.StripeSignatureHeader: valid})
 	expectWebhook(t, "tampered", status, resp, http.StatusUnauthorized, "invalid signature")
 
-	expired := webhook.StripeSignature(secret, now-int64((10*time.Minute)/time.Second), []byte(body))
+	expired := webhooktest.StripeSignature(secret, now-int64((10*time.Minute)/time.Second), []byte(body))
 	status, resp = postWebhook(t, publicAddr, host, "/stripe/events", body, map[string]string{webhook.StripeSignatureHeader: expired})
 	expectWebhook(t, "expired", status, resp, http.StatusUnauthorized, "timestamp outside tolerance")
 
-	wrongKey := webhook.StripeSignature("whsec_wrong", now, []byte(body))
+	wrongKey := webhooktest.StripeSignature("whsec_wrong", now, []byte(body))
 	status, resp = postWebhook(t, publicAddr, host, "/stripe/events", body, map[string]string{webhook.StripeSignatureHeader: wrongKey})
 	expectWebhook(t, "wrong secret", status, resp, http.StatusUnauthorized, "invalid signature")
 
@@ -195,29 +196,29 @@ tunnels:
 	waitStatus(t, publicAddr, slackHost, "/", http.StatusUnauthorized, 15*time.Second)
 
 	ghBody := `{"zen":"Keep it logically awesome."}`
-	status, resp := postWebhook(t, publicAddr, ghHost, "/github", ghBody, map[string]string{webhook.GitHubSignatureHeader: webhook.GitHubSignature(githubSecret, []byte(ghBody))})
+	status, resp := postWebhook(t, publicAddr, ghHost, "/github", ghBody, map[string]string{webhook.GitHubSignatureHeader: webhooktest.GitHubSignature(githubSecret, []byte(ghBody))})
 	expectWebhook(t, "github valid", status, resp, http.StatusOK, "origin-ok")
-	status, resp = postWebhook(t, publicAddr, ghHost, "/github", ghBody+" ", map[string]string{webhook.GitHubSignatureHeader: webhook.GitHubSignature(githubSecret, []byte(ghBody))})
+	status, resp = postWebhook(t, publicAddr, ghHost, "/github", ghBody+" ", map[string]string{webhook.GitHubSignatureHeader: webhooktest.GitHubSignature(githubSecret, []byte(ghBody))})
 	expectWebhook(t, "github tampered", status, resp, http.StatusUnauthorized, "invalid signature")
 
 	slackBody := "token=abc&command=%2Fdeploy&text=prod"
 	now := time.Now().Unix()
 	ts := fmt.Sprint(now)
 	status, resp = postWebhook(t, publicAddr, slackHost, "/slack/commands", slackBody, map[string]string{
-		webhook.SlackSignatureHeader: webhook.SlackSignature(slackSecret, now, []byte(slackBody)),
+		webhook.SlackSignatureHeader: webhooktest.SlackSignature(slackSecret, now, []byte(slackBody)),
 		webhook.SlackTimestampHeader: ts,
 	})
 	expectWebhook(t, "slack valid", status, resp, http.StatusOK, "origin-ok")
 
 	old := now - 300
 	status, resp = postWebhook(t, publicAddr, slackHost, "/slack/commands", slackBody, map[string]string{
-		webhook.SlackSignatureHeader: webhook.SlackSignature(slackSecret, old, []byte(slackBody)),
+		webhook.SlackSignatureHeader: webhooktest.SlackSignature(slackSecret, old, []byte(slackBody)),
 		webhook.SlackTimestampHeader: fmt.Sprint(old),
 	})
 	expectWebhook(t, "slack replayed", status, resp, http.StatusUnauthorized, "timestamp outside tolerance")
 
 	status, resp = postWebhook(t, publicAddr, slackHost, "/slack/commands", strings.Replace(slackBody, "prod", "staging", 1), map[string]string{
-		webhook.SlackSignatureHeader: webhook.SlackSignature(slackSecret, now, []byte(slackBody)),
+		webhook.SlackSignatureHeader: webhooktest.SlackSignature(slackSecret, now, []byte(slackBody)),
 		webhook.SlackTimestampHeader: ts,
 	})
 	expectWebhook(t, "slack tampered", status, resp, http.StatusUnauthorized, "invalid signature")

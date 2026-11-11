@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"ngstone/internal/webhook/webhooktest"
 )
 
 const (
@@ -305,13 +307,13 @@ func TestCheckHeaders(t *testing.T) {
 }
 
 func TestSignHelpersMatchDocumentedVectors(t *testing.T) {
-	if got := GitHubSignature(githubDocSecret, []byte(githubDocBody)); got != githubDocSignature {
+	if got := webhooktest.GitHubSignature(githubDocSecret, []byte(githubDocBody)); got != githubDocSignature {
 		t.Fatalf("GitHubSignature = %s", got)
 	}
-	if got := SlackSignature(slackDocSecret, 1531420618, []byte(slackDocBody)); got != slackDocSignature {
+	if got := webhooktest.SlackSignature(slackDocSecret, 1531420618, []byte(slackDocBody)); got != slackDocSignature {
 		t.Fatalf("SlackSignature = %s", got)
 	}
-	if got := StripeSignature(stripeSecret, stripeTimestamp, []byte(stripeBody)); got != "t=1700000000,v1="+stripeV1 {
+	if got := webhooktest.StripeSignature(stripeSecret, stripeTimestamp, []byte(stripeBody)); got != "t=1700000000,v1="+stripeV1 {
 		t.Fatalf("StripeSignature = %s", got)
 	}
 }

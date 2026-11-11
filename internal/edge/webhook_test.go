@@ -14,6 +14,7 @@ import (
 
 	"ngstone/internal/proto"
 	"ngstone/internal/webhook"
+	"ngstone/internal/webhook/webhooktest"
 )
 
 const testWebhookSecret = "whsec_edge_test_secret_value"
@@ -80,7 +81,7 @@ func webhookRequest(s *Server, path, body string, chunked bool, headers map[stri
 func TestHandlePublicVerifiesGitHubWebhooks(t *testing.T) {
 	s, capture := newWebhookTestServer(t, LimitsConfig{}, webhook.Config{Provider: webhook.ProviderGitHub, Secret: testWebhookSecret, PathPrefix: "/hooks"})
 	body := `{"action":"opened","number":1}`
-	sig := webhook.GitHubSignature(testWebhookSecret, []byte(body))
+	sig := webhooktest.GitHubSignature(testWebhookSecret, []byte(body))
 
 	rec := webhookRequest(s, "/hooks/github", body, false, map[string]string{webhook.GitHubSignatureHeader: sig})
 	if rec.Code != http.StatusOK {
@@ -134,11 +135,11 @@ func TestHandlePublicRejectsExpiredStripeWebhook(t *testing.T) {
 	s, capture := newWebhookTestServer(t, LimitsConfig{}, webhook.Config{Provider: webhook.ProviderStripe, Secret: testWebhookSecret, Tolerance: time.Minute})
 	body := `{"id":"evt_1","type":"payment_intent.succeeded"}`
 
-	fresh := webhook.StripeSignature(testWebhookSecret, time.Now().Unix(), []byte(body))
+	fresh := webhooktest.StripeSignature(testWebhookSecret, time.Now().Unix(), []byte(body))
 	if rec := webhookRequest(s, "/stripe", body, false, map[string]string{webhook.StripeSignatureHeader: fresh}); rec.Code != http.StatusOK {
 		t.Fatalf("fresh signature status = %d body=%q", rec.Code, rec.Body.String())
 	}
-	stale := webhook.StripeSignature(testWebhookSecret, time.Now().Add(-2*time.Minute).Unix(), []byte(body))
+	stale := webhooktest.StripeSignature(testWebhookSecret, time.Now().Add(-2*time.Minute).Unix(), []byte(body))
 	rec := webhookRequest(s, "/stripe", body, false, map[string]string{webhook.StripeSignatureHeader: stale})
 	if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "timestamp outside tolerance") {
 		t.Fatalf("stale signature status = %d body=%q", rec.Code, rec.Body.String())
@@ -151,7 +152,7 @@ func TestHandlePublicRejectsExpiredStripeWebhook(t *testing.T) {
 func TestHandlePublicWebhookBodyCap(t *testing.T) {
 	s, capture := newWebhookTestServer(t, LimitsConfig{MaxBodyBytes: 64}, webhook.Config{Provider: webhook.ProviderGitHub, Secret: testWebhookSecret})
 	body := strings.Repeat("x", 65)
-	sig := webhook.GitHubSignature(testWebhookSecret, []byte(body))
+	sig := webhooktest.GitHubSignature(testWebhookSecret, []byte(body))
 	if rec := webhookRequest(s, "/", body, false, map[string]string{webhook.GitHubSignatureHeader: sig}); rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("declared oversize status = %d", rec.Code)
 	}
@@ -176,11 +177,11 @@ func TestHandlePublicWebhookBodyCap(t *testing.T) {
 func TestHandlePublicWebhookMaxBodyBytes(t *testing.T) {
 	s, capture := newWebhookTestServer(t, LimitsConfig{WebhookMaxBodyBytes: 32}, webhook.Config{Provider: webhook.ProviderGitHub, Secret: testWebhookSecret})
 	small := strings.Repeat("x", 32)
-	if rec := webhookRequest(s, "/", small, true, map[string]string{webhook.GitHubSignatureHeader: webhook.GitHubSignature(testWebhookSecret, []byte(small))}); rec.Code != http.StatusOK {
+	if rec := webhookRequest(s, "/", small, true, map[string]string{webhook.GitHubSignatureHeader: webhooktest.GitHubSignature(testWebhookSecret, []byte(small))}); rec.Code != http.StatusOK {
 		t.Fatalf("body at the cap status = %d body=%q", rec.Code, rec.Body.String())
 	}
 	body := strings.Repeat("x", 33)
-	sig := webhook.GitHubSignature(testWebhookSecret, []byte(body))
+	sig := webhooktest.GitHubSignature(testWebhookSecret, []byte(body))
 	for _, chunked := range []bool{false, true} {
 		rec := webhookRequest(s, "/", body, chunked, map[string]string{webhook.GitHubSignatureHeader: sig})
 		if rec.Code != http.StatusRequestEntityTooLarge {
@@ -236,7 +237,7 @@ func TestHandlePublicWebhookRejectsMissingHeaderBeforeReadingBody(t *testing.T) 
 func TestHandlePublicWebhookBufferBudget(t *testing.T) {
 	s, capture := newWebhookTestServer(t, LimitsConfig{WebhookMaxBodyBytes: 64, WebhookBufferBytes: 100}, webhook.Config{Provider: webhook.ProviderGitHub, Secret: testWebhookSecret})
 	body := strings.Repeat("x", 50)
-	headers := map[string]string{webhook.GitHubSignatureHeader: webhook.GitHubSignature(testWebhookSecret, []byte(body))}
+	headers := map[string]string{webhook.GitHubSignatureHeader: webhooktest.GitHubSignature(testWebhookSecret, []byte(body))}
 
 	held, ok := s.webhookBudget.reserve(60)
 	if !ok {
@@ -290,7 +291,7 @@ func TestHandlePublicWebhookHoldsBudgetWhileProxying(t *testing.T) {
 	body := `{"ok":true}`
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
-		done <- webhookRequest(s, "/", body, false, map[string]string{webhook.GitHubSignatureHeader: webhook.GitHubSignature(testWebhookSecret, []byte(body))})
+		done <- webhookRequest(s, "/", body, false, map[string]string{webhook.GitHubSignatureHeader: webhooktest.GitHubSignature(testWebhookSecret, []byte(body))})
 	}()
 	if got := <-entered; got != int64(len(body)) {
 		t.Fatalf("webhook budget in use while proxying = %d, want %d", got, len(body))
