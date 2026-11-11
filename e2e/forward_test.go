@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"expvar"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"net/http/httptrace"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -981,4 +983,156 @@ func TestForwardRawTCP(t *testing.T) {
 		stopV4()
 		waitTCPCondition(t, 5*time.Second, "edge B to stop serving the disconnected tunnel", func() bool { return !tcpDialable(viaB(portV4)) })
 	})
+}
+
+func TestForwardShareLink(t *testing.T) {
+	forEachForwardStorage(t, func(t *testing.T, dsn string) {
+		p := startForwardedPair(t, dsn)
+		echoAddr := startTCPEcho(t)
+		echoPort := tcpPort(t, echoAddr)
+
+		issue := func(owner string) string {
+			issued, err := p.a.store.Issue(credentials.Spec{Kind: credentials.KindShare, OwnerID: owner}, time.Hour)
+			if err != nil {
+				t.Fatalf("issue share credential for %s: %v", owner, err)
+			}
+			return issued.Token
+		}
+		operator := func(token string) *agent.Operator {
+			return agent.NewOperator(agent.Config{ControlAddr: p.a.controlAddr, Token: token, Insecure: true})
+		}
+
+		secret, digest, err := agent.NewShareSecret()
+		if err != nil {
+			t.Fatal(err)
+		}
+		spec := &agent.ShareSpec{
+			Label: "e2e db",
+			Targets: []agent.ShareTargetSpec{{
+				ShareTarget: proto.ShareTarget{ID: "t1", Preset: "tcp", Label: "tcp", DefaultPort: echoPort},
+				Addr:        echoAddr,
+			}},
+			SecretSHA256:  digest,
+			ExpiresAt:     time.Now().Add(10 * time.Minute),
+			MaxConns:      16,
+			MaxConnectors: 8,
+		}
+		sharerEvents := make(chan agent.StatusEvent, 32)
+		sharerCtx, stopSharer := context.WithCancel(context.Background())
+		sharerDone := make(chan struct{})
+		go func() {
+			agent.New(agent.Config{
+				ControlAddr: p.b.controlAddr,
+				Token:       issue("e2e-owner"),
+				Kind:        proto.KindTCP,
+				TargetURL:   echoAddr,
+				InstanceID:  "e2e-sharer",
+				Insecure:    true,
+				Share:       spec,
+				Events:      sharerEvents,
+			}).Run(sharerCtx)
+			close(sharerDone)
+		}()
+		t.Cleanup(func() {
+			stopSharer()
+			select {
+			case <-sharerDone:
+			case <-time.After(fwdStopBudget):
+				t.Errorf("sharer did not stop within %s", fwdStopBudget)
+			}
+		})
+		var shareID string
+		for shareID == "" {
+			select {
+			case ev := <-sharerEvents:
+				if ev.State == agent.StateOnline {
+					shareID = ev.ShareID
+				}
+			case <-time.After(fwdWaitBudget):
+				t.Fatal("sharer did not register its share on edge-b")
+			}
+		}
+
+		badSecret, _, err := agent.NewShareSecret()
+		if err != nil {
+			t.Fatal(err)
+		}
+		badCtx, badCancel := context.WithTimeout(context.Background(), fwdWaitBudget)
+		defer badCancel()
+		badErr := agent.NewConnector(agent.ConnectConfig{ControlAddr: p.a.controlAddr, Secret: badSecret, Insecure: true}).Run(badCtx)
+		if !errors.Is(badErr, agent.ErrBadToken) {
+			t.Fatalf("wrong secret against edge-a: err = %v, want ErrBadToken", badErr)
+		}
+
+		connEvents := make(chan agent.ConnectEvent, 32)
+		connCtx, stopConn := context.WithCancel(context.Background())
+		defer stopConn()
+		connDone := make(chan error, 1)
+		go func() {
+			connDone <- agent.NewConnector(agent.ConnectConfig{
+				ControlAddr: p.a.controlAddr,
+				Secret:      secret,
+				InstanceID:  "e2e-connector",
+				Insecure:    true,
+				Events:      connEvents,
+			}).Run(connCtx)
+		}()
+		var listenAddr string
+		for listenAddr == "" {
+			select {
+			case ev := <-connEvents:
+				if ev.State == agent.StateOnline && len(ev.Targets) > 0 {
+					if ev.ShareID != shareID {
+						t.Fatalf("connector joined share %q, sharer registered %q", ev.ShareID, shareID)
+					}
+					listenAddr = ev.Targets[0].ListenAddr
+				}
+			case err := <-connDone:
+				t.Fatalf("connector through edge-a ended before joining: %v", err)
+			case <-time.After(fwdWaitBudget):
+				t.Fatal("connector through edge-a never joined the share on edge-b")
+			}
+		}
+
+		conn, err := net.DialTimeout("tcp", listenAddr, 5*time.Second)
+		if err != nil {
+			t.Fatalf("dial connector listener %s: %v", listenAddr, err)
+		}
+		defer conn.Close()
+		for i := 0; i < 3; i++ {
+			echoRoundTrip(t, conn, "through-a-to-b\n")
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), fwdWaitBudget)
+		defer cancel()
+		if err := operator(issue("other-owner")).Unshare(ctx, shareID); !errors.Is(err, agent.ErrShareNotFound) {
+			t.Fatalf("unshare by another owner via edge-a: err = %v, want ErrShareNotFound", err)
+		}
+		echoRoundTrip(t, conn, "still-here\n")
+
+		if err := operator(issue("e2e-owner")).Unshare(ctx, shareID); err != nil {
+			t.Fatalf("unshare by the owner via edge-a: %v", err)
+		}
+		select {
+		case err := <-connDone:
+			if !errors.Is(err, agent.ErrShareClosed) || agent.CloseReason(err) != proto.ShareReasonRevoked {
+				t.Fatalf("connector ended with %v, want a revoked share", err)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatal("connector did not observe the revocation within 20s")
+		}
+	})
+}
+
+func tcpPort(t *testing.T, addr string) int {
+	t.Helper()
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return port
 }
