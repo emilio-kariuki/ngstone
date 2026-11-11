@@ -32,6 +32,15 @@ func (r *Rule) validateRedirect() error {
 	if strings.HasPrefix(r.RedirectURL, "//") || !validRedirectTarget(collapseLeadingSlashes(substitutePath(r.RedirectURL, "/x"))) {
 		return errors.New("redirect_url must be an absolute path or an http(s) URL")
 	}
+	if target := collapseLeadingSlashes(substitutePath(r.RedirectURL, "")); strings.HasPrefix(target, "/") {
+		parsed, err := url.Parse(target)
+		if err != nil {
+			return errors.New("redirect_url must be an absolute path or an http(s) URL")
+		}
+		if r.PathPrefix == "" || pathMatches(parsed.Path, r.PathPrefix) {
+			return errors.New("redirect_url would redirect to a path matched by its own rule")
+		}
+	}
 	switch r.RedirectStatus {
 	case 0:
 		r.RedirectStatus = defaultRedirectStatus

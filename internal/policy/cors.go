@@ -52,6 +52,9 @@ func (c *CORS) validate() error {
 			}
 			continue
 		}
+		if strings.Contains(origin, corsWildcard) {
+			return fmt.Errorf("allowed_origins entry %q cannot contain \"*\"; use \"*\" alone or exact origins", origin)
+		}
 		normalized, ok := normalizeOrigin(origin)
 		if !ok {
 			return fmt.Errorf("allowed_origins entry %q must be \"*\" or scheme://host[:port]", origin)
@@ -60,6 +63,9 @@ func (c *CORS) validate() error {
 	}
 	for i, method := range c.AllowedMethods {
 		method = strings.ToUpper(strings.TrimSpace(method))
+		if strings.Contains(method, corsWildcard) {
+			return fmt.Errorf("allowed_methods entry %q cannot contain \"*\"; list methods explicitly", c.AllowedMethods[i])
+		}
 		if !validToken(method) {
 			return fmt.Errorf("allowed_methods entry %q is invalid", c.AllowedMethods[i])
 		}

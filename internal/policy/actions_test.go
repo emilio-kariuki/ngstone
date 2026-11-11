@@ -149,6 +149,30 @@ func TestRedirectDoesNotExpandVisitorText(t *testing.T) {
 	}
 }
 
+func TestValidationRejectsSelfMatchingRelativeRedirects(t *testing.T) {
+	invalid := []string{
+		`{"rules":[{"action":"redirect","redirect_url":"/login"}]}`,
+		`{"rules":[{"action":"redirect","path_prefix":"/old","redirect_url":"/old/x$path"}]}`,
+		`{"rules":[{"action":"redirect","path_prefix":"/new","redirect_url":"/new$path"}]}`,
+		`{"rules":[{"action":"redirect","redirect_url":"$path"}]}`,
+	}
+	for _, input := range invalid {
+		if _, err := Parse([]byte(input)); err == nil {
+			t.Fatalf("Parse(%s) succeeded, want error", input)
+		}
+	}
+	valid := []string{
+		`{"rules":[{"action":"redirect","path_prefix":"/old","redirect_url":"/new$path"}]}`,
+		`{"rules":[{"action":"redirect","path_prefix":"/old","redirect_url":"https://other.example/old$path"}]}`,
+		`{"rules":[{"action":"redirect","redirect_url":"https://other.example/login"}]}`,
+	}
+	for _, input := range valid {
+		if _, err := Parse([]byte(input)); err != nil {
+			t.Fatalf("Parse(%s): %v", input, err)
+		}
+	}
+}
+
 func TestValidationRejectsReservedAndInvalidActions(t *testing.T) {
 	reserved := []string{
 		"Host", "Connection", "Keep-Alive", "Proxy-Authorization", "TE", "Trailer", "Transfer-Encoding", "Upgrade",
@@ -338,5 +362,22 @@ func TestCORSResponseHeadersReplaceUpstreamValues(t *testing.T) {
 	od.ApplyResponseHeaders(resp)
 	if resp.Get("Access-Control-Allow-Origin") != "" {
 		t.Fatalf("disallowed origin kept CORS headers: %v", resp)
+	}
+}
+
+func TestValidationRejectsCORSValuesThatCanNeverMatch(t *testing.T) {
+	invalid := []string{
+		`{"rules":[],"cors":{"allowed_origins":["https://a.example"],"allowed_methods":["*"]}}`,
+		`{"rules":[],"cors":{"allowed_origins":["https://a.example"],"allowed_methods":["GET","P*"]}}`,
+		`{"rules":[],"cors":{"allowed_origins":["https://*.example.com"]}}`,
+		`{"rules":[],"cors":{"allowed_origins":["https://a.example","*.example.com"]}}`,
+	}
+	for _, input := range invalid {
+		if _, err := Parse([]byte(input)); err == nil {
+			t.Fatalf("Parse(%s) succeeded, want error", input)
+		}
+	}
+	if _, err := Parse([]byte(`{"rules":[],"cors":{"allowed_origins":["*"],"allowed_headers":["*"]}}`)); err != nil {
+		t.Fatalf("bare wildcard origin rejected: %v", err)
 	}
 }
