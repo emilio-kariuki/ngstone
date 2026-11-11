@@ -35,6 +35,7 @@ func main() {
 	databaseURLFlag := flag.String("database-url", "", "control-plane database URL (defaults to $NGSTONE_DATABASE_URL or SQLite at /var/lib/ngstoned/control.db; prefer the environment for PostgreSQL credentials)")
 	edgeID := flag.String("edge-id", "", "stable identifier for this edge server (defaults to $NGSTONE_EDGE_ID or a generated value)")
 	peerAddr := flag.String("peer-addr", "", "address (ip:port) this edge listens on for forwarded connections from other edges and advertises to them through the shared database; requires PostgreSQL; empty disables inter-edge forwarding (defaults to $NGSTONE_PEER_ADDR)")
+	peerListen := flag.String("peer-listen", "", "address (ip:port or :port) to listen on for peer connections when it differs from -peer-addr, for example inside a container; defaults to -peer-addr")
 	leaseTTL := flag.Duration("lease-ttl", storage.DefaultLeaseTTL, "connector lease lifetime; heartbeats renew leases before expiry")
 	adminTokenSHA256Hex := flag.String("admin-token-sha256", "", "hex-encoded SHA-256 of the management API bearer token (defaults to $NGSTONE_ADMIN_TOKEN_SHA256; loopback-only when unset)")
 	alertWebhookURL := flag.String("alert-webhook", "", "HTTP(S) webhook for credential, connector, and lease lifecycle alerts (defaults to $NGSTONE_ALERT_WEBHOOK_URL)")
@@ -121,6 +122,7 @@ func main() {
 		resolvedEdgeID = *edgeID
 	}
 	resolvedPeerAddr := envOrFlag("NGSTONE_PEER_ADDR", *peerAddr)
+	resolvedPeerListen := envOrFlag("NGSTONE_PEER_LISTEN", *peerListen)
 	tokenSHA256HexVal := os.Getenv("NGSTONE_TOKEN_SHA256")
 	if tokenSHA256HexVal == "" {
 		tokenSHA256HexVal = *tokenSHA256Hex
@@ -232,6 +234,10 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if resolvedPeerListen != "" && resolvedPeerAddr == "" {
+		logger.Error("ngstoned: -peer-listen (or $NGSTONE_PEER_LISTEN) requires -peer-addr (or $NGSTONE_PEER_ADDR)")
+		os.Exit(1)
+	}
 	if resolvedPeerAddr != "" {
 		if databaseURL == "" {
 			logger.Error("ngstoned: -peer-addr (or $NGSTONE_PEER_ADDR) requires a database URL")
@@ -302,6 +308,7 @@ func main() {
 		StorageDSN:        databaseURL,
 		EdgeID:            resolvedEdgeID,
 		PeerAddr:          resolvedPeerAddr,
+		PeerListen:        resolvedPeerListen,
 		LeaseTTL:          *leaseTTL,
 		AdminTokenSHA256:  adminSum,
 		PublicScheme:      *publicScheme,
@@ -349,7 +356,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA, "dns-provider", *dnsProvider, "proxy-protocol", *proxyProtocol, "scoped_credentials", credentialsFile != "", "durable_storage", databaseURL != "", "peer_addr", resolvedPeerAddr, "admin_bearer", adminTokenSHA256HexVal != "", "oidc", oidcConfig != nil)
+	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA, "dns-provider", *dnsProvider, "proxy-protocol", *proxyProtocol, "scoped_credentials", credentialsFile != "", "durable_storage", databaseURL != "", "peer_addr", resolvedPeerAddr, "peer_listen", resolvedPeerListen, "admin_bearer", adminTokenSHA256HexVal != "", "oidc", oidcConfig != nil)
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("ngstoned: exited with error", "err", err)
 		os.Exit(1)

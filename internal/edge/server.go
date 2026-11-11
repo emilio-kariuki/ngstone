@@ -1,6 +1,7 @@
 package edge
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -58,6 +59,7 @@ type Config struct {
 	OpsAddr  string
 
 	PeerAddr        string
+	PeerListen      string
 	PublicTLSConfig *tls.Config
 
 	TCPPortRange string
@@ -175,7 +177,7 @@ func New(cfg Config) (*Server, error) {
 		closeOpenedStorage()
 		return nil, errors.New("edge: a public TLS config cannot be combined with insecure mode")
 	}
-	if cfg.PeerAddr != "" {
+	if cfg.PeerAddr != "" || cfg.PeerListen != "" {
 		if err := validatePeerAddr(cfg, durableStore != nil); err != nil {
 			closeOpenedStorage()
 			return nil, err
@@ -430,7 +432,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	if s.peers != nil {
-		peerLn, err = net.Listen("tcp", s.cfg.PeerAddr)
+		peerLn, err = net.Listen("tcp", cmp.Or(s.cfg.PeerListen, s.cfg.PeerAddr))
 		if err != nil {
 			closeAll()
 			return fmt.Errorf("edge: peer listen: %w", err)
@@ -544,7 +546,7 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	}
 
-	slog.Info("ngstoned: listeners up", "control", s.cfg.ControlAddr, "public", s.cfg.PublicAddr, "insecure", s.cfg.Insecure, "proxy_protocol", s.cfg.ProxyProtocol, "peer_addr", s.cfg.PeerAddr)
+	slog.Info("ngstoned: listeners up", "control", s.cfg.ControlAddr, "public", s.cfg.PublicAddr, "insecure", s.cfg.Insecure, "proxy_protocol", s.cfg.ProxyProtocol, "peer_addr", s.cfg.PeerAddr, "peer_listen", s.cfg.PeerListen)
 	s.recordEvent("info", "listeners up", map[string]string{
 		"control": s.cfg.ControlAddr,
 		"public":  s.cfg.PublicAddr,

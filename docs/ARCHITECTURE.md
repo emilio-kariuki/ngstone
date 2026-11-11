@@ -342,8 +342,9 @@ ownership or active/active coordination and should not be used for a cluster.
 
 When `NGSTONE_PEER_ADDR` is set (PostgreSQL only, never `-insecure`), each edge
 registers its peer address and SPKI pin in `edge_peers` and listens for peers
-on that address. A public connection reaching an edge without the connector is
-forwarded in one hop:
+on that address; when `NGSTONE_PEER_LISTEN` is set the listener binds it
+instead, and the edge always advertises `NGSTONE_PEER_ADDR`. A public
+connection reaching an edge without the connector is forwarded in one hop:
 
 1. The SNI router peeks the ClientHello and finds no local route.
 2. The edge looks up the live owners of the hostname in storage (every edge

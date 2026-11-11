@@ -183,8 +183,9 @@ SSE connections need traffic or keep-alives within that window. With
 forwarding enabled, a database outage closes connections for tunnel hostnames
 not bound on the receiving edge, where a single edge would answer 404.
 
-Edges in Docker bridge networking cannot advertise a reachable peer address;
-use host networking.
+Under Docker's bridge network, set `-peer-listen` (or `NGSTONE_PEER_LISTEN`) to
+the address inside the container, for example `:7443`, and publish that port;
+`NGSTONE_PEER_ADDR` stays the address the other edges dial.
 
 For multiple edge servers, point every process at PostgreSQL and give each
 process a stable edge ID:

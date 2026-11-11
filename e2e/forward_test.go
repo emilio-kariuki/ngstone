@@ -48,14 +48,19 @@ type fwdEdge struct {
 }
 
 type fwdConfig struct {
-	proxySrc string
-	idp      *e2eIdP
+	proxySrc       string
+	idp            *e2eIdP
+	separateListen bool
 }
 
 type fwdOption func(*fwdConfig)
 
 func withProxyProtocol(src string) fwdOption {
 	return func(c *fwdConfig) { c.proxySrc = src }
+}
+
+func withSeparatePeerListen() fwdOption {
+	return func(c *fwdConfig) { c.separateListen = true }
 }
 
 func withVisitorIdP(idp *e2eIdP) fwdOption {
@@ -122,6 +127,10 @@ func (p *fwdPair) startEdge(t *testing.T, id, publicAddr string, proxyProtocol b
 			MinVersion:   tls.VersionTLS12,
 		},
 	}
+	if p.cfg.separateListen {
+		cfg.PeerListen = freeAddr(t)
+		cfg.PeerAddr = portMap(t, cfg.PeerListen)
+	}
 	if proxyProtocol {
 		cfg.ProxyProtocol = true
 		cfg.ProxyProtocolTrusted = []string{"127.0.0.1/32"}
@@ -155,6 +164,42 @@ func (p *fwdPair) startEdge(t *testing.T, id, publicAddr string, proxyProtocol b
 	waitForPort(t, e.controlAddr)
 	waitForPort(t, e.publicAddr)
 	return e
+}
+
+func portMap(t *testing.T, to string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("portMap listen: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				up, err := net.DialTimeout("tcp", to, 2*time.Second)
+				if err != nil {
+					return
+				}
+				defer up.Close()
+				go func() {
+					io.Copy(up, c)
+					up.Close()
+				}()
+				io.Copy(c, up)
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		<-done
+	})
+	return ln.Addr().String()
 }
 
 func (p *fwdPair) startAgent(t *testing.T, e *fwdEdge, credKind, subdomain, target string, mutate func(*agent.Config)) *fwdAgent {
@@ -313,37 +358,46 @@ func expvarCount(t *testing.T, name string) int64 {
 	return v.Value()
 }
 
+func forwardedHTTPRequest(t *testing.T, dsn string, opts ...fwdOption) {
+	p := startForwardedPair(t, dsn, opts...)
+	origin := httptest.NewServer(readyWrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "%s %s?%s proto=%s", r.Method, r.URL.Path, r.URL.RawQuery, r.Header.Get("X-Forwarded-Proto"))
+	})))
+	defer origin.Close()
+	h := p.start(t, "web", origin.URL)
+
+	forwardedBefore := expvarCount(t, "ngstoned_peer_forwarded_conns_total")
+	acceptedBefore := expvarCount(t, "ngstoned_peer_accepted_conns_total")
+	requestsBefore := expvarCount(t, "ngstoned_requests_total")
+
+	resp, err := p.clientTo(p.a, fwdRequestWait).Get(fwdURL(p.a, h.hostname, "/hello?x=1"))
+	if err != nil {
+		t.Fatalf("GET via edge-a: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "GET /hello?x=1 proto=https" {
+		t.Fatalf("response = %d %q", resp.StatusCode, body)
+	}
+	if got := expvarCount(t, "ngstoned_peer_forwarded_conns_total") - forwardedBefore; got != 1 {
+		t.Fatalf("forwarded connections = %d, want 1", got)
+	}
+	if got := expvarCount(t, "ngstoned_peer_accepted_conns_total") - acceptedBefore; got != 1 {
+		t.Fatalf("accepted peer connections = %d, want 1", got)
+	}
+	if got := expvarCount(t, "ngstoned_requests_total") - requestsBefore; got != 1 {
+		t.Fatalf("requests counted across both edges = %d, want 1 (the owner counts it, the ingress must not)", got)
+	}
+}
+
 func TestForwardedHTTPRequest(t *testing.T) {
 	forEachForwardStorage(t, func(t *testing.T, dsn string) {
-		p := startForwardedPair(t, dsn)
-		origin := httptest.NewServer(readyWrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprintf(w, "%s %s?%s proto=%s", r.Method, r.URL.Path, r.URL.RawQuery, r.Header.Get("X-Forwarded-Proto"))
-		})))
-		defer origin.Close()
-		h := p.start(t, "web", origin.URL)
-
-		forwardedBefore := expvarCount(t, "ngstoned_peer_forwarded_conns_total")
-		acceptedBefore := expvarCount(t, "ngstoned_peer_accepted_conns_total")
-		requestsBefore := expvarCount(t, "ngstoned_requests_total")
-
-		resp, err := p.clientTo(p.a, fwdRequestWait).Get(fwdURL(p.a, h.hostname, "/hello?x=1"))
-		if err != nil {
-			t.Fatalf("GET via edge-a: %v", err)
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK || string(body) != "GET /hello?x=1 proto=https" {
-			t.Fatalf("response = %d %q", resp.StatusCode, body)
-		}
-		if got := expvarCount(t, "ngstoned_peer_forwarded_conns_total") - forwardedBefore; got != 1 {
-			t.Fatalf("forwarded connections = %d, want 1", got)
-		}
-		if got := expvarCount(t, "ngstoned_peer_accepted_conns_total") - acceptedBefore; got != 1 {
-			t.Fatalf("accepted peer connections = %d, want 1", got)
-		}
-		if got := expvarCount(t, "ngstoned_requests_total") - requestsBefore; got != 1 {
-			t.Fatalf("requests counted across both edges = %d, want 1 (the owner counts it, the ingress must not)", got)
-		}
+		forwardedHTTPRequest(t, dsn)
+	})
+	t.Run("separate peer listen", func(t *testing.T) {
+		forEachForwardStorage(t, func(t *testing.T, dsn string) {
+			forwardedHTTPRequest(t, dsn, withSeparatePeerListen())
+		})
 	})
 }
 

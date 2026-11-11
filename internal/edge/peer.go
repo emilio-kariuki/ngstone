@@ -18,6 +18,7 @@ import (
 	"math/big"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -708,7 +709,26 @@ func (p *peerForwarder) run(client *replayConn, upstream *tls.Conn) {
 	splice(client.Conn, upstream, p.srv.limitsOrDefault().TCPIdleTimeout, peerHalfCloseGrace)
 }
 
+func validatePeerListen(listen string) error {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("edge: invalid peer listen address %q: %w", listen, err)
+	}
+	if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+		return fmt.Errorf("edge: peer listen address %q must name a port from 1 to 65535", listen)
+	}
+	if host != "" {
+		if _, err := netip.ParseAddr(host); err != nil {
+			return fmt.Errorf("edge: invalid peer listen address %q: the host must be an IP address or empty", listen)
+		}
+	}
+	return nil
+}
+
 func validatePeerAddr(cfg Config, hasStorage bool) error {
+	if cfg.PeerListen != "" && cfg.PeerAddr == "" {
+		return errors.New("edge: a peer listen address requires a peer address")
+	}
 	if !hasStorage {
 		return errors.New("edge: a peer address requires durable storage")
 	}
@@ -721,6 +741,9 @@ func validatePeerAddr(cfg Config, hasStorage bool) error {
 	}
 	if ap.Addr().IsUnspecified() || ap.Port() == 0 {
 		return fmt.Errorf("edge: peer address %q must name a specific address and port", cfg.PeerAddr)
+	}
+	if cfg.PeerListen != "" {
+		return validatePeerListen(cfg.PeerListen)
 	}
 	return nil
 }

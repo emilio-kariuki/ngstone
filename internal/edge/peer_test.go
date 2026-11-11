@@ -1738,3 +1738,78 @@ func TestSpliceGraceEndsHalfOpenConnection(t *testing.T) {
 		}
 	})
 }
+
+func TestValidatePeerListen(t *testing.T) {
+	cases := []struct {
+		name   string
+		addr   string
+		listen string
+		want   string
+	}{
+		{"listen without peer address", "", ":7443", "requires a peer address"},
+		{"hostname", "127.0.0.1:7443", "localhost:7443", "peer listen address"},
+		{"no port", "127.0.0.1:7443", "127.0.0.1", "peer listen address"},
+		{"port zero", "127.0.0.1:7443", ":0", "peer listen address"},
+		{"port too large", "127.0.0.1:7443", ":65536", "peer listen address"},
+		{"port not numeric", "127.0.0.1:7443", ":http", "peer listen address"},
+		{"port only", "127.0.0.1:7443", ":7443", ""},
+		{"unspecified v4", "127.0.0.1:7443", "0.0.0.0:7443", ""},
+		{"unspecified v6", "127.0.0.1:7443", "[::]:7443", ""},
+		{"loopback", "127.0.0.1:7443", "127.0.0.1:7443", ""},
+		{"unspecified peer address", "0.0.0.0:7443", ":7443", "specific address"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validatePeerAddr(Config{PeerAddr: tc.addr, PeerListen: tc.listen}, true)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("validatePeerAddr = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("validatePeerAddr = %v, want it to mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestPeerListenAdvertisesPeerAddr(t *testing.T) {
+	store, err := storage.Open(storage.Config{DSN: filepath.Join(t.TempDir(), "control.db"), EdgeID: "edge-a"})
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	cert, _ := passthroughTestCert(t, peerTestHost)
+	advertised := freeTCPAddr(t)
+	listen := freeTCPAddr(t)
+	s, err := New(Config{
+		ControlAddr:     freeTCPAddr(t),
+		PublicAddr:      freeTCPAddr(t),
+		Domain:          "example.com",
+		TokenSHA256:     sumToken("tok"),
+		PublicScheme:    "https",
+		Storage:         store,
+		PeerAddr:        advertised,
+		PeerListen:      listen,
+		PublicTLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	runServer(t, s)
+
+	c, err := net.DialTimeout("tcp", listen, 2*time.Second)
+	if err != nil {
+		t.Fatalf("peer listener is not accepting on %s: %v", listen, err)
+	}
+	c.Close()
+	if c, err := net.DialTimeout("tcp", advertised, time.Second); err == nil {
+		c.Close()
+		t.Fatalf("something listens on the advertised address %s", advertised)
+	}
+	peerEventually(t, "peer registration", func() bool {
+		peers, err := store.LiveEdgePeers(context.Background(), time.Now())
+		return err == nil && len(peers) == 1 && peers[0].PeerAddr == advertised
+	})
+}

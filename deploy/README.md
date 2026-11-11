@@ -108,6 +108,13 @@ How the container differs from the systemd unit:
   range in `compose.yaml`; the published range must equal `-tcp-ports`
   exactly. Docker sets up forwarding per published port, so keep the range
   small.
+- **Inter-edge forwarding.** Under Docker's bridge network the host's address
+  cannot be bound inside the container. Set `NGSTONE_DATABASE_URL`,
+  `NGSTONE_EDGE_ID` and `NGSTONE_PEER_ADDR` (the host's `ip:port` as the other
+  edges reach it) in `.env`, then uncomment the `-peer-listen=:7443` line and
+  the `"7443:7443"` port in `compose.yaml`. The edge listens on
+  `NGSTONE_PEER_LISTEN` and still advertises `NGSTONE_PEER_ADDR`. Firewall
+  the peer port to the other edges.
 
 To build the image from a checkout instead of pulling it, replace `image:`
 with the commented `build: ../..` in `compose.yaml`, or run
@@ -258,13 +265,13 @@ private address and a peer port to the same root-only environment file on every
 edge:
 
 ```
-NGSTONE_PEER_ADDR=10.0.0.11:4043
+NGSTONE_PEER_ADDR=10.0.0.11:7443
 ```
 
 Then open that port to the other edges only, for example:
 
 ```
-sudo ufw allow from 10.0.0.0/24 to any port 4043 proto tcp
+sudo ufw allow from 10.0.0.0/24 to any port 7443 proto tcp
 ```
 
 Forwarding requires PostgreSQL (not SQLite, not `-insecure`), a concrete
@@ -272,7 +279,10 @@ private address, a certificate for the same domain on every edge (share the
 certificate storage to stay under the ACME duplicate-certificate limit), and
 identical `NGSTONE_VISITOR_OIDC_*` values, including the cookie secret, on
 every edge. Raw TCP tunnels, share links and custom domains are not
-forwarded. With Docker, use host networking.
+forwarded. With Docker's bridge network, set `NGSTONE_PEER_LISTEN` (or
+`-peer-listen`) to the address inside the container and publish that port; see
+[Run with Docker](#run-with-docker). `NGSTONE_PEER_ADDR` stays the address the
+other edges dial.
 
 The peer port must be reachable only from other edges: it accepts at most 64
 concurrent handshakes with a 5 second deadline and has no per-source limit.
