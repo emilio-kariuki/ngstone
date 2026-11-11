@@ -225,6 +225,9 @@ func (s *Server) requiredAdminRole(r *http.Request) string {
 	if path == "" || path == "/" || path == "/status" || path == "/tunnels" || path == "/observability/tunnels" || path == "/auth/me" || r.URL.Path == "/api/state" {
 		return oidc.RoleViewer
 	}
+	if isDomainStatusPath(path) {
+		return oidc.RoleAdmin
+	}
 	if strings.HasPrefix(path, "/credentials") || strings.HasPrefix(path, "/policies") || strings.HasPrefix(path, "/domains") || strings.HasSuffix(path, "/drain") {
 		return oidc.RoleOperator
 	}

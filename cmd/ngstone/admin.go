@@ -62,6 +62,8 @@ func printAdminUsage(w *os.File) {
 	fmt.Fprintln(w, "  domains list                               list durable custom domains")
 	fmt.Fprintln(w, "  domains add --domain NAME                  register a custom domain")
 	fmt.Fprintln(w, "  domains delete <id>                        delete a custom domain")
+	fmt.Fprintln(w, "  domains activate <id>                      activate a custom domain (administrators only)")
+	fmt.Fprintln(w, "  domains disable <id>                       disable a custom domain (administrators only)")
 	fmt.Fprintln(w, "  tunnel drain <hostname|subdomain>          gracefully drain a tunnel")
 }
 
@@ -494,7 +496,7 @@ func cmdAdminPolicies(args []string) int {
 
 func cmdAdminDomains(args []string) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
-		fmt.Fprintln(os.Stderr, "usage: ngstone admin domains <list|add|delete>")
+		fmt.Fprintln(os.Stderr, "usage: ngstone admin domains <list|add|delete|activate|disable>")
 		return 2
 	}
 	switch args[0] {
@@ -516,7 +518,7 @@ func cmdAdminDomains(args []string) int {
 			return printAdminJSON(list)
 		}
 		for _, value := range list {
-			fmt.Printf("%s\t%s\t%s\n", value.ID, value.Domain, value.Status)
+			fmt.Printf("%s\t%s\t%s\t%s\n", value.ID, value.Domain, value.TunnelID, value.Status)
 		}
 		return 0
 	case "add":
@@ -556,6 +558,30 @@ func cmdAdminDomains(args []string) int {
 			return printAdminClientError(err)
 		}
 		fmt.Printf("domain %s deleted\n", positionals[0])
+		return 0
+	case "activate", "disable":
+		status := "active"
+		if args[0] == "disable" {
+			status = "disabled"
+		}
+		fs, flags := newAdminFlagSet("admin domains " + args[0])
+		positionals, err := parsePermissive(fs, args[1:])
+		if err != nil || len(positionals) != 1 {
+			fmt.Fprintf(os.Stderr, "usage: ngstone admin domains %s <id> [--server URL] [--token TOKEN] [--json]\n", args[0])
+			return 2
+		}
+		client, err := adminClient(flags)
+		if err != nil {
+			return printAdminClientError(err)
+		}
+		var value adminapi.CustomDomain
+		if err := client.Post(adminapi.APIPrefix+"/domains/"+url.PathEscape(positionals[0])+"/status", adminapi.CustomDomainStatusRequest{Status: status}, &value); err != nil {
+			return printAdminClientError(err)
+		}
+		if flags.json {
+			return printAdminJSON(value)
+		}
+		fmt.Printf("domain %s %s\n", value.Domain, value.Status)
 		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "ngstone: unknown admin domains subcommand %q\n", args[0])

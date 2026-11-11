@@ -78,14 +78,19 @@ type CustomDomainRequest struct {
 	Status   string `json:"status,omitempty"`
 }
 
+type CustomDomainStatusRequest struct {
+	Status string `json:"status"`
+}
+
 type CustomDomain struct {
-	ID        string    `json:"id"`
-	Domain    string    `json:"domain"`
-	TunnelID  string    `json:"tunnel_id,omitempty"`
-	OwnerID   string    `json:"owner_id"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID          string     `json:"id"`
+	Domain      string     `json:"domain"`
+	TunnelID    string     `json:"tunnel_id,omitempty"`
+	OwnerID     string     `json:"owner_id"`
+	Status      string     `json:"status"`
+	ActivatedAt *time.Time `json:"activated_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 type DrainResponse struct {

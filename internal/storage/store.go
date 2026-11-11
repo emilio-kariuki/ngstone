@@ -140,13 +140,14 @@ type AuditEvent struct {
 }
 
 type CustomDomain struct {
-	ID        string    `json:"id"`
-	Domain    string    `json:"domain"`
-	TunnelID  string    `json:"tunnel_id,omitempty"`
-	OwnerID   string    `json:"owner_id"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID          string     `json:"id"`
+	Domain      string     `json:"domain"`
+	TunnelID    string     `json:"tunnel_id,omitempty"`
+	OwnerID     string     `json:"owner_id"`
+	Status      string     `json:"status"`
+	ActivatedAt *time.Time `json:"activated_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 type CustomDomainSpec struct {
@@ -1384,8 +1385,38 @@ func validCustomDomain(domain string) bool {
 	return strings.Trim(last, "0123456789") != ""
 }
 
+const customDomainColumns = `id, domain, COALESCE(tunnel_id, ''), owner_id, status, activated_at, created_at, updated_at`
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanCustomDomain(row rowScanner) (CustomDomain, error) {
+	var value CustomDomain
+	var activatedAt sql.NullString
+	var createdAt, updatedAt string
+	if err := row.Scan(&value.ID, &value.Domain, &value.TunnelID, &value.OwnerID, &value.Status, &activatedAt, &createdAt, &updatedAt); err != nil {
+		return CustomDomain{}, err
+	}
+	var err error
+	if activatedAt.Valid {
+		parsed, err := parseTime(activatedAt.String)
+		if err != nil {
+			return CustomDomain{}, err
+		}
+		value.ActivatedAt = &parsed
+	}
+	if value.CreatedAt, err = parseTime(createdAt); err != nil {
+		return CustomDomain{}, err
+	}
+	if value.UpdatedAt, err = parseTime(updatedAt); err != nil {
+		return CustomDomain{}, err
+	}
+	return value, nil
+}
+
 func (s *Store) ListCustomDomains(ctx context.Context, ownerID string) ([]CustomDomain, error) {
-	query := `SELECT id, domain, COALESCE(tunnel_id, ''), owner_id, status, created_at, updated_at FROM custom_domains`
+	query := `SELECT ` + customDomainColumns + ` FROM custom_domains`
 	args := []any{}
 	ownerID = strings.TrimSpace(ownerID)
 	if ownerID != credentials.GlobalOwnerID {
@@ -1400,18 +1431,9 @@ func (s *Store) ListCustomDomains(ctx context.Context, ownerID string) ([]Custom
 	defer rows.Close()
 	var out []CustomDomain
 	for rows.Next() {
-		var value CustomDomain
-		var createdAt, updatedAt string
-		if err := rows.Scan(&value.ID, &value.Domain, &value.TunnelID, &value.OwnerID, &value.Status, &createdAt, &updatedAt); err != nil {
+		value, err := scanCustomDomain(rows)
+		if err != nil {
 			return nil, fmt.Errorf("storage: scan custom domain: %w", err)
-		}
-		value.CreatedAt, err = parseTime(createdAt)
-		if err != nil {
-			return nil, err
-		}
-		value.UpdatedAt, err = parseTime(updatedAt)
-		if err != nil {
-			return nil, err
 		}
 		out = append(out, value)
 	}
@@ -1419,6 +1441,39 @@ func (s *Store) ListCustomDomains(ctx context.Context, ownerID string) ([]Custom
 		return nil, fmt.Errorf("storage: list custom domains: %w", err)
 	}
 	return out, nil
+}
+
+func (s *Store) SetCustomDomainStatus(ctx context.Context, id, status string) (CustomDomain, error) {
+	now := nowString(time.Now().UTC())
+	var result sql.Result
+	var err error
+	switch status {
+	case "active":
+		result, err = s.exec(ctx, `UPDATE custom_domains SET status = 'active', activated_at = $2, updated_at = $2, owner_id = (SELECT t.owner_id FROM tunnels t WHERE t.id = custom_domains.tunnel_id) WHERE id = $1 AND EXISTS (SELECT 1 FROM tunnels t WHERE t.id = custom_domains.tunnel_id AND t.kind IN ('http', 'tls') AND t.remote_port = 0 AND (custom_domains.owner_id = $3 OR t.owner_id = custom_domains.owner_id))`, id, now, credentials.GlobalOwnerID)
+	case "disabled":
+		result, err = s.exec(ctx, `UPDATE custom_domains SET status = $2, activated_at = NULL, updated_at = $3 WHERE id = $1`, id, status, now)
+	default:
+		return CustomDomain{}, ErrInvalid
+	}
+	if err != nil {
+		return CustomDomain{}, fmt.Errorf("storage: set custom domain status: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return CustomDomain{}, fmt.Errorf("storage: set custom domain status: %w", err)
+	}
+	row := s.db.QueryRowContext(ctx, s.bind(`SELECT `+customDomainColumns+` FROM custom_domains WHERE id = $1`), id)
+	value, err := scanCustomDomain(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CustomDomain{}, ErrNotFound
+	}
+	if err != nil {
+		return CustomDomain{}, fmt.Errorf("storage: read custom domain: %w", err)
+	}
+	if count == 0 {
+		return CustomDomain{}, ErrInvalid
+	}
+	return value, nil
 }
 
 func (s *Store) DeleteCustomDomain(ctx context.Context, id, ownerID string) error {

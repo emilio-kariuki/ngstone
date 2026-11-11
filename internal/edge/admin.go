@@ -68,6 +68,9 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleAdminPolicy(w, r, strings.TrimPrefix(path, "/policies/"))
 	case path == "/domains":
 		s.handleAdminDomains(w, r)
+	case isDomainStatusPath(path):
+		id, _ := domainStatusPathID(path)
+		s.handleAdminDomainStatus(w, r, id)
 	case strings.HasPrefix(path, "/domains/"):
 		s.handleAdminDomain(w, r, strings.TrimPrefix(path, "/domains/"))
 	case strings.HasPrefix(path, "/tunnels/") && strings.HasSuffix(path, "/drain"):
@@ -457,6 +460,67 @@ func (s *Server) handleAdminDomain(w http.ResponseWriter, r *http.Request, rawID
 	}
 	s.recordAdminEvent(r, "management custom domain deleted", map[string]string{"domain_id": id})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func domainStatusPathID(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, "/domains/")
+	if !ok {
+		return "", false
+	}
+	id, ok := strings.CutSuffix(rest, "/status")
+	if !ok || id == "" || strings.Contains(id, "/") {
+		return "", false
+	}
+	return id, true
+}
+
+func isDomainStatusPath(path string) bool {
+	_, ok := domainStatusPathID(path)
+	return ok
+}
+
+func (s *Server) handleAdminDomainStatus(w http.ResponseWriter, r *http.Request, rawID string) {
+	if s.storage == nil {
+		writeAdminError(w, http.StatusConflict, "durable_storage_disabled", "durable control-plane storage is not configured")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAdminMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if adminOwnerID(r) != credentials.GlobalOwnerID {
+		writeAdminError(w, http.StatusForbidden, "forbidden", "your role cannot perform this operation")
+		return
+	}
+	id, err := url.PathUnescape(rawID)
+	if err != nil || id == "" || strings.ContainsAny(id, "/\\") {
+		writeAdminError(w, http.StatusNotFound, "not_found", "custom domain not found")
+		return
+	}
+	var request adminapi.CustomDomainStatusRequest
+	if err := decodeAdminJSON(w, r, &request); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	status := strings.TrimSpace(request.Status)
+	if status != "active" && status != "disabled" {
+		writeAdminError(w, http.StatusUnprocessableEntity, "validation_error", "status must be active or disabled")
+		return
+	}
+	domain, err := s.storage.SetCustomDomainStatus(r.Context(), id, status)
+	if err != nil {
+		switch {
+		case errors.Is(err, storage.ErrNotFound):
+			writeAdminError(w, http.StatusNotFound, "not_found", "custom domain not found")
+		case errors.Is(err, storage.ErrInvalid):
+			writeAdminError(w, http.StatusUnprocessableEntity, "validation_error", "domain has no eligible tunnel or its tunnel owner changed")
+		default:
+			writeAdminError(w, http.StatusInternalServerError, "internal_error", "could not change custom domain status")
+		}
+		return
+	}
+	s.recordAdminEvent(r, "management custom domain status changed", map[string]string{"domain_id": domain.ID, "domain": domain.Domain, "status": domain.Status})
+	writeAdminData(w, http.StatusOK, domain)
 }
 
 func (s *Server) customDomainReserved(domain string) bool {

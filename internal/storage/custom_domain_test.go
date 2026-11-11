@@ -135,3 +135,90 @@ func TestNormalizeCustomDomain(t *testing.T) {
 		}
 	}
 }
+
+func TestSetCustomDomainStatusTransitions(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, open func() *Store) {
+		s := open()
+		ctx := t.Context()
+		create := func(domain, tunnelID string) CustomDomain {
+			t.Helper()
+			value, err := s.CreateCustomDomain(ctx, CustomDomainSpec{Domain: domain, OwnerID: "alice", TunnelID: tunnelID})
+			if err != nil {
+				t.Fatalf("create %s: %v", domain, err)
+			}
+			return value
+		}
+		httpTunnel := createTunnel(t, s, "web.example.com", "http", "alice", 0)
+		good := create("good.example.org", httpTunnel)
+
+		active, err := s.SetCustomDomainStatus(ctx, good.ID, "active")
+		if err != nil || active.Status != "active" || active.ActivatedAt == nil {
+			t.Fatalf("activate = %+v, %v", active, err)
+		}
+		disabled, err := s.SetCustomDomainStatus(ctx, good.ID, "disabled")
+		if err != nil || disabled.Status != "disabled" || disabled.ActivatedAt != nil {
+			t.Fatalf("disable = %+v, %v", disabled, err)
+		}
+		var activatedAt *string
+		if err := s.db.QueryRowContext(ctx, s.bind(`SELECT activated_at FROM custom_domains WHERE id = $1`), good.ID).Scan(&activatedAt); err != nil || activatedAt != nil {
+			t.Fatalf("stored activated_at = %v, %v", activatedAt, err)
+		}
+		if _, err := s.SetCustomDomainStatus(ctx, good.ID, "pending"); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("pending status error = %v, want ErrInvalid", err)
+		}
+
+		kindDomain := create("kind.example.org", createTunnel(t, s, "kind.example.com", "http", "alice", 0))
+		portDomain := create("port.example.org", createTunnel(t, s, "port.example.com", "http", "alice", 0))
+		noTunnel := create("none.example.org", "")
+		for _, statement := range []string{
+			`UPDATE tunnels SET kind = 'tcp' WHERE hostname = 'kind.example.com'`,
+			`UPDATE tunnels SET remote_port = 20001 WHERE hostname = 'port.example.com'`,
+		} {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for name, id := range map[string]string{"tcp kind": kindDomain.ID, "non-zero port": portDomain.ID, "no tunnel": noTunnel.ID} {
+			if _, err := s.SetCustomDomainStatus(ctx, id, "active"); !errors.Is(err, ErrInvalid) {
+				t.Errorf("%s: error = %v, want ErrInvalid", name, err)
+			}
+			var status string
+			if err := s.db.QueryRowContext(ctx, s.bind(`SELECT status FROM custom_domains WHERE id = $1`), id).Scan(&status); err != nil || status != "pending" {
+				t.Errorf("%s: stored status = %q, %v; want pending", name, status, err)
+			}
+		}
+		if _, err := s.SetCustomDomainStatus(ctx, "missing", "active"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("unknown id error = %v, want ErrNotFound", err)
+		}
+		if _, err := s.SetCustomDomainStatus(ctx, "missing", "disabled"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("unknown id disable error = %v, want ErrNotFound", err)
+		}
+	})
+}
+
+func TestActivateSnapshotsTunnelOwner(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, open func() *Store) {
+		s := open()
+		ctx := t.Context()
+		tunnelID := createTunnel(t, s, "web.example.com", "http", "bob", 0)
+		global, err := s.CreateCustomDomain(ctx, CustomDomainSpec{Domain: "global.example.org", OwnerID: credentials.GlobalOwnerID, TunnelID: tunnelID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		activated, err := s.SetCustomDomainStatus(ctx, global.ID, "active")
+		if err != nil || activated.OwnerID != "bob" {
+			t.Fatalf("activated owner = %q, %v; want bob", activated.OwnerID, err)
+		}
+
+		owned, err := s.CreateCustomDomain(ctx, CustomDomainSpec{Domain: "owned.example.org", OwnerID: "bob", TunnelID: tunnelID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE tunnels SET owner_id = 'carol' WHERE hostname = 'web.example.com'`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SetCustomDomainStatus(ctx, owned.ID, "active"); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("activation after tunnel owner change = %v, want ErrInvalid", err)
+		}
+	})
+}
