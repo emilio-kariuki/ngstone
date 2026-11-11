@@ -59,7 +59,8 @@ func (s *Server) handleWebSocketControl(ctx context.Context, w http.ResponseWrit
 		http.Error(w, "edge is shutting down", http.StatusServiceUnavailable)
 		return
 	}
-	defer s.controlConns.Done()
+	leave := sync.OnceFunc(s.controlConns.Done)
+	defer leave()
 	admission := s.fallbackAdmission()
 	if admission == nil || !admission.tryAcquire() {
 		http.Error(w, "too many connections", http.StatusServiceUnavailable)
@@ -84,7 +85,7 @@ func (s *Server) handleWebSocketControl(ctx context.Context, w http.ResponseWrit
 				local:  websocketAddr{network: "tcp", value: r.Host},
 				remote: websocketAddr{network: "tcp", value: r.RemoteAddr},
 			}
-			s.handleControlConnTransport(ctx, conn, release, false, false)
+			s.handleControlConnTransport(ctx, conn, release, leave, false, false)
 		},
 	}
 	wsServer.ServeHTTP(w, r)

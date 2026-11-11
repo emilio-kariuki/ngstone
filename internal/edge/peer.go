@@ -168,6 +168,8 @@ type peerForwarder struct {
 	splices  sync.WaitGroup
 
 	beforePublish func()
+	quit          context.Context
+	quitCancel    context.CancelFunc
 
 	ln     net.Listener
 	public *sniListener
@@ -178,7 +180,10 @@ func newPeerForwarder(s *Server) (*peerForwarder, error) {
 	if err != nil {
 		return nil, fmt.Errorf("edge: generating peer identity: %w", err)
 	}
+	quit, quitCancel := context.WithCancel(context.Background())
 	return &peerForwarder{
+		quit:         quit,
+		quitCancel:   quitCancel,
 		srv:          s,
 		store:        s.storage,
 		selfID:       s.storage.EdgeID(),
@@ -333,6 +338,7 @@ func (p *peerForwarder) stop() {
 	p.spliceMu.Lock()
 	p.draining = true
 	p.spliceMu.Unlock()
+	p.quitCancel()
 	ctx, cancel := context.WithTimeout(context.Background(), peerDeleteTimeout)
 	defer cancel()
 	slogStorageError("purge edge shares", p.store.PurgeEdgeShares(ctx, p.selfID))
@@ -855,6 +861,16 @@ func (p *peerForwarder) run(client net.Conn, upstream *tls.Conn, forwarded *expv
 	defer metricActivePeerForwards.Add(-1)
 	defer client.Close()
 	defer upstream.Close()
+	p.spliceUntilDone(context.Background(), client, upstream)
+}
+
+func (p *peerForwarder) spliceUntilDone(ctx context.Context, client, upstream net.Conn) {
+	closeBoth := func() {
+		client.Close()
+		upstream.Close()
+	}
+	defer context.AfterFunc(ctx, closeBoth)()
+	defer context.AfterFunc(p.quit, closeBoth)()
 	splice(client, upstream, p.srv.limitsOrDefault().TCPIdleTimeout, peerHalfCloseGrace)
 }
 

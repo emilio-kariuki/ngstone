@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -966,5 +968,63 @@ func TestCrossOwnerSameSecretNeverAdmitsConnector(t *testing.T) {
 	}
 	if cl.c.srv.shares.count() != 0 {
 		t.Fatal("the refused share stayed registered on the second edge")
+	}
+}
+
+func waitWithin(t *testing.T, d time.Duration, what string, f func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		f()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
+		t.Fatalf("%s did not finish within %s", what, d)
+	}
+}
+
+func TestForwardedControlSpliceEndsAtShutdown(t *testing.T) {
+	for _, trigger := range []string{"context", "stop"} {
+		t.Run(trigger, func(t *testing.T) {
+			cl := newShareCluster(t)
+			startShare(t, cl.b, "the-link-secret", nil)
+			ctx, cancel := context.WithCancel(context.Background())
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			served := make(chan struct{})
+			go func() {
+				cl.a.srv.serveControl(ctx, ln)
+				close(served)
+			}()
+			t.Cleanup(func() {
+				cancel()
+				ln.Close()
+				<-served
+			})
+
+			d := dialConnector(t, ln.Addr().String(), "the-link-secret")
+			if d.reply.Type != proto.TypeAuthOK {
+				t.Fatalf("reply = %s %s", d.reply.Type, d.reply.Data)
+			}
+			waitWithin(t, time.Second, "control wait during a live splice", cl.a.srv.controlConns.Wait)
+
+			if trigger == "context" {
+				cancel()
+			} else {
+				cl.a.srv.peers.stop()
+			}
+			waitWithin(t, time.Second, "waitSplices", func() { cl.a.srv.peers.waitSplices(context.Background()) })
+			waitWithin(t, time.Second, "control wait", cl.a.srv.controlConns.Wait)
+
+			d.sess.Control().SetReadDeadline(time.Now().Add(time.Second))
+			if _, err := d.sess.Control().Read(); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+				t.Fatalf("connector side of the splice stayed open: %v", err)
+			}
+			waitWithin(t, time.Second, "owner edge control wait", cl.b.srv.controlConns.Wait)
+		})
 	}
 }

@@ -133,7 +133,7 @@ func (t *readErrTracker) Read(b []byte) (int, error) {
 	return n, err
 }
 
-func (p *peerForwarder) routeControl(ctx context.Context, conn net.Conn, ip string, releaseUnauth func()) (net.Conn, bool) {
+func (p *peerForwarder) routeControl(ctx context.Context, conn net.Conn, ip string, releaseUnauth, leave func()) (net.Conn, bool) {
 	tracker := &readErrTracker{r: conn}
 	captured, secret, ok := sniffShareSecret(tracker)
 	if !ok && tracker.err != nil {
@@ -199,13 +199,14 @@ func (p *peerForwarder) routeControl(ctx context.Context, conn net.Conn, ip stri
 	defer upstream.Close()
 	defer conn.Close()
 	releaseUnauth()
+	leave()
 	if conn.SetDeadline(time.Time{}) != nil {
 		return nil, true
 	}
 	metricActivePeerForwards.Add(1)
 	defer metricActivePeerForwards.Add(-1)
 	metricPeerControlForwarded.Add(1)
-	splice(conn, upstream, s.limitsOrDefault().TCPIdleTimeout, peerHalfCloseGrace)
+	p.spliceUntilDone(ctx, conn, upstream)
 	return nil, true
 }
 
@@ -223,12 +224,13 @@ func (s *Server) admitForwardedControl(ctx context.Context, pc net.Conn) {
 		pc.Close()
 		return
 	}
-	defer s.controlConns.Done()
+	leave := sync.OnceFunc(s.controlConns.Done)
+	defer leave()
 	defer release()
 	if !writePeerStatus(pc, peerStatusAccept) {
 		pc.Close()
 		return
 	}
 	metricPeerAcceptedConns.Add(1)
-	s.handleControlConnTransport(ctx, pc, release, false, true)
+	s.handleControlConnTransport(ctx, pc, release, leave, false, true)
 }

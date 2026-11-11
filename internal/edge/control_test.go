@@ -383,7 +383,7 @@ func TestHandleControlConnSessionSurvivesPastAuthDeadline(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go s.handleControlConn(ctx, c2, func() {})
+	go s.handleControlConn(ctx, c2, func() {}, func() {})
 
 	clientSess, err := tunnel.Client(c1)
 	if err != nil {

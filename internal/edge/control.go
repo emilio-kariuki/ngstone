@@ -268,20 +268,21 @@ func (s *Server) serveControl(ctx context.Context, ln net.Listener) error {
 			continue
 		}
 		go func() {
-			defer s.controlConns.Done()
+			leave := sync.OnceFunc(s.controlConns.Done)
+			defer leave()
 			var once sync.Once
 			release := func() { once.Do(s.unauthSem.release) }
 			defer release()
-			s.handleControlConn(ctx, conn, release)
+			s.handleControlConn(ctx, conn, release, leave)
 		}()
 	}
 }
 
-func (s *Server) handleControlConn(ctx context.Context, conn net.Conn, releaseUnauth func()) {
-	s.handleControlConnTransport(ctx, conn, releaseUnauth, s.tlsMgr != nil, false)
+func (s *Server) handleControlConn(ctx context.Context, conn net.Conn, releaseUnauth, leave func()) {
+	s.handleControlConnTransport(ctx, conn, releaseUnauth, leave, s.tlsMgr != nil, false)
 }
 
-func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, releaseUnauth func(), applyTLS, forwarded bool) {
+func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, releaseUnauth, leave func(), applyTLS, forwarded bool) {
 	ip := remoteIP(conn)
 
 	deadline := time.Now().Add(authDeadline)
@@ -314,7 +315,7 @@ func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, 
 
 	if !forwarded && s.peers != nil {
 		var done bool
-		if conn, done = s.peers.routeControl(ctx, conn, ip, releaseUnauth); done {
+		if conn, done = s.peers.routeControl(ctx, conn, ip, releaseUnauth, leave); done {
 			return
 		}
 	}
