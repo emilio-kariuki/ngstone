@@ -578,7 +578,14 @@ How it works:
 - On each request the edge strips the session cookie, deletes every
   client-supplied `X-Ngstone-User-*` header (on all tunnels, with or without
   `--oidc`), and sets `X-Ngstone-User-Email`, `X-Ngstone-User-Subject`, and
-  `X-Ngstone-User-Name` for the local app.
+  `X-Ngstone-User-Name` for the local app. Trust these headers only when the
+  app is reachable solely through the tunnel.
+- Limits to know about: every tunnel shares one registrable domain, so
+  `SameSite=Lax` does not separate sibling tunnels and apps still need their own
+  CSRF and `Origin` checks. One identity-provider client is shared by all tunnel
+  owners, so an owner can learn the email, subject, and name of anyone who
+  follows a link to their walled tunnel. Sessions are stateless and cannot be
+  revoked before they expire.
 - `/.ngstone/auth/finish` and `/.ngstone/auth/logout` are reserved on tunnels
   that use `--oidc`. Visit `/.ngstone/auth/logout` to sign out.
 

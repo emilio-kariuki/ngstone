@@ -317,6 +317,16 @@ $ ngstone preview 3000 --ttl 30m --policy-file traffic-policy.json`}
         <code>/.ngstone/auth/logout</code>.
       </p>
       <p>
+        Trust those headers only when your app is reachable solely through the
+        tunnel. All tunnels share one registrable domain, so{" "}
+        <code>SameSite=Lax</code> does not separate sibling tunnels and your app
+        still needs its own CSRF and <code>Origin</code> checks. One identity
+        provider client is shared by all tunnel owners, so an owner can learn
+        the email, subject, and name of anyone who follows a link to their
+        walled tunnel. Sessions are stateless and cannot be revoked before they
+        expire.
+      </p>
+      <p>
         The edge operator configures one dedicated OIDC client for visitors,
         separate from the ops-dashboard login:
       </p>
