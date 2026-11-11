@@ -278,10 +278,10 @@ func (s *Server) serveControl(ctx context.Context, ln net.Listener) error {
 }
 
 func (s *Server) handleControlConn(ctx context.Context, conn net.Conn, releaseUnauth func()) {
-	s.handleControlConnTransport(ctx, conn, releaseUnauth, s.tlsMgr != nil)
+	s.handleControlConnTransport(ctx, conn, releaseUnauth, s.tlsMgr != nil, false)
 }
 
-func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, releaseUnauth func(), applyTLS bool) {
+func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, releaseUnauth func(), applyTLS, forwarded bool) {
 	ip := remoteIP(conn)
 
 	deadline := time.Now().Add(authDeadline)
@@ -312,6 +312,13 @@ func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, 
 		conn = tlsConn
 	}
 
+	if !forwarded && s.peers != nil {
+		var done bool
+		if conn, done = s.peers.routeControl(ctx, conn, ip, releaseUnauth); done {
+			return
+		}
+	}
+
 	sess, err := tunnel.Server(conn)
 	if err != nil {
 		slog.Warn("edge: control session setup failed", "ip", ip, "err", err)
@@ -322,7 +329,7 @@ func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, 
 	remote, _ := netip.ParseAddrPort(conn.RemoteAddr().String())
 
 	authCtx, cancelAuth := context.WithDeadline(ctx, deadline)
-	as, err := s.authenticate(authCtx, sess, ip, remote, deadline)
+	as, err := s.authenticate(authCtx, sess, ip, remote, deadline, forwarded)
 	cancelAuth()
 	if err != nil {
 		sess.Close("auth failed")
@@ -351,7 +358,7 @@ func remoteIP(conn net.Conn) string {
 	return addrPort.Addr().String()
 }
 
-func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip string, remote netip.AddrPort, deadline time.Time) (*AgentSession, error) {
+func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip string, remote netip.AddrPort, deadline time.Time, forwarded bool) (*AgentSession, error) {
 	ctrl := sess.Control()
 	if err := ctrl.SetReadDeadline(deadline); err != nil {
 		return nil, err
@@ -368,6 +375,9 @@ func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip strin
 		return nil, err
 	}
 	if msg.Type != proto.TypeAuth {
+		if forwarded {
+			s.authLimiter.recordFailure(ip)
+		}
 		ctrl.Write(proto.TypeError, msg.ID, proto.Error{Code: proto.CodeMalformed, Message: "expected auth as first message"})
 		slog.Warn("edge: auth attempt", "ip", ip, "result", "unexpected_first_message", "type", msg.Type)
 		return nil, fmt.Errorf("edge: expected auth, got %q", msg.Type)
@@ -377,6 +387,13 @@ func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip strin
 		ctrl.Write(proto.TypeError, msg.ID, proto.Error{Code: proto.CodeMalformed, Message: "malformed auth"})
 		slog.Warn("edge: auth attempt", "ip", ip, "result", "malformed", "err", err)
 		return nil, err
+	}
+
+	if forwarded && (auth.ShareSecret == "" || auth.Token != "") {
+		s.authLimiter.recordFailure(ip)
+		ctrl.Write(proto.TypeError, msg.ID, proto.Error{Code: proto.CodeMalformed, Message: "forwarded sessions carry share_secret auth only"})
+		slog.Warn("edge: auth attempt", "ip", ip, "result", "forwarded_not_share")
+		return nil, errors.New("edge: forwarded session is not a share connector")
 	}
 
 	if auth.Token != "" && auth.ShareSecret != "" {

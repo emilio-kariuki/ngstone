@@ -124,15 +124,19 @@ func (o *Operator) once(ctx context.Context, typ string, data any) (proto.Msg, e
 
 // ListShares returns every live share on the edge.
 func (o *Operator) ListShares(ctx context.Context) ([]proto.ShareInfo, error) {
-	m, err := o.once(ctx, proto.TypeListShares, proto.ListShares{})
-	if err != nil {
-		return nil, err
-	}
-	ok, err := proto.Decode[proto.SharesOK](m)
+	ok, err := o.ListSharesOK(ctx)
 	if err != nil {
 		return nil, err
 	}
 	return ok.Shares, nil
+}
+
+func (o *Operator) ListSharesOK(ctx context.Context) (proto.SharesOK, error) {
+	m, err := o.once(ctx, proto.TypeListShares, proto.ListShares{})
+	if err != nil {
+		return proto.SharesOK{}, err
+	}
+	return proto.Decode[proto.SharesOK](m)
 }
 
 // Unshare revokes a share by id.

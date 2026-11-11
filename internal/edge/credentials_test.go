@@ -35,7 +35,7 @@ func TestScopedCredentialAuthAndBindScope(t *testing.T) {
 			ProtoVersions: []int{proto.ProtoVersion},
 		})
 	}()
-	as, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second))
+	as, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second), false)
 	if err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestScopedCredentialRevocationClosesLiveSession(t *testing.T) {
 			ProtoVersions: []int{proto.ProtoVersion},
 		})
 	}()
-	as, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second))
+	as, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second), false)
 	if err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestScopedCredentialAuthenticationModesRemainSeparate(t *testing.T) {
 			if err := client.Control().Write(proto.TypeAuth, 1, auth); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second)); err == nil {
+			if _, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second), false); err == nil {
 				t.Fatal("authentication unexpectedly succeeded")
 			}
 			reply, err := proto.Decode[proto.Error](readType(t, client.Control(), tc.typ))

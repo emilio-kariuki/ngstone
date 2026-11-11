@@ -851,6 +851,14 @@ func (s *Server) handleShare(as *AgentSession, ctrl *proto.Conn, id uint64, req 
 	if replaced != nil {
 		s.closeShare(replaced, proto.ShareReasonSharerGone)
 	}
+	if s.peers != nil {
+		if err := s.publishShare(sh); err != nil {
+			slogStorageError("publish share", err)
+			s.closeShare(sh, "publish failed")
+			ctrl.Write(proto.TypeShareErr, id, proto.ShareErr{Code: proto.CodeInternal, Message: "could not publish share to the edge group"})
+			return
+		}
+	}
 	slog.Info("edge: share registered", "share_id", sh.id, "session_id", as.ID, "label", sh.label, "targets", shareTargetsSummary(sh.targets), "expires_at", sh.expiresAt.UTC().Format(time.RFC3339), "max_conns", sh.policy.maxConns, "max_connectors", sh.policy.maxConnectors, "max_uses", sh.policy.maxUses, "approve", sh.policy.approve, "passphrase", sh.policy.hasPassphrase, "e2e", sh.e2e, "allow_cidrs", len(sh.policy.allow))
 	s.notifyWatchers(sh, proto.ShareEvent{ShareID: sh.id, Event: proto.ShareEventRegistered, AtMS: time.Now().UnixMilli(), ExpiresAtMS: sh.expiresAt.UnixMilli(), Label: sh.label})
 	ctrl.Write(proto.TypeShareOK, id, proto.ShareOK{ShareID: sh.id, ExpiresAtMS: sh.expiresAt.UnixMilli()})
@@ -859,6 +867,10 @@ func (s *Server) handleShare(as *AgentSession, ctrl *proto.Conn, id uint64, req 
 func (s *Server) handleUnshare(as *AgentSession, ctrl *proto.Conn, id uint64, req proto.Unshare) {
 	sh, ok := s.shares.byShareID(req.ShareID)
 	if !ok {
+		if s.peers != nil && s.revokeRemoteShare(req.ShareID) {
+			ctrl.Write(proto.TypeUnshareOK, id, proto.UnshareOK{ShareID: req.ShareID})
+			return
+		}
 		ctrl.Write(proto.TypeError, id, proto.Error{Code: proto.CodeShareNotFound, Message: "no such live share"})
 		return
 	}
@@ -870,7 +882,7 @@ func (s *Server) handleUnshare(as *AgentSession, ctrl *proto.Conn, id uint64, re
 func (s *Server) handleShareUpdate(as *AgentSession, ctrl *proto.Conn, id uint64, req proto.ShareUpdate) {
 	sh, ok := s.shares.byShareID(req.ShareID)
 	if !ok {
-		ctrl.Write(proto.TypeShareErr, id, proto.ShareErr{Code: proto.CodeShareNotFound, Message: "no such live share"})
+		ctrl.Write(proto.TypeShareErr, id, proto.ShareErr{Code: proto.CodeShareNotFound, Message: s.shareNotFoundMessage()})
 		return
 	}
 	expiresAt := time.UnixMilli(req.ExpiresAtMS)
@@ -887,6 +899,12 @@ func (s *Server) handleShareUpdate(as *AgentSession, ctrl *proto.Conn, id uint64
 		return
 	}
 	slog.Info("edge: share extended", "share_id", sh.id, "by_session", as.ID, "expires_at", expiresAt.UTC().Format(time.RFC3339))
+	if s.peers != nil {
+		if err := s.publishShare(sh); err != nil {
+			slogStorageError("publish share", err)
+			metricShareDirectoryErrors.Add(1)
+		}
+	}
 	s.notifySharer(sh, proto.ShareEvent{ShareID: sh.id, Event: proto.ShareEventExtended, AtMS: time.Now().UnixMilli(), ExpiresAtMS: expiresAt.UnixMilli()})
 	for _, c := range connectors {
 		c.Sess.Control().Write(proto.TypeShareUpdated, c.IDGen.Next(), proto.ShareUpdated{ShareID: sh.id, ExpiresAtMS: expiresAt.UnixMilli()})
@@ -897,7 +915,7 @@ func (s *Server) handleShareUpdate(as *AgentSession, ctrl *proto.Conn, id uint64
 func (s *Server) handleKick(as *AgentSession, ctrl *proto.Conn, id uint64, req proto.Kick) {
 	sh, ok := s.shares.byShareID(req.ShareID)
 	if !ok {
-		ctrl.Write(proto.TypeError, id, proto.Error{Code: proto.CodeShareNotFound, Message: "no such live share"})
+		ctrl.Write(proto.TypeError, id, proto.Error{Code: proto.CodeShareNotFound, Message: s.shareNotFoundMessage()})
 		return
 	}
 	if s.shares.resolvePending(sh, req.ConnectorID, false) {
@@ -970,7 +988,11 @@ func (s *Server) handleApprove(as *AgentSession, ctrl *proto.Conn, id uint64, re
 }
 
 func (s *Server) handleListShares(as *AgentSession, ctrl *proto.Conn, id uint64) {
-	ctrl.Write(proto.TypeSharesOK, id, proto.SharesOK{Shares: s.shares.list(as)})
+	ok := proto.SharesOK{Shares: s.shares.list(as)}
+	if s.peers != nil {
+		ok.Edge = s.peers.selfID
+	}
+	ctrl.Write(proto.TypeSharesOK, id, ok)
 }
 
 func (s *Server) handleWatchShares(as *AgentSession, ctrl *proto.Conn, id uint64) {
@@ -1127,6 +1149,9 @@ func (s *Server) closeShare(sh *share, reason string) {
 		return
 	}
 	slog.Info("edge: share closed", "share_id", sh.id, "reason", reason, "connectors", len(connectors), "conns", len(conns))
+	if s.peers != nil && !s.shares.holds(sh.secretHash) {
+		s.withdrawShare(sh)
+	}
 
 	s.notifySharer(sh, proto.ShareEvent{
 		ShareID: sh.id,

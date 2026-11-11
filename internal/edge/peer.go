@@ -287,7 +287,9 @@ func (p *peerForwarder) heartbeat(ctx context.Context) error {
 	if ttl <= 0 {
 		ttl = storage.DefaultLeaseTTL
 	}
+	p.purgeShares(ctx)
 	p.beat(ctx, ttl)
+	p.republishShares()
 	ticker := time.NewTicker(ttl / 3)
 	defer ticker.Stop()
 	for {
@@ -315,6 +317,7 @@ func (p *peerForwarder) beat(ctx context.Context, ttl time.Duration) {
 	}
 	slogStorageError("upsert edge peer", err)
 	p.refreshPins()
+	p.syncShares(ctx, now)
 }
 
 func (p *peerForwarder) stop() {
@@ -326,6 +329,7 @@ func (p *peerForwarder) stop() {
 	p.spliceMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), peerDeleteTimeout)
 	defer cancel()
+	slogStorageError("purge edge shares", p.store.PurgeEdgeShares(ctx, p.selfID))
 	slogStorageError("delete edge peer", p.store.DeleteEdgePeer(ctx, p.selfID))
 	if p.ln != nil {
 		p.ln.Close()
@@ -452,9 +456,10 @@ func (p *peerForwarder) serveConn(ctx context.Context, c net.Conn) {
 		})
 		return
 	}
-	if kind != peerFrameSNI {
-		writePeerStatus(tc, peerStatusNotOwner)
-		tc.Close()
+	if kind == peerFrameControl {
+		held = false
+		p.handshakeSem.release()
+		p.srv.admitForwardedControl(ctx, &peerConn{Conn: tc, remote: remote})
 		return
 	}
 	if err := c.SetDeadline(time.Time{}); err != nil {

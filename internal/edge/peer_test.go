@@ -2216,6 +2216,11 @@ func TestPeerServerRefusesTCPAndControlFramesForNow(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.kind == peerFrameControl {
+				b.srv.controlMu.Lock()
+				b.srv.controlDraining = true
+				b.srv.controlMu.Unlock()
+			}
 			conn, err := dialPeerTLS(t, a.srv.peers.clientTLS(b.pin()), b.peerAddr())
 			if err != nil {
 				t.Fatalf("handshake: %v", err)

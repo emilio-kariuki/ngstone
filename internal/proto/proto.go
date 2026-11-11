@@ -395,6 +395,7 @@ type ShareInfo struct {
 
 type SharesOK struct {
 	Shares []ShareInfo `json:"shares"`
+	Edge   string      `json:"edge,omitempty"`
 }
 
 // WatchShares subscribes an operator session to every share's events.

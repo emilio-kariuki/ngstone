@@ -84,7 +84,7 @@ func (s *Server) handleWebSocketControl(ctx context.Context, w http.ResponseWrit
 				local:  websocketAddr{network: "tcp", value: r.Host},
 				remote: websocketAddr{network: "tcp", value: r.RemoteAddr},
 			}
-			s.handleControlConnTransport(ctx, conn, release, false)
+			s.handleControlConnTransport(ctx, conn, release, false, false)
 		},
 	}
 	wsServer.ServeHTTP(w, r)

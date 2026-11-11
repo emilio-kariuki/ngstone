@@ -987,10 +987,11 @@ func cmdShares(args []string) int {
 		return 0
 	}
 
-	shares, err := op.ListShares(ctx)
+	listed, err := op.ListSharesOK(ctx)
 	if err != nil {
 		return opError(err)
 	}
+	shares := listed.Shares
 	if of.jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -999,10 +1000,12 @@ func cmdShares(args []string) int {
 	}
 	if len(shares) == 0 {
 		fmt.Println("no live shares")
-		return 0
 	}
 	for _, s := range shares {
 		formatShareInfo(os.Stdout, s)
+	}
+	if listed.Edge != "" {
+		fmt.Printf("Shares on edge %s; other edges may hold more.\n", listed.Edge)
 	}
 	return 0
 }
