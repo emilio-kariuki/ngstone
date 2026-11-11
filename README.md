@@ -488,14 +488,17 @@ How rules combine:
   Redirect rules are not checked for loops: a rule whose target matches the
   rule itself redirects repeatedly until the browser stops.
 - `cors` answers preflight requests (`OPTIONS` with `Origin` and
-  `Access-Control-Request-Method`) at the edge with `204`, before basic
-  auth and before rules run, because browsers never send credentials on a
-  preflight. On proxied responses the edge removes any `Access-Control-*`
-  headers the app set and adds its own for allowed origins.
+  `Access-Control-Request-Method`) at the edge with `204`, after the
+  CIDR allow list and the per-IP rate limit but before basic auth, visitor
+  login and rules, because browsers never send credentials on a preflight.
+  On proxied responses the edge removes any `Access-Control-*` headers the
+  app set and adds its own for allowed origins.
   `allowed_origins` lists exact `scheme://host[:port]` origins, or is
   `["*"]` (not allowed with `allow_credentials`). `allowed_methods`
   defaults to `GET, HEAD, POST`; `allowed_headers` may be `["*"]` to echo
-  the requested headers; `max_age` is in seconds (max 86400).
+  the requested headers; `max_age` is in seconds (max 86400). `*` is
+  accepted in `allowed_origins` and `allowed_headers` only as the whole
+  entry and is rejected in `allowed_methods`.
 
 Header actions cannot touch hop-by-hop headers (`Connection`, `Keep-Alive`,
 `TE`, `Trailer`, `Transfer-Encoding`, `Upgrade`, `Proxy-*`), or headers

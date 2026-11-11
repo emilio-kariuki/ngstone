@@ -253,11 +253,14 @@ $ ngstone preview 3000 --ttl 30m --policy-file traffic-policy.json`}
       <Callout variant="note" title="CORS at the edge">
         Preflight requests (<code>OPTIONS</code> with <code>Origin</code> and{" "}
         <code>Access-Control-Request-Method</code>) are answered with{" "}
-        <code>204</code> before basic auth and before rules run, because
-        browsers never send credentials on a preflight; they never reach
-        your app. On proxied responses the edge drops any{" "}
+        <code>204</code>, after the CIDR allow list and the per-IP rate limit
+        but before basic auth, visitor login and rules, because browsers
+        never send credentials on a preflight; they never reach your app. On
+        proxied responses the edge drops any{" "}
         <code>Access-Control-*</code> headers your app set and adds its own
-        for allowed origins.
+        for allowed origins. <code>*</code> is accepted in{" "}
+        <code>allowed_origins</code> and <code>allowed_headers</code> only as
+        the whole entry and is rejected in <code>allowed_methods</code>.
       </Callout>
       <Callout variant="warning" title="Reserved headers">
         Header actions cannot change hop-by-hop headers (
