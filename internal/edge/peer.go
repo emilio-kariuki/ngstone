@@ -513,7 +513,7 @@ const (
 
 var errPeerLookupCap = errors.New("edge: peer lookup capacity reached")
 
-func (p *peerForwarder) queryOwners(key string) (any, error) {
+func (p *peerForwarder) queryOwners(key string) ([]storage.EdgePeer, error) {
 	if !p.lookupSem.tryAcquire() {
 		metricPeerRejectedLookupCap.Add(1)
 		return nil, errPeerLookupCap
@@ -525,8 +525,30 @@ func (p *peerForwarder) queryOwners(key string) (any, error) {
 	return p.store.LookupHostOwners(ctx, key, p.selfID, time.Now())
 }
 
-func (p *peerForwarder) resolve(key string) ([]storage.EdgePeer, lookupResult) {
-	v, err, _ := p.lookups.Do(key, func() (any, error) { return p.queryOwners(key) })
+func (p *peerForwarder) lookupOnce(key string) (any, error) {
+	if entry, ok := p.owners.Get(key); ok {
+		return entry, nil
+	}
+	if _, miss := p.misses.Get(key); miss {
+		return (*ownerEntry)(nil), nil
+	}
+	owners, err := p.queryOwners(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(owners) == 0 {
+		p.misses.Add(key, struct{}{})
+		return (*ownerEntry)(nil), nil
+	}
+	entry := &ownerEntry{peers: owners, resolved: time.Now()}
+	p.ownersMu.Lock()
+	p.owners.Add(key, entry)
+	p.ownersMu.Unlock()
+	return entry, nil
+}
+
+func (p *peerForwarder) resolve(key string) (*ownerEntry, lookupResult) {
+	v, err, _ := p.lookups.Do(key, func() (any, error) { return p.lookupOnce(key) })
 	if err != nil {
 		if !errors.Is(err, errPeerLookupCap) {
 			metricPeerLookupErrors.Add(1)
@@ -534,15 +556,15 @@ func (p *peerForwarder) resolve(key string) ([]storage.EdgePeer, lookupResult) {
 		}
 		return nil, lookupRefused
 	}
-	owners, ok := v.([]storage.EdgePeer)
+	entry, ok := v.(*ownerEntry)
 	if !ok {
 		metricPeerLookupErrors.Add(1)
 		return nil, lookupRefused
 	}
-	if len(owners) == 0 {
+	if entry == nil {
 		return nil, lookupNone
 	}
-	return owners, lookupFound
+	return entry, lookupFound
 }
 
 func (p *peerForwarder) candidates(key string) (*ownerEntry, lookupResult) {
@@ -552,18 +574,7 @@ func (p *peerForwarder) candidates(key string) (*ownerEntry, lookupResult) {
 	if _, miss := p.misses.Get(key); miss {
 		return nil, lookupNone
 	}
-	owners, res := p.resolve(key)
-	switch res {
-	case lookupFound:
-		entry := &ownerEntry{peers: owners, resolved: time.Now()}
-		p.ownersMu.Lock()
-		p.owners.Add(key, entry)
-		p.ownersMu.Unlock()
-		return entry, res
-	case lookupNone:
-		p.misses.Add(key, struct{}{})
-	}
-	return nil, res
+	return p.resolve(key)
 }
 
 func (p *peerForwarder) refresh(key string, used *ownerEntry) (*ownerEntry, lookupResult) {

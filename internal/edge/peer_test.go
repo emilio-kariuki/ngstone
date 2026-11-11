@@ -1038,7 +1038,7 @@ func holdFlight(p *peerForwarder, key string) (release func()) {
 		p.lookups.Do(key, func() (any, error) {
 			close(started)
 			<-gate
-			return p.queryOwners(key)
+			return p.lookupOnce(key)
 		})
 	}()
 	<-started
@@ -1046,8 +1046,8 @@ func holdFlight(p *peerForwarder, key string) (release func()) {
 }
 
 type resolved struct {
-	owners []storage.EdgePeer
-	res    lookupResult
+	entry *ownerEntry
+	res   lookupResult
 }
 
 func resolveConcurrently(p *peerForwarder, key string, n int, release func()) []resolved {
@@ -1057,7 +1057,7 @@ func resolveConcurrently(p *peerForwarder, key string, n int, release func()) []
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			out[i].owners, out[i].res = p.resolve(key)
+			out[i].entry, out[i].res = p.resolve(key)
 		}()
 	}
 	time.Sleep(300 * time.Millisecond)
@@ -1077,8 +1077,8 @@ func TestPeerResolveCoalescesConcurrentLookups(t *testing.T) {
 
 	results := resolveConcurrently(p, peerTestHost, 64, holdFlight(p, peerTestHost))
 	for i, r := range results {
-		if r.res != lookupFound || len(r.owners) != 1 || r.owners[0].EdgeID != "edge-b" {
-			t.Fatalf("resolve %d = %+v, %v; want edge-b", i, r.owners, r.res)
+		if r.res != lookupFound || r.entry == nil || len(r.entry.peers) != 1 || r.entry.peers[0].EdgeID != "edge-b" {
+			t.Fatalf("resolve %d = %+v, %v; want edge-b", i, r.entry, r.res)
 		}
 	}
 	if lookups() != 1 || capped() != 0 {
@@ -1100,8 +1100,8 @@ func TestPeerResolveRefusesWhenEveryLookupSlotIsBusy(t *testing.T) {
 	capped := metricDelta(metricPeerRejectedLookupCap)
 	lookups := metricDelta(metricPeerLookups)
 
-	if owners, res := p.resolve("ninth.example.com"); res != lookupRefused || owners != nil {
-		t.Fatalf("resolve with every slot busy = %+v, %v; want a refusal", owners, res)
+	if entry, res := p.resolve("ninth.example.com"); res != lookupRefused || entry != nil {
+		t.Fatalf("resolve with every slot busy = %+v, %v; want a refusal", entry, res)
 	}
 	if capped() != 1 {
 		t.Fatalf("capped = %d, want 1", capped())
@@ -1110,7 +1110,7 @@ func TestPeerResolveRefusesWhenEveryLookupSlotIsBusy(t *testing.T) {
 	results := resolveConcurrently(p, peerTestHost, 16, holdFlight(p, peerTestHost))
 	for i, r := range results {
 		if r.res != lookupRefused {
-			t.Fatalf("waiter %d = %+v, %v; want every waiter of the flight refused", i, r.owners, r.res)
+			t.Fatalf("waiter %d = %+v, %v; want every waiter of the flight refused", i, r.entry, r.res)
 		}
 	}
 	if capped() != 2 || lookups() != 0 {
@@ -1557,12 +1557,45 @@ func TestPeerForwardCoalescesStaleOwnerLookups(t *testing.T) {
 			t.Fatalf("client %d: %v", i, err)
 		}
 	}
-	t.Logf("lookups=%d capped=%d agentHit=%d", lookups(), capped(), b.agentHit.Load())
 	if b.agentHit.Load() != clients {
 		t.Fatalf("agent hits on edge-b = %d, want %d", b.agentHit.Load(), clients)
 	}
-	if lookups() > 2 || capped() != 0 {
-		t.Fatalf("lookups=%d capped=%d, want at most 2 lookups and no cap rejections", lookups(), capped())
+	if lookups() != 1 || capped() != 0 {
+		t.Fatalf("lookups=%d capped=%d, want exactly 1 lookup (every waiter of the flight shares one cached entry, and a flight re-checks the cache before it queries) and no cap rejections", lookups(), capped())
+	}
+}
+
+func TestPeerForwardSiblingWaitersShareOneEntry(t *testing.T) {
+	pc := newPeerCluster(t)
+	a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
+	registerPeers(t, a, b)
+	b.bindTLS(t, peerTestHost)
+	p := a.srv.peers
+	lookups := metricDelta(metricPeerLookups)
+
+	results := resolveConcurrently(p, peerTestHost, 2, holdFlight(p, peerTestHost))
+	for i, r := range results {
+		if r.res != lookupFound || r.entry == nil {
+			t.Fatalf("resolve %d = %+v, %v; want a found entry", i, r.entry, r.res)
+		}
+	}
+	if results[0].entry != results[1].entry {
+		t.Fatal("two waiters of one lookup received different entries")
+	}
+	if cached, ok := p.owners.Peek(peerTestHost); !ok || cached != results[0].entry {
+		t.Fatalf("cached entry = %p, %v; want the entry both waiters received", cached, ok)
+	}
+	if lookups() != 1 {
+		t.Fatalf("lookups = %d, want 1", lookups())
+	}
+
+	p.owners.Remove(peerTestHost)
+	v, err, _ := p.lookups.Do(peerTestHost, func() (any, error) { return p.lookupOnce(peerTestHost) })
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if cached, ok := p.owners.Peek(peerTestHost); !ok || cached != v {
+		t.Fatalf("cached entry = %p, %v; the flight must cache the entry it returns", cached, ok)
 	}
 }
 
