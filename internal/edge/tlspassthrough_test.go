@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"errors"
+	"expvar"
 	"io"
 	"math/big"
 	"net"
@@ -788,5 +789,121 @@ func TestSNIListenerClosesOversizedClientHello(t *testing.T) {
 	}
 	if h.agentHit.Load() != 0 {
 		t.Fatal("agent saw a stream for an oversized ClientHello")
+	}
+}
+
+func TestSNIListenerClosesStalledClientHelloAtDeadline(t *testing.T) {
+	hello := captureClientHello(t, &tls.Config{ServerName: "secure.example.com", InsecureSkipVerify: true})
+	cases := []struct {
+		name  string
+		write []byte
+	}{
+		{"no bytes sent", nil},
+		{"first half of a real ClientHello", hello[:len(hello)/2]},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTestServer("tok")
+			srv.cfg.Limits.ReadHeaderTimeout = 300 * time.Millisecond
+			raw, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			ln := srv.newSNIListener(raw)
+			defer ln.Close()
+
+			accepted := make(chan net.Conn, 1)
+			go func() {
+				if c, err := ln.Accept(); err == nil {
+					accepted <- c
+				}
+			}()
+
+			conn, err := net.DialTimeout("tcp", raw.Addr().String(), 2*time.Second)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer conn.Close()
+			if len(tc.write) > 0 {
+				if _, err := conn.Write(tc.write); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+			}
+			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			_, err = conn.Read(make([]byte, 1))
+			if err == nil {
+				t.Fatal("read returned data instead of a close")
+			}
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				t.Fatalf("connection was not closed at the peek deadline: %v", err)
+			}
+			select {
+			case c := <-accepted:
+				c.Close()
+				t.Fatal("stalled ClientHello was handed to the terminating path")
+			case <-time.After(200 * time.Millisecond):
+			}
+		})
+	}
+}
+
+func TestSNIListenerPassthroughRejections(t *testing.T) {
+	cases := []struct {
+		name    string
+		prepare func(h *sniHarness)
+		metrics []*expvar.Int
+	}{
+		{
+			name:    "rate limited",
+			metrics: []*expvar.Int{metricRejectedRateLimited, metricTLSRejectedRateLimited},
+		},
+		{
+			name: "per-IP cap",
+			prepare: func(h *sniHarness) {
+				for {
+					if _, ok := h.srv.perIP.acquire("127.0.0.1"); !ok {
+						return
+					}
+				}
+			},
+			metrics: []*expvar.Int{metricRejectedPerIPCap},
+		},
+		{
+			name: "global cap",
+			prepare: func(h *sniHarness) {
+				for h.ln.sem.tryAcquire() {
+				}
+			},
+			metrics: []*expvar.Int{metricTLSRejectedGlobalCap},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			agentCert, agentPool := passthroughTestCert(t, "secure.example.com")
+			h := newSNIHarness(t, agentCert, nil)
+			if tc.name == "rate limited" {
+				h.srv.perIPLimiter = newPerIPLimiter(1, 0, 16)
+			}
+			h.bindTLS(t, "secure.example.com", nil)
+			if tc.prepare != nil {
+				tc.prepare(h)
+			}
+			before := make([]int64, len(tc.metrics))
+			for i, m := range tc.metrics {
+				before[i] = m.Value()
+			}
+			if _, err := dialTLSClient(t, h.addr, nil, &tls.Config{ServerName: "secure.example.com", RootCAs: agentPool}); err == nil {
+				t.Fatal("handshake succeeded despite the rejection")
+			}
+			for i, m := range tc.metrics {
+				if got := m.Value() - before[i]; got != 1 {
+					t.Fatalf("metric %d delta = %d, want 1", i, got)
+				}
+			}
+			if h.agentHit.Load() != 0 {
+				t.Fatal("agent saw a stream for a rejected connection")
+			}
+		})
 	}
 }
