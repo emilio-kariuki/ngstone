@@ -616,6 +616,10 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		bindMsg.OIDC = a.cfg.OIDC
 	}
 
+	if webhookBind != nil && a.cfg.Insecure && !loopbackAddr(sess.RemoteAddr()) {
+		return proto.BindOK{}, errPlaintextWebhookSecret
+	}
+
 	bindID := idgen.Next()
 	if err := ctrl.Write(proto.TypeBind, bindID, bindMsg); err != nil {
 		return proto.BindOK{}, err
@@ -834,7 +838,7 @@ func (a *Agent) webhookBind(negotiated int) (*proto.WebhookVerification, error) 
 		return nil, fmt.Errorf("%w: edge does not support webhook verification (negotiated protocol v%d); upgrade ngstoned", errFatalHandshake, negotiated)
 	}
 	if a.cfg.Insecure && !loopbackControlAddr(a.cfg.ControlAddr) {
-		return nil, fmt.Errorf("%w: refusing to send the webhook secret over a plaintext control channel to a non-loopback edge; remove --insecure", errFatalHandshake)
+		return nil, errPlaintextWebhookSecret
 	}
 	cfg, err := a.cfg.Webhook.Normalize()
 	if err != nil {
@@ -849,6 +853,20 @@ func (a *Agent) webhookBind(negotiated int) (*proto.WebhookVerification, error) 
 		Prefix:           cfg.Prefix,
 		ToleranceSeconds: int64(cfg.Tolerance / time.Second),
 	}, nil
+}
+
+var errPlaintextWebhookSecret = fmt.Errorf("%w: refusing to send the webhook secret over a plaintext control channel to a non-loopback edge; remove --insecure", errFatalHandshake)
+
+func loopbackAddr(addr net.Addr) bool {
+	if addr == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func loopbackControlAddr(addr string) bool {

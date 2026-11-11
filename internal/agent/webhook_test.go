@@ -2,13 +2,22 @@ package agent
 
 import (
 	"errors"
+	"net"
 	"strings"
 	"testing"
 	"time"
 
 	"ngstone/internal/proto"
+	"ngstone/internal/tunnel"
 	"ngstone/internal/webhook"
 )
+
+type dialedSession struct {
+	tunnel.Session
+	addr net.Addr
+}
+
+func (d dialedSession) RemoteAddr() net.Addr { return d.addr }
 
 func TestHandshakeWebhookIsSentAndAcknowledged(t *testing.T) {
 	cfg := &webhook.Config{Provider: "Slack", Secret: "slack-signing-secret", PathPrefix: "/slack", Tolerance: 2 * time.Minute}
@@ -143,5 +152,105 @@ func TestWebhookBindRefusesPlaintextToRemoteEdge(t *testing.T) {
 		if strings.Contains(err.Error(), secret) {
 			t.Errorf("addr %q: refusal exposes the secret: %v", tc.addr, err)
 		}
+	}
+}
+
+func TestLoopbackAddr(t *testing.T) {
+	cases := []struct {
+		addr net.Addr
+		want bool
+	}{
+		{&net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 4443}, true},
+		{&net.TCPAddr{IP: net.ParseIP("127.0.0.2"), Port: 4443}, true},
+		{&net.TCPAddr{IP: net.ParseIP("::1"), Port: 4443}, true},
+		{&net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 4443}, false},
+		{&net.TCPAddr{IP: net.ParseIP("93.184.216.34"), Port: 4443}, false},
+		{&net.TCPAddr{IP: net.ParseIP("::ffff:10.0.0.1"), Port: 4443}, false},
+		{&net.TCPAddr{Port: 4443}, false},
+		{&net.UnixAddr{Name: "/tmp/edge.sock", Net: "unix"}, false},
+		{nil, false},
+	}
+	for _, tc := range cases {
+		if got := loopbackAddr(tc.addr); got != tc.want {
+			t.Errorf("loopbackAddr(%v) = %v, want %v", tc.addr, got, tc.want)
+		}
+	}
+}
+
+func TestHandshakeWebhookJudgesLoopbackByDialedAddress(t *testing.T) {
+	cases := []struct {
+		name   string
+		dialed net.Addr
+		sent   bool
+	}{
+		{name: "dialed ipv4 loopback", dialed: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 4443}, sent: true},
+		{name: "dialed ipv6 loopback", dialed: &net.TCPAddr{IP: net.ParseIP("::1"), Port: 4443}, sent: true},
+		{name: "localhost resolved to remote address", dialed: &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 4443}},
+		{name: "localhost resolved to public address", dialed: &net.TCPAddr{IP: net.ParseIP("93.184.216.34"), Port: 4443}},
+		{name: "unparseable dialed address", dialed: &net.UnixAddr{Name: "edge", Net: "unix"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			agentSess, edgeSess, cleanup := newTestSessionPair(t)
+			defer cleanup()
+
+			a := New(Config{Kind: proto.KindHTTP, TargetURL: "http://127.0.0.1:1", ControlAddr: "localhost:4443", Insecure: true, Webhook: &webhook.Config{Provider: "github", Secret: "whsec_DISTINCTIVE_dialed"}})
+			type edgeResult struct {
+				gotBind bool
+				err     error
+			}
+			edgeDone := make(chan edgeResult, 1)
+			go func() {
+				msg, err := edgeSess.Control().Read()
+				if err != nil {
+					edgeDone <- edgeResult{err: err}
+					return
+				}
+				if err := edgeSess.Control().Write(proto.TypeAuthOK, msg.ID, proto.AuthOK{ProtoVersion: 3}); err != nil {
+					edgeDone <- edgeResult{err: err}
+					return
+				}
+				bindMsg, err := edgeSess.Control().Read()
+				if err != nil {
+					edgeDone <- edgeResult{}
+					return
+				}
+				bind, err := proto.Decode[proto.Bind](bindMsg)
+				if err != nil {
+					edgeDone <- edgeResult{gotBind: true, err: err}
+					return
+				}
+				ack := ""
+				if bind.Webhook != nil {
+					ack = bind.Webhook.Provider
+				}
+				edgeDone <- edgeResult{gotBind: true, err: edgeSess.Control().Write(proto.TypeBindOK, bindMsg.ID, proto.BindOK{Hostname: "foo.example.com", URL: "http://foo.example.com", Webhook: ack})}
+			}()
+
+			_, handshakeErr := a.handshake(dialedSession{Session: agentSess, addr: tc.dialed}, proto.NewAgentIDGen())
+			if tc.sent && handshakeErr != nil {
+				t.Fatalf("handshake: %v", handshakeErr)
+			}
+			if !tc.sent {
+				if !errors.Is(handshakeErr, errFatalHandshake) || !strings.Contains(handshakeErr.Error(), "plaintext") {
+					t.Fatalf("handshake error = %v, want plaintext refusal", handshakeErr)
+				}
+				if strings.Contains(handshakeErr.Error(), "whsec_DISTINCTIVE_dialed") {
+					t.Fatalf("refusal exposes the secret: %v", handshakeErr)
+				}
+				agentSess.Close("test done")
+			}
+			select {
+			case res := <-edgeDone:
+				if res.err != nil {
+					t.Fatalf("edge side: %v", res.err)
+				}
+				if res.gotBind != tc.sent {
+					t.Fatalf("edge received bind = %v, want %v", res.gotBind, tc.sent)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("edge side did not finish")
+			}
+		})
 	}
 }

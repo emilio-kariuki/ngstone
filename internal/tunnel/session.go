@@ -23,6 +23,7 @@ type Session interface {
 	AcceptRaw(ctx context.Context) (net.Conn, error)
 	Control() *proto.Conn
 	Done() <-chan struct{}
+	RemoteAddr() net.Addr
 	Close(reason string) error
 }
 
@@ -119,6 +120,10 @@ func (s *session) OpenStream(ctx context.Context, pre proto.StreamOpen) (net.Con
 
 func (s *session) AcceptRaw(ctx context.Context) (net.Conn, error) {
 	return s.ys.AcceptStreamWithContext(ctx)
+}
+
+func (s *session) RemoteAddr() net.Addr {
+	return s.ys.RemoteAddr()
 }
 
 func (s *session) Control() *proto.Conn {
