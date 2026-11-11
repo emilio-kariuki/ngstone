@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -150,7 +151,7 @@ func (p *peerForwarder) syncShares(ctx context.Context, now time.Time) {
 	}
 	for _, id := range ids {
 		if sh, ok := p.srv.shares.byShareID(id); ok {
-			p.srv.closeShare(sh, "revoked")
+			p.srv.closeShare(sh, proto.ShareReasonRevoked)
 		}
 	}
 }
@@ -180,29 +181,47 @@ func (p *peerForwarder) routeControl(ctx context.Context, conn net.Conn, ip stri
 	if !ok {
 		return local, false
 	}
-	s := p.srv
 	hash := shareSecretHash(secret)
-	if s.shares.holds(hash) {
+	src, key, eligible := p.controlForwardable(conn, ip, hash)
+	if !eligible {
 		return local, false
+	}
+	owner, found, ok := p.lookupShareHolder(ctx, key)
+	if !ok {
+		return p.forwardFailed(conn)
+	}
+	if !found {
+		return local, false
+	}
+	return p.spliceControl(ctx, conn, ip, src, captured, owner, releaseUnauth, leave)
+}
+
+func (p *peerForwarder) controlForwardable(conn net.Conn, ip string, hash [32]byte) (src netip.AddrPort, key string, ok bool) {
+	s := p.srv
+	if s.shares.holds(hash) {
+		return src, "", false
 	}
 	src, valid := peerClientAddrPort(conn.RemoteAddr())
 	if !valid {
-		return local, false
+		return src, "", false
 	}
 	if _, err := proxyProtoV1Line(src); err != nil {
-		return local, false
+		return src, "", false
 	}
 	if !s.authLimiter.allowed(ip) || !s.perIPLimiter.allow(ip) {
-		return local, false
+		return src, "", false
 	}
-	key := shareDirKey(hash[:])
-	missKey := "share:" + key
-	if _, miss := p.misses.Get(missKey); miss {
-		return local, false
+	key = shareDirKey(hash[:])
+	if _, miss := p.misses.Get("share:" + key); miss {
+		return src, "", false
 	}
+	return src, key, true
+}
+
+func (p *peerForwarder) lookupShareHolder(ctx context.Context, key string) (owner storage.EdgePeer, found, ok bool) {
 	if !p.lookupSem.tryAcquire() {
 		metricPeerRejectedLookupCap.Add(1)
-		return p.forwardFailed(conn)
+		return owner, false, false
 	}
 	metricPeerLookups.Add(1)
 	lctx, cancel := context.WithTimeout(ctx, peerLookupTimeout)
@@ -212,12 +231,15 @@ func (p *peerForwarder) routeControl(ctx context.Context, conn net.Conn, ip stri
 	if err != nil {
 		metricPeerLookupErrors.Add(1)
 		slogStorageError("lookup share edge", err)
-		return p.forwardFailed(conn)
+		return owner, false, false
 	}
 	if !found {
-		p.misses.Add(missKey, struct{}{})
-		return local, false
+		p.misses.Add("share:"+key, struct{}{})
 	}
+	return owner, found, true
+}
+
+func (p *peerForwarder) spliceControl(ctx context.Context, conn net.Conn, ip string, src netip.AddrPort, captured []byte, owner storage.EdgePeer, releaseUnauth, leave func()) (net.Conn, bool) {
 	release, ok := p.reserve(ip)
 	if !ok {
 		return p.forwardFailed(conn)
@@ -274,5 +296,5 @@ func (s *Server) admitForwardedControl(ctx context.Context, pc net.Conn) {
 		return
 	}
 	metricPeerAcceptedConns.Add(1)
-	s.handleControlConnTransport(ctx, pc, release, leave, false, true)
+	s.handleControlConnTransport(ctx, pc, release, controlTransport{forwarded: true, leave: leave})
 }

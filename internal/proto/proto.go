@@ -118,6 +118,7 @@ const (
 	ShareReasonKicked       = "kicked" // connector: removed by the sharer
 	ShareReasonTaken        = "taken"
 	ShareReasonMoved        = "moved"
+	ShareReasonPublishErr   = "publish failed"
 )
 
 // ShareEvent.Event values.

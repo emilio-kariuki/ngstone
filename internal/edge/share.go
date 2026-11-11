@@ -723,11 +723,11 @@ func (r *shareRegistry) count() int {
 	return len(r.byID)
 }
 
-// list describes every live share, oldest first.
 func shareVisibleTo(sh *share, as *AgentSession) bool {
 	return sh.ownerID == durableOwnerID(as)
 }
 
+// list describes every live share, oldest first.
 func (r *shareRegistry) list(asker *AgentSession) []proto.ShareInfo {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -863,7 +863,7 @@ func (s *Server) handleShare(as *AgentSession, ctrl *proto.Conn, id uint64, req 
 	if s.peers != nil {
 		if err := s.publishShare(sh); err != nil {
 			slogStorageError("publish share", err)
-			s.closeShare(sh, "publish failed")
+			s.closeShare(sh, proto.ShareReasonPublishErr)
 			if errors.Is(err, storage.ErrShareTaken) {
 				ctrl.Write(proto.TypeShareErr, id, proto.ShareErr{Code: proto.CodeShareTaken, Message: "this share secret is registered by another agent"})
 				return

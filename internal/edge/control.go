@@ -279,11 +279,18 @@ func (s *Server) serveControl(ctx context.Context, ln net.Listener) error {
 }
 
 func (s *Server) handleControlConn(ctx context.Context, conn net.Conn, releaseUnauth, leave func()) {
-	s.handleControlConnTransport(ctx, conn, releaseUnauth, leave, s.tlsMgr != nil, false)
+	s.handleControlConnTransport(ctx, conn, releaseUnauth, controlTransport{tls: s.tlsMgr != nil, leave: leave})
 }
 
-func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, releaseUnauth, leave func(), applyTLS, forwarded bool) {
+type controlTransport struct {
+	tls       bool
+	forwarded bool
+	leave     func()
+}
+
+func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, releaseUnauth func(), tr controlTransport) {
 	ip := remoteIP(conn)
+	applyTLS, forwarded := tr.tls, tr.forwarded
 
 	deadline := time.Now().Add(authDeadline)
 	if err := conn.SetReadDeadline(deadline); err != nil {
@@ -315,7 +322,7 @@ func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, 
 
 	if !forwarded && s.peers != nil {
 		var done bool
-		if conn, done = s.peers.routeControl(ctx, conn, ip, releaseUnauth, leave); done {
+		if conn, done = s.peers.routeControl(ctx, conn, ip, releaseUnauth, tr.leave); done {
 			return
 		}
 	}
