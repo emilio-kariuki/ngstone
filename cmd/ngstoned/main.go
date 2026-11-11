@@ -21,8 +21,6 @@ import (
 )
 
 func main() {
-	// Handled before flag parsing so the container HEALTHCHECK can run
-	// "ngstoned healthcheck" without repeating the server's flags.
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		os.Exit(runHealthcheck())
 	}

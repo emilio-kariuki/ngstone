@@ -43,7 +43,6 @@ type NamedTunnel struct {
 	Tunnel
 }
 
-// Tunnel describes one tunnel. Kind is "http" (the default), "tcp", or "tls".
 type Tunnel struct {
 	CredentialEnv      string `yaml:"credential_env"`
 	CredentialFile     string `yaml:"credential_file"`
