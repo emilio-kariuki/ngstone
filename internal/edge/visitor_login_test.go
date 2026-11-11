@@ -873,3 +873,57 @@ func TestVisitorCallbackRefusesTunnelWithoutLoginRule(t *testing.T) {
 		t.Fatalf("origin reached %d times", hits)
 	}
 }
+
+func TestVisitorSessionExpiry(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	captured := bindVisitorTunnel(t, s, "app.example.com", proto.Bind{OIDC: &proto.OIDCLogin{}})
+	v := s.visitor
+	api := http.Header{"Accept": {"application/json"}}
+
+	sealSession := func(expiresAt time.Time) *http.Cookie {
+		sealed, err := v.codec.Encode(visitorToken{Purpose: visitorPurposeSession, Host: "app.example.com", Subject: "sub-alice", Email: "alice@example.org", EmailVerified: true, ExpiresAt: expiresAt})
+		if err != nil {
+			t.Fatalf("seal session: %v", err)
+		}
+		return &http.Cookie{Name: v.cookieName(visitorSessionCookie), Value: sealed}
+	}
+	if rec := visitorRequest(t, s, http.MethodGet, "http://app.example.com/api", api, sealSession(time.Now().Add(time.Hour))); rec.Code != http.StatusOK {
+		t.Fatalf("control session with a future expiry = %d, want 200", rec.Code)
+	}
+	hits := func() int { _, n := captured.last(); return n }
+	before := hits()
+	if rec := visitorRequest(t, s, http.MethodGet, "http://app.example.com/api", api, sealSession(time.Now().Add(-time.Minute))); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expired session = %d, want 401", rec.Code)
+	}
+	if hits() != before {
+		t.Fatal("origin reached with an expired session")
+	}
+}
+
+func TestVisitorTicketExpiry(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	bindVisitorTunnel(t, s, "app.example.com", proto.Bind{OIDC: &proto.OIDCLogin{}})
+	v := s.visitor
+
+	bind := &http.Cookie{Name: v.cookieName(visitorBindCookie), Value: "browser-binding"}
+	finish := func(expiresAt time.Time) *httptest.ResponseRecorder {
+		id, err := randomToken(24)
+		if err != nil {
+			t.Fatalf("ticket id: %v", err)
+		}
+		sealed, err := v.codec.Encode(visitorToken{Purpose: visitorPurposeTicket, Host: "app.example.com", Path: "/", ID: id, Subject: "sub-alice", Email: "alice@example.org", EmailVerified: true, Binding: bind.Value, ExpiresAt: expiresAt})
+		if err != nil {
+			t.Fatalf("seal ticket: %v", err)
+		}
+		return visitorRequest(t, s, http.MethodGet, "http://app.example.com"+visitorFinishPath+"?"+url.Values{"ticket": {sealed}}.Encode(), htmlAccept(), bind)
+	}
+	if rec := finish(time.Now().Add(time.Minute)); rec.Code != http.StatusFound || responseCookie(rec.Result(), v.cookieName(visitorSessionCookie)) == nil {
+		t.Fatalf("control ticket with a future expiry = %d, want 302 with a session", rec.Code)
+	}
+	expired := finish(time.Now().Add(-time.Minute))
+	if expired.Code != http.StatusBadRequest || responseCookie(expired.Result(), v.cookieName(visitorSessionCookie)) != nil {
+		t.Fatalf("expired ticket = %d, want 400 and no session", expired.Code)
+	}
+}

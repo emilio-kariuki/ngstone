@@ -303,22 +303,48 @@ func TestVisitorOIDCLoginEndToEnd(t *testing.T) {
 			t.Fatalf("origin Cookie = %q, want session stripped and app cookie kept", cookie)
 		}
 
+		otherOrigin := &originCapture{}
+		otherSrv := httptest.NewServer(http.HandlerFunc(otherOrigin.handler))
+		defer otherSrv.Close()
+		go agent.New(agent.Config{
+			ControlAddr: controlAddr,
+			Token:       token,
+			Subdomain:   "other",
+			TargetURL:   otherSrv.URL,
+			Insecure:    true,
+			OIDC:        &proto.OIDCLogin{AllowEmails: []string{"alice@example.org"}, AllowDomains: []string{"corp.example"}},
+		}).Run(ctx)
+		waitStatus(t, publicAddr, "other."+domain, "/", http.StatusUnauthorized, 10*time.Second)
+
+		noRedirect := &http.Client{
+			Transport:     client.Transport,
+			Timeout:       5 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+		otherReq, _ := http.NewRequest(http.MethodGet, "http://other."+domain+":"+publicPort+"/", nil)
+		otherReq.AddCookie(&http.Cookie{Name: "ngstone_visitor_session", Value: session.Value})
+		otherResp, err := noRedirect.Do(otherReq)
+		if err != nil {
+			t.Fatalf("request with the first tunnel's session to the second tunnel: %v", err)
+		}
+		otherResp.Body.Close()
+		if otherResp.StatusCode != http.StatusUnauthorized && !(otherResp.StatusCode == http.StatusFound && strings.Contains(otherResp.Header.Get("Location"), "/.ngstone/auth/start")) {
+			t.Fatalf("second tunnel answered the first tunnel's session with %d %q, want 401 or a redirect to login", otherResp.StatusCode, otherResp.Header.Get("Location"))
+		}
+		if got := len(otherOrigin.snapshot()); got != 0 {
+			t.Fatalf("second tunnel's origin reached with the first tunnel's session (%d requests)", got)
+		}
+
 		replay, _ := http.NewRequest(http.MethodGet, tunnelURL+"/", nil)
 		replay.Header.Set("Accept", "application/json")
 		replay.AddCookie(&http.Cookie{Name: "ngstone_visitor_session", Value: session.Value})
-		other := &http.Client{Transport: client.Transport, Timeout: 5 * time.Second}
-		otherReq, _ := http.NewRequest(http.MethodGet, "http://other."+domain+":"+publicPort+"/", nil)
-		otherReq.AddCookie(&http.Cookie{Name: "ngstone_visitor_session", Value: session.Value})
-		if r, err := other.Do(otherReq); err == nil {
-			r.Body.Close()
-			if r.StatusCode == http.StatusOK {
-				t.Fatal("session cookie accepted on another host")
-			}
+		replayResp, err := noRedirect.Do(replay)
+		if err != nil {
+			t.Fatalf("session cookie replay on its own host: %v", err)
 		}
-		if r, err := other.Do(replay); err != nil || r.StatusCode != http.StatusOK {
-			t.Fatalf("session cookie replay on its own host failed: %v", err)
-		} else {
-			r.Body.Close()
+		replayResp.Body.Close()
+		if replayResp.StatusCode != http.StatusOK {
+			t.Fatalf("session cookie replay on its own host = %d, want 200", replayResp.StatusCode)
 		}
 	})
 }

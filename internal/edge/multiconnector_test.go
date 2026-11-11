@@ -7,6 +7,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"ngstone/internal/proto"
 )
 
 const testConnectorTokenDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -105,6 +107,37 @@ func TestMultiConnectorRejectsMismatchedSettings(t *testing.T) {
 	}
 	if got, ok := r.Route("svc.example.com"); !ok || !gotOkWithConnectorCount(got, 1) {
 		t.Fatalf("mismatched connector changed the existing pool: %+v", got)
+	}
+}
+
+func TestMultiConnectorRejectsMismatchedLoginRule(t *testing.T) {
+	build := func(oidc *proto.OIDCLogin) *accessControl {
+		ac, err := buildAccessControl(proto.Bind{OIDC: oidc})
+		if err != nil || ac == nil {
+			t.Fatalf("buildAccessControl: %v, %v", ac, err)
+		}
+		return ac
+	}
+	r := NewRegistry()
+	a, cleanupA := newTestAgentSession(t, "instance-a")
+	defer cleanupA()
+	b, cleanupB := newTestAgentSession(t, "instance-b")
+	defer cleanupB()
+
+	if _, _, err := r.BindWithOptions(BindOptions{Host: "svc.example.com", Session: a, Takeover: true, MultiConnector: true, ConnectorTokenDigest: testConnectorTokenDigest, Access: build(&proto.OIDCLogin{AllowEmails: []string{"a@example.org"}})}); err != nil {
+		t.Fatalf("initial bind: %v", err)
+	}
+	for name, rule := range map[string]*proto.OIDCLogin{
+		"different email":  {AllowEmails: []string{"b@example.org"}},
+		"different domain": {AllowEmails: []string{"a@example.org"}, AllowDomains: []string{"example.net"}},
+		"empty rule":       {},
+	} {
+		if _, _, err := r.BindWithOptions(BindOptions{Host: "svc.example.com", Session: b, Takeover: true, MultiConnector: true, ConnectorTokenDigest: testConnectorTokenDigest, Access: build(rule)}); err != ErrConnectorConfigMismatch {
+			t.Fatalf("%s: login rule mismatch error = %v, want %v", name, err, ErrConnectorConfigMismatch)
+		}
+	}
+	if _, _, err := r.BindWithOptions(BindOptions{Host: "svc.example.com", Session: b, Takeover: true, MultiConnector: true, ConnectorTokenDigest: testConnectorTokenDigest, Access: build(&proto.OIDCLogin{AllowEmails: []string{"A@example.org"}})}); err != nil {
+		t.Fatalf("identical login rule must bind: %v", err)
 	}
 }
 
