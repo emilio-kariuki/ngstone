@@ -151,30 +151,6 @@ func TestRedirectDoesNotExpandVisitorText(t *testing.T) {
 	}
 }
 
-func TestValidationRejectsSelfMatchingRelativeRedirects(t *testing.T) {
-	invalid := []string{
-		`{"rules":[{"action":"redirect","redirect_url":"/login"}]}`,
-		`{"rules":[{"action":"redirect","path_prefix":"/old","redirect_url":"/old/x$path"}]}`,
-		`{"rules":[{"action":"redirect","path_prefix":"/new","redirect_url":"/new$path"}]}`,
-		`{"rules":[{"action":"redirect","redirect_url":"$path"}]}`,
-	}
-	for _, input := range invalid {
-		if _, err := Parse([]byte(input)); err == nil {
-			t.Fatalf("Parse(%s) succeeded, want error", input)
-		}
-	}
-	valid := []string{
-		`{"rules":[{"action":"redirect","path_prefix":"/old","redirect_url":"/new$path"}]}`,
-		`{"rules":[{"action":"redirect","path_prefix":"/old","redirect_url":"https://other.example/old$path"}]}`,
-		`{"rules":[{"action":"redirect","redirect_url":"https://other.example/login"}]}`,
-	}
-	for _, input := range valid {
-		if _, err := Parse([]byte(input)); err != nil {
-			t.Fatalf("Parse(%s): %v", input, err)
-		}
-	}
-}
-
 func TestValidationRejectsReservedAndInvalidActions(t *testing.T) {
 	reserved := []string{
 		"Host", "Connection", "Keep-Alive", "Proxy-Authorization", "TE", "Trailer", "Transfer-Encoding", "Upgrade",

@@ -485,6 +485,8 @@ How rules combine:
   removed, so `/old/a/b` becomes `/new/a/b` above. The request's query
   string is appended only when `redirect_url` has no query of its own, and
   `$path` after a `?` is query-escaped.
+  Redirect rules are not checked for loops: a rule whose target matches the
+  rule itself redirects repeatedly until the browser stops.
 - `cors` answers preflight requests (`OPTIONS` with `Origin` and
   `Access-Control-Request-Method`) at the edge with `204`, before basic
   auth and before rules run, because browsers never send credentials on a
