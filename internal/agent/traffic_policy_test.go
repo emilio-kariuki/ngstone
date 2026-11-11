@@ -21,6 +21,7 @@ func TestHandshakeTrafficPolicyIsSentAndAcknowledged(t *testing.T) {
 		t.Run(map[bool]string{true: "acknowledged", false: "missing acknowledgment"}[acknowledge], func(t *testing.T) {
 			agentSess, edgeSess, cleanup := newTestSessionPair(t)
 			defer cleanup()
+			failFastControl(t, agentSess, edgeSess)
 
 			a := New(Config{Kind: proto.KindHTTP, TargetURL: "http://127.0.0.1:1", Policy: p})
 			edgeDone := make(chan error, 1)
@@ -88,6 +89,7 @@ func TestHandshakeTrafficPolicyRequiresProtocolV2(t *testing.T) {
 	}
 	agentSess, edgeSess, cleanup := newTestSessionPair(t)
 	defer cleanup()
+	failFastControl(t, agentSess, edgeSess)
 
 	a := New(Config{Policy: p})
 	edgeDone := make(chan error, 1)
@@ -114,6 +116,7 @@ func TestHandshakeHTTP2IsSentAndRequiresAcknowledgment(t *testing.T) {
 		t.Run(map[bool]string{true: "acknowledged", false: "missing_acknowledgment"}[acknowledge], func(t *testing.T) {
 			agentSess, edgeSess, cleanup := newTestSessionPair(t)
 			defer cleanup()
+			failFastControl(t, agentSess, edgeSess)
 
 			a := New(Config{Kind: proto.KindHTTP, TargetURL: "http://127.0.0.1:1", HTTP2: true})
 			edgeDone := make(chan error, 1)
@@ -170,6 +173,7 @@ func TestHandshakeMultiConnectorIsSentAndRequiresAcknowledgment(t *testing.T) {
 		t.Run(map[bool]string{true: "acknowledged", false: "missing_acknowledgment"}[acknowledge], func(t *testing.T) {
 			agentSess, edgeSess, cleanup := newTestSessionPair(t)
 			defer cleanup()
+			failFastControl(t, agentSess, edgeSess)
 
 			a := New(Config{Kind: proto.KindHTTP, TargetURL: "http://127.0.0.1:1", MultiConnector: true, ConnectorToken: "pool-secret"})
 			edgeDone := make(chan error, 1)

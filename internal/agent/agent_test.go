@@ -44,6 +44,16 @@ func newTestSessionPair(t *testing.T) (agentSide, edgeSide tunnel.Session, clean
 	}
 }
 
+func failFastControl(t *testing.T, sessions ...tunnel.Session) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for _, s := range sessions {
+		if err := s.Control().SetDeadline(deadline); err != nil {
+			t.Fatalf("set control deadline: %v", err)
+		}
+	}
+}
+
 func TestControlLoopEvictedDoesNotLeakReaderGoroutine(t *testing.T) {
 	const n = 30
 

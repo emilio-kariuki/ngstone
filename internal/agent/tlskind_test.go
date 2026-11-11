@@ -53,6 +53,7 @@ func TestHandshakeRejectsUnsupportedTLSOptions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			agentSess, edgeSess, cleanup := newTestSessionPair(t)
 			defer cleanup()
+			failFastControl(t, agentSess, edgeSess)
 
 			cfg := base
 			tc.mod(&cfg)

@@ -25,6 +25,7 @@ func TestHandshakeWebhookIsSentAndAcknowledged(t *testing.T) {
 		t.Run(map[bool]string{true: "acknowledged", false: "missing acknowledgment"}[acknowledge], func(t *testing.T) {
 			agentSess, edgeSess, cleanup := newTestSessionPair(t)
 			defer cleanup()
+			failFastControl(t, agentSess, edgeSess)
 
 			a := New(Config{Kind: proto.KindHTTP, TargetURL: "http://127.0.0.1:1", Webhook: cfg})
 			edgeDone := make(chan error, 1)
@@ -96,6 +97,7 @@ func TestHandshakeWebhookRejectsTCPAndOldEdges(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			agentSess, edgeSess, cleanup := newTestSessionPair(t)
 			defer cleanup()
+			failFastControl(t, agentSess, edgeSess)
 			a := New(tc.cfg)
 			edgeDone := make(chan error, 1)
 			go func() {
@@ -193,6 +195,7 @@ func TestHandshakeWebhookJudgesLoopbackByDialedAddress(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			agentSess, edgeSess, cleanup := newTestSessionPair(t)
 			defer cleanup()
+			failFastControl(t, agentSess, edgeSess)
 
 			a := New(Config{Kind: proto.KindHTTP, TargetURL: "http://127.0.0.1:1", ControlAddr: "localhost:4443", Insecure: true, Webhook: &webhook.Config{Provider: "github", Secret: "whsec_DISTINCTIVE_dialed"}})
 			type edgeResult struct {
