@@ -319,7 +319,8 @@ closes after the TCP idle timeout (30 minutes by default) of silence in both
 directions, so long-lived WebSocket and SSE connections need traffic or
 keep-alives within that window. During a database outage, connections for
 tunnel hostnames not bound on the receiving edge are closed, where a single
-edge would answer 404.
+edge would answer 404, and share connectors arriving at an edge that does not
+hold their share are disconnected and retry.
 
 Keep the PostgreSQL URL in the root-only environment file or a secret manager;
 do not put it in `ExecStart`, because a password in a process argument is

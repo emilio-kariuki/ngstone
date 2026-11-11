@@ -16,7 +16,7 @@ This document builds on [ARCHITECTURE.md](ARCHITECTURE.md) and reuses its vocabu
 - Encrypted on every hop the bytes cross the internet: from the sharer to the edge and from the connector to the edge, both over the existing control-plane TLS.
 - Shares end on their own: a fixed expiry chosen by the sharer and enforced by the edge, an optional idle timeout, plus instant revocation from the sharing terminal or any other terminal holding the token.
 - Access policies the sharer can state up front: which source networks may connect, how many connectors and connections at once, how many connector joins in total, a passphrase, and per-connection approval.
-- Auditing: the sharer sees every connector join and leave and every connection open and close, with name, address, duration and byte counts. Any operator terminal can watch the same stream for every share, and the edge can append it to a file.
+- Auditing: the sharer sees every connector join and leave and every connection open and close, with name, address, duration and byte counts. In shared-token mode any operator terminal can watch the same stream for every share; with share credentials a watcher sees only its own owner's shares. The edge can also append the stream to a file.
 - Keep the project's principles: stdlib-first, one path per feature, everything flow-controlled, nothing unbounded in memory, no persistent state on the edge except the share directory row kept while inter-edge forwarding is enabled (see "Shares across edges").
 
 **Non-goals (v1)**
@@ -124,7 +124,7 @@ These open a fresh operator session with the saved token, so they work from a se
 │     → 127.0.0.1:6379 │                │     stream ⇄ sharer stream│               └──────────────────────┘
 └──────────────────────┘                └───────────────────────────┘
           ▲                                        ▲
-          └── ngstone shares / unshare / extend / kick / --watch (any operator session)
+          └── ngstone shares / unshare / extend / kick / --watch (any operator session in shared-token mode; the same owner with share credentials)
 ```
 
 Both agents dial out, exactly as today's agent does. There is no new listener on the VPS. The edge never opens a public port for a share.
@@ -202,7 +202,7 @@ type ShareOK  struct{ ShareID string; ExpiresAtMS int64 }
 type ShareErr struct{ Code, Message string }       // share_ttl_too_long, too_many_shares, share_taken,
                                                    // invalid_share, feature_unsupported, share_not_found
 
-// ---- management, from any operator session ----
+// ---- management, from an operator session (any in shared-token mode, the same owner with share credentials) ----
 type Unshare     struct{ ShareID string }                        // → UnshareOK
 type ShareUpdate struct{ ShareID string; ExpiresAtMS int64 }     // → ShareOK | ShareErr
 type Kick        struct{ ShareID, ConnectorID string }           // → KickOK | Error{no_such_connector}
@@ -274,7 +274,7 @@ A connector-scoped session may send only `connect`, `ping`, `pong` and `goodbye`
 
 - `expires_at` further out than now plus `-max-share-ttl` → `share_ttl_too_long`.
 - More than 8 live shares on the session → `too_many_shares`.
-- A share with this hash already exists and is **owned by a different instance_id** → `share_taken`. Same `instance_id` (the sharer reconnecting) replaces the old share; its connectors are told `sharer_gone` and reconnect on their own. This is the same identity-not-liveness rule as `Bind` takeover.
+- A share with this hash already exists and is **owned by a different instance_id or a different owner** → `share_taken`. Same `instance_id` and same owner (the sharer reconnecting) replaces the old share; its connectors are told `sharer_gone` and reconnect on their own. This is the same identity-not-liveness rule as `Bind` takeover.
 - Otherwise the share is registered, an expiry timer armed, an idle timer armed if requested, and `share_ok` returned. Watchers get `registered`.
 
 **Admission.** `connect` from a connector session runs in two steps so the sharer's approval can sit between them:
@@ -286,7 +286,7 @@ A connector-scoped session may send only `connect`, `ping`, `pong` and `goodbye`
 
 **Idle.** The idle timer is armed whenever the share has no open relayed connection and stopped when one opens, so a share that is in use never idles out.
 
-**Management.** `unshare`, `share_update`, `kick`, `approve` and `list_shares` are accepted from any operator session, not only the owner: there is one token and therefore one operator. `watch_shares` adds the session to the watcher set; every `ShareEvent` is written to the owner, to each watcher other than the owner, and to the edge's `-share-audit-log` file, with the share's label filled in.
+**Management.** `unshare`, `share_update`, `kick`, `approve` and `list_shares` are accepted from any operator session, not only the owner, only in legacy shared-token mode, where there is one token and therefore one operator; with share credentials they are limited to the same owner. `watch_shares` adds the session to the watcher set; in shared-token mode every `ShareEvent` is written to the owner, to each watcher other than the owner, and to the edge's `-share-audit-log` file, with the share's label filled in.
 
 ### Relay admission, in order
 
@@ -328,9 +328,10 @@ Memory follows the §5 window budget in ARCHITECTURE.md: a relayed connection ho
 With inter-edge forwarding enabled, a registered share is also published to the shared database as one directory row: a domain-separated key derived from the secret hash, the share id, the id of the edge holding the share, the owner id, the expiry and a revoked flag. It never contains the secret, the secret hash, the passphrase, the label, the targets or any address.
 
 - A connector that reaches an edge that does not hold its share is forwarded to the sharer's edge as raw control bytes over the peer hop. The sharer's edge authenticates the connector and enforces the passphrase, allow-CIDR, limits and audit with the connector's real address.
-- `unshare` works from any edge for the owner: the directory row is marked revoked, new connectors are refused immediately, and the holding edge closes existing connectors within one heartbeat.
+- `unshare` works from any edge for the owner: the directory row is marked revoked, connectors arriving through other edges are refused immediately, and the holding edge closes existing connectors within one heartbeat (lease TTL / 3, 15 s by default). A connector dialling the holding edge directly is admitted until that edge's next heartbeat, and for as long as that edge cannot read the database.
 - `shares`, `extend` and `kick` act on the edge the operator session reached.
-- Publishing a share needs the database while forwarding is enabled; if the publish fails the share is not registered.
+- Publishing a share needs the database while forwarding is enabled; if the publish fails the share is not registered. A share is usable only after its directory row is written.
+- When the directory cannot be read or the holding edge cannot be reached, the connector's connection is closed and it retries, rather than being told the link is invalid.
 - A share secret already registered by another owner is refused with `share_taken`.
 
 ---
