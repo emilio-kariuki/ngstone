@@ -1167,17 +1167,20 @@ func TestPeerForwardDoesNotRequeryWhenOwnerIsDown(t *testing.T) {
 		t.Fatal("handshake succeeded with the only owner down")
 	}
 	peerEventually(t, "forward failure to be counted", func() bool { return failed() == 1 })
-	if lookups() != 1 {
-		t.Fatalf("lookups = %d, want 1 (an unreachable owner must not trigger a requery)", lookups())
+	if lookups() != 2 {
+		t.Fatalf("lookups = %d, want 2 (the lookup, and one re-resolve because the entry predates the failure)", lookups())
 	}
 
 	redials := countDials(t, b.peerAddr())
-	if _, err := dialIngress(t, a, peerTestHost, pc.pool); err == nil {
-		t.Fatal("second handshake succeeded with the only owner down")
+	const connections = 20
+	for i := 0; i < connections; i++ {
+		if _, err := dialIngress(t, a, peerTestHost, pc.pool); err == nil {
+			t.Fatal("handshake succeeded with the only owner down")
+		}
 	}
-	peerEventually(t, "second forward failure to be counted", func() bool { return failed() == 2 })
-	if redials.Load() != 0 || lookups() != 1 {
-		t.Fatalf("dials inside the down window=%d lookups=%d, want 0 and 1", redials.Load(), lookups())
+	peerEventually(t, "every forward failure to be counted", func() bool { return failed() == 1+connections })
+	if redials.Load() != 0 || lookups() != 2 {
+		t.Fatalf("dials inside the down window=%d lookups=%d, want 0 and 2", redials.Load(), lookups())
 	}
 }
 
@@ -1196,8 +1199,9 @@ func TestPeerForwardNeverMakesAThirdAttempt(t *testing.T) {
 		t.Fatal("handshake succeeded with every owner down")
 	}
 	peerEventually(t, "forward failure to be counted", func() bool { return failed() == 1 })
+	addrs := map[string]string{"edge-b": b.peerAddr(), "edge-c": c.peerAddr(), "edge-d": d.peerAddr()}
 	for id, want := range map[string]bool{"edge-b": true, "edge-c": true, "edge-d": false} {
-		if _, down := a.srv.peers.down.Get(id); down != want {
+		if _, down := a.srv.peers.down.Get(addrs[id]); down != want {
 			t.Fatalf("%s marked down = %v, want %v", id, down, want)
 		}
 	}
@@ -1632,6 +1636,80 @@ func TestPeerForwardFindsNewOwnerAfterOwnerStopped(t *testing.T) {
 	pingEcho(t, second)
 	if lookups() != 1 || c.agentHit.Load() != 1 {
 		t.Fatalf("lookups=%d edge-c hits=%d, want 1 and 1", lookups(), c.agentHit.Load())
+	}
+}
+
+func TestPeerForwardRecoversWithFreshEntryAfterOwnerStopped(t *testing.T) {
+	pc := newPeerCluster(t)
+	a, b, c := pc.edge(t, "edge-a"), pc.edge(t, "edge-b"), pc.edge(t, "edge-c")
+	registerPeers(t, a, b, c)
+	b.bindTLS(t, peerTestHost)
+
+	first, err := dialIngress(t, a, peerTestHost, pc.pool)
+	if err != nil {
+		t.Fatalf("first handshake: %v", err)
+	}
+	pingEcho(t, first)
+	first.Close()
+	cached, ok := a.srv.peers.owners.Get(peerTestHost)
+	if !ok || time.Since(cached.resolved) > peerDownCacheTTL {
+		t.Fatal("expected a fresh cached owner entry")
+	}
+
+	b.srv.registry.Unbind(peerTestHost, b.fx.as)
+	b.srv.peers.stop()
+	if err := b.store.ReleaseSession(context.Background(), "edge-b", "sess-edge-b-"+peerTestHost); err != nil {
+		t.Fatalf("release lease: %v", err)
+	}
+	c.bindTLS(t, peerTestHost)
+	lookups := metricDelta(metricPeerLookups)
+
+	second, err := dialIngress(t, a, peerTestHost, pc.pool)
+	if err != nil {
+		t.Fatalf("handshake after the owner stopped: %v", err)
+	}
+	pingEcho(t, second)
+	second.Close()
+	if lookups() != 1 || c.agentHit.Load() != 1 {
+		t.Fatalf("lookups=%d edge-c hits=%d, want 1 and 1", lookups(), c.agentHit.Load())
+	}
+
+	third, err := dialIngress(t, a, peerTestHost, pc.pool)
+	if err != nil {
+		t.Fatalf("third handshake: %v", err)
+	}
+	pingEcho(t, third)
+	if lookups() != 1 || c.agentHit.Load() != 2 {
+		t.Fatalf("lookups=%d edge-c hits=%d, want the cached owner to be used with no query (1 and 2)", lookups(), c.agentHit.Load())
+	}
+}
+
+func TestPeerForwardDialsReRegisteredEdgeAtNewAddress(t *testing.T) {
+	pc := newPeerCluster(t)
+	a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
+	registerPeers(t, a, b)
+	b.bindTLS(t, peerTestHost)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldAddr := ln.Addr().String()
+	ln.Close()
+	oldRecord := storage.EdgePeer{EdgeID: "edge-b", PeerAddr: oldAddr, SPKISHA256: b.pin()}
+	p := a.srv.peers
+	p.owners.Add(peerTestHost, &ownerEntry{peers: []storage.EdgePeer{oldRecord}, resolved: time.Now()})
+	lookups := metricDelta(metricPeerLookups)
+
+	tc, err := dialIngress(t, a, peerTestHost, pc.pool)
+	if err != nil {
+		t.Fatalf("handshake after the edge re-registered at a new address: %v", err)
+	}
+	pingEcho(t, tc)
+	if _, down := p.down.Get(oldAddr); !down {
+		t.Fatal("the address that failed to dial was not marked down")
+	}
+	if lookups() != 1 || b.agentHit.Load() != 1 {
+		t.Fatalf("lookups=%d edge-b hits=%d, want 1 and 1", lookups(), b.agentHit.Load())
 	}
 }
 

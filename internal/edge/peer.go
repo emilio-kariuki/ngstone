@@ -149,7 +149,7 @@ type peerForwarder struct {
 	owners   *expirable.LRU[string, *ownerEntry]
 	ownersMu sync.Mutex
 	misses   *expirable.LRU[string, struct{}]
-	down     *expirable.LRU[string, struct{}]
+	down     *expirable.LRU[string, time.Time]
 
 	tcpOwners atomic.Pointer[map[int][]storage.EdgePeer]
 	tcpFresh  atomic.Int64
@@ -184,7 +184,7 @@ func newPeerForwarder(s *Server) (*peerForwarder, error) {
 		id:           id,
 		owners:       expirable.NewLRU[string, *ownerEntry](peerOwnerCacheSize, nil, peerOwnerCacheTTL),
 		misses:       expirable.NewLRU[string, struct{}](peerMissCacheSize, nil, peerMissCacheTTL),
-		down:         expirable.NewLRU[string, struct{}](peerDownCacheSize, nil, peerDownCacheTTL),
+		down:         expirable.NewLRU[string, time.Time](peerDownCacheSize, nil, peerDownCacheTTL),
 		handshakeSem: newGlobalSemaphore(maxPeerHandshakes),
 		lookupSem:    newGlobalSemaphore(maxPeerLookups),
 		forwardSem:   newGlobalSemaphore(maxPeerForwards),
@@ -639,7 +639,7 @@ func (p *peerForwarder) attempt(owner storage.EdgePeer, frame peerFrame) (*tls.C
 	dialer := net.Dialer{Timeout: peerDialTimeout}
 	raw, err := dialer.Dial("tcp", owner.PeerAddr)
 	if err != nil {
-		p.down.Add(owner.EdgeID, struct{}{})
+		p.down.Add(owner.PeerAddr, time.Now())
 		slog.Debug("edge: peer dial failed", "owner", owner.EdgeID, "err", err)
 		return nil, peerDown
 	}
@@ -695,12 +695,21 @@ func (p *peerForwarder) pick(owners []storage.EdgePeer, failed storage.EdgePeer)
 		if owner.EdgeID == failed.EdgeID && owner.PeerAddr == failed.PeerAddr && owner.SPKISHA256 == failed.SPKISHA256 {
 			continue
 		}
-		if _, down := p.down.Get(owner.EdgeID); down {
+		if _, down := p.down.Get(owner.PeerAddr); down {
 			continue
 		}
 		return owner, true
 	}
 	return storage.EdgePeer{}, false
+}
+
+func (p *peerForwarder) predatesDown(entry *ownerEntry) bool {
+	for _, owner := range entry.peers {
+		if at, ok := p.down.Peek(owner.PeerAddr); ok && entry.resolved.Before(at) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *peerForwarder) connect(key string, entry *ownerEntry, frame peerFrame) (upstream *tls.Conn, noOwner bool) {
@@ -721,7 +730,7 @@ func (p *peerForwarder) connect(key string, entry *ownerEntry, frame peerFrame) 
 	for attempt := 0; attempt < 2; attempt++ {
 		owner, ok := p.pick(entry.peers, failed)
 		if !ok {
-			if resolved || time.Since(entry.resolved) <= peerDownCacheTTL {
+			if resolved || (time.Since(entry.resolved) <= peerDownCacheTTL && !p.predatesDown(entry)) {
 				return nil, false
 			}
 			found, none := reresolve()
