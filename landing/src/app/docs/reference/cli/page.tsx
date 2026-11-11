@@ -326,8 +326,10 @@ POST   /api/v1/tunnels/{hostname}/drain`}
           dashboards and automation.
         </Property>
         <Property name="credentials issue" type="subcommand">
-          Issue a scoped HTTP or TCP credential. Use <code>--kind tcp</code>{" "}
-          with <code>--remote-port</code> for a TCP tunnel. The default TTL is
+          Issue a scoped HTTP, TCP, or TLS credential. Use <code>--kind tcp</code>{" "}
+          with <code>--remote-port</code> for a TCP tunnel, or{" "}
+          <code>--kind tls</code> with <code>--subdomain</code> for a TLS
+          passthrough tunnel. The default TTL is
           24 hours and the maximum is 30 days.
         </Property>
         <Property name="credentials list" type="subcommand">

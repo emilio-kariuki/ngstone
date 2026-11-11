@@ -982,6 +982,10 @@ func (s *Server) validateCredentialBind(ctx context.Context, as *AgentSession, b
 		if as.Credential.Kind != credentials.KindTCP || bind.RemotePort != as.Credential.RemotePort {
 			return errors.New("tunnel credential is scoped to another TCP port")
 		}
+	case proto.KindTLS:
+		if as.Credential.Kind != credentials.KindTLS || normalizeHost(bind.Subdomain) != as.Credential.Subdomain {
+			return errors.New("tunnel credential is scoped to another TLS subdomain")
+		}
 	default:
 		return errors.New("tunnel credential is scoped to another tunnel kind")
 	}

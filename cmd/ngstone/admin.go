@@ -243,8 +243,8 @@ func cmdAdminCredentials(args []string) int {
 
 func cmdAdminCredentialIssue(args []string) int {
 	fs, flags := newAdminFlagSet("admin credentials issue")
-	kind := fs.String("kind", credentials.KindHTTP, "credential kind: http, tcp, or preview")
-	subdomain := fs.String("subdomain", "", "exact HTTP subdomain this credential may bind")
+	kind := fs.String("kind", credentials.KindHTTP, "credential kind: http, tcp, tls, or preview")
+	subdomain := fs.String("subdomain", "", "exact HTTP or TLS subdomain this credential may bind")
 	remotePort := fs.Int("remote-port", 0, "exact TCP port this credential may bind")
 	ttl := fs.String("ttl", "24h", "credential lifetime, up to 720h")
 	positionals, err := parsePermissive(fs, args)

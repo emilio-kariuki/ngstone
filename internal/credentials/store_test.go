@@ -173,6 +173,32 @@ func TestCredentialScopeValidation(t *testing.T) {
 	}
 }
 
+func TestNormalizeSpecTLS(t *testing.T) {
+	got, err := normalizeSpec(Spec{Kind: "TLS", Subdomain: " Secure "})
+	if err != nil || got.Kind != KindTLS || got.Subdomain != "secure" {
+		t.Fatalf("normalizeSpec tls = %+v, %v, want kind tls subdomain secure", got, err)
+	}
+	cases := []struct {
+		name string
+		spec Spec
+		want string
+	}{
+		{"tls without subdomain", Spec{Kind: KindTLS}, "a valid TLS subdomain is required"},
+		{"tls with remote port", Spec{Kind: KindTLS, Subdomain: "secure", RemotePort: 9000}, "remote port is only valid for TCP credentials"},
+		{"tcp with subdomain", Spec{Kind: KindTCP, Subdomain: "secure", RemotePort: 9000}, "subdomain is only valid for HTTP or TLS credentials"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := normalizeSpec(tc.spec); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("normalizeSpec error = %v, want substring %q", err, tc.want)
+			}
+		})
+	}
+	if got, err := normalizeSpec(Spec{Subdomain: "demo"}); err != nil || got.Kind != KindHTTP {
+		t.Fatalf("empty kind = %+v, %v, want http", got, err)
+	}
+}
+
 func TestConcurrentIssueDoesNotLoseCredentials(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "credentials.json")
 	store, err := Open(path)

@@ -203,6 +203,9 @@ revoked. Keep the file mode `0600` and run the credential command as the same
 service account that owns it. `-token-sha256` remains available as a legacy
 migration path; it is not scoped or independently revocable.
 
+TLS credentials are restricted to one subdomain and may bind only `ngstone tls`
+tunnels: `ngstone credentials issue --kind tls --subdomain secure`.
+
 Database-share commands require a legacy shared-token operator session. Scoped
 tunnel credentials cannot create, inspect, or manage database shares. Configure
 each edge for either scoped credentials or the legacy shared-token mode.

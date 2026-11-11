@@ -22,6 +22,25 @@ func openTestStore(t *testing.T, path string) *Store {
 	return store
 }
 
+func TestSQLiteTLSCredentialRoundTrip(t *testing.T) {
+	store := openTestStore(t, filepath.Join(t.TempDir(), "control.db"))
+	issued, err := store.Issue(credentials.Spec{Kind: credentials.KindTLS, Subdomain: "Secure", OwnerID: "owner-1"}, time.Hour)
+	if err != nil {
+		t.Fatalf("issue tls credential: %v", err)
+	}
+	got, err := store.Validate(issued.Token, time.Now())
+	if err != nil {
+		t.Fatalf("validate tls credential: %v", err)
+	}
+	if got.Kind != credentials.KindTLS || got.Subdomain != "secure" || got.RemotePort != 0 {
+		t.Fatalf("validated credential = %+v, want kind tls subdomain secure", got)
+	}
+	list, err := store.List()
+	if err != nil || len(list) != 1 || list[0].Kind != credentials.KindTLS || list[0].Subdomain != "secure" {
+		t.Fatalf("list = %+v, %v, want one tls credential for secure", list, err)
+	}
+}
+
 func TestSQLiteCredentialPersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "control.db")
 	store := openTestStore(t, path)
