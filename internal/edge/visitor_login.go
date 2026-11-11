@@ -20,6 +20,7 @@ const (
 	visitorSessionCookie      = "ngstone_visitor_session"
 	visitorStateCookiePrefix  = "ngstone_visitor_state_"
 	visitorBindCookie         = "ngstone_visitor_bind"
+	visitorCookiePrefix       = "ngstone_visitor_"
 	visitorCookieHostPrefix   = "__Host-"
 	visitorStartPath          = "/.ngstone/auth/start"
 	visitorFinishPath         = "/.ngstone/auth/finish"
@@ -150,9 +151,9 @@ func (s *Server) handleVisitorStart(w http.ResponseWriter, r *http.Request, v *v
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     visitorStateCookieName(state.State),
+		Name:     v.cookieName(visitorStateCookieName(state.State)),
 		Value:    sealed,
-		Path:     v.callback.Path,
+		Path:     v.stateCookiePath(),
 		MaxAge:   int(oidc.StateLifetime / time.Second),
 		HttpOnly: true,
 		Secure:   v.secure,
@@ -166,9 +167,9 @@ func (s *Server) handleVisitorCallback(w http.ResponseWriter, r *http.Request, v
 	w.Header().Set("Cache-Control", "no-store")
 	query := r.URL.Query()
 	stateValue := query.Get("state")
-	cookieName := visitorStateCookieName(stateValue)
+	cookieName := v.cookieName(visitorStateCookieName(stateValue))
 	if stateValue != "" {
-		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: v.callback.Path, MaxAge: -1, HttpOnly: true, Secure: v.secure, SameSite: http.SameSiteLaxMode})
+		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: v.stateCookiePath(), MaxAge: -1, HttpOnly: true, Secure: v.secure, SameSite: http.SameSiteLaxMode})
 	}
 	if query.Get("error") != "" {
 		writeVisitorPage(w, http.StatusForbidden, "Sign-in cancelled", "The identity provider did not complete the sign-in.")
@@ -258,9 +259,15 @@ func (s *Server) authorizeVisitor(w http.ResponseWriter, r *http.Request, rule *
 		writeVisitorPage(w, http.StatusOK, "Signed out", "You have been signed out of this tunnel.")
 		return nil, false
 	}
-	var session visitorToken
-	cookie, err := r.Cookie(visitorSessionCookie)
-	if err == nil && v.open(cookie.Value, visitorPurposeSession, &session) && strings.EqualFold(session.Host, stripPort(r.Host)) && session.Subject != "" {
+	var sessions []visitorToken
+	for _, cookie := range r.CookiesNamed(v.cookieName(visitorSessionCookie)) {
+		var candidate visitorToken
+		if v.open(cookie.Value, visitorPurposeSession, &candidate) && strings.EqualFold(candidate.Host, stripPort(r.Host)) && candidate.Subject != "" {
+			sessions = append(sessions, candidate)
+		}
+	}
+	if len(sessions) == 1 {
+		session := sessions[0]
 		if !rule.allows(session.Email, session.EmailVerified) {
 			metricRejectedUnauthorized.Add(1)
 			writeVisitorPage(w, http.StatusForbidden, "Access denied", "Your account is not allowed to access this tunnel.")
@@ -317,7 +324,7 @@ func (s *Server) handleVisitorFinish(w http.ResponseWriter, r *http.Request, v *
 		return
 	}
 	http.SetCookie(w, &http.Cookie{
-		Name:     visitorSessionCookie,
+		Name:     v.cookieName(visitorSessionCookie),
 		Value:    sealed,
 		Path:     "/",
 		MaxAge:   int(visitorSessionLifetime / time.Second),
@@ -352,6 +359,13 @@ func (v *visitorLogin) cookieName(base string) string {
 	return base
 }
 
+func (v *visitorLogin) stateCookiePath() string {
+	if v.secure {
+		return "/"
+	}
+	return v.callback.Path
+}
+
 func (v *visitorLogin) bindCookie(value string, maxAge int) *http.Cookie {
 	return &http.Cookie{Name: v.cookieName(visitorBindCookie), Value: value, Path: "/", MaxAge: maxAge, HttpOnly: true, Secure: v.secure, SameSite: http.SameSiteLaxMode}
 }
@@ -382,7 +396,7 @@ func (v *visitorLogin) consumeTicket(id string, expiresAt time.Time) bool {
 }
 
 func (v *visitorLogin) clearSession(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: visitorSessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: v.secure, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: v.cookieName(visitorSessionCookie), Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: v.secure, SameSite: http.SameSiteLaxMode})
 }
 
 func randomToken(size int) (string, error) {
@@ -466,7 +480,7 @@ func stripVisitorSessionCookie(header http.Header) {
 		out := parts[:0]
 		for _, part := range parts {
 			name, _, _ := strings.Cut(strings.TrimSpace(part), "=")
-			if strings.TrimSpace(name) == visitorSessionCookie {
+			if strings.HasPrefix(strings.TrimPrefix(strings.TrimSpace(name), visitorCookieHostPrefix), visitorCookiePrefix) {
 				changed = true
 				continue
 			}

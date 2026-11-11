@@ -232,7 +232,7 @@ func visitorLoginTicket(t *testing.T, s *Server, idp *fakeVisitorIdP, tunnelURL 
 	if err != nil || start.Host != "example.com" || start.Path != visitorStartPath {
 		t.Fatalf("login redirect = %q, want apex start URL", first.Header().Get("Location"))
 	}
-	bind := responseCookie(first.Result(), visitorBindCookie)
+	bind := responseCookie(first.Result(), s.visitor.cookieName(visitorBindCookie))
 	if bind == nil || bind.Value == "" || bind.Path != "/" || bind.Domain != "" || !bind.HttpOnly || bind.SameSite != http.SameSiteLaxMode || bind.MaxAge != int(oidc.StateLifetime/time.Second) {
 		t.Fatalf("binding cookie = %+v, want host-only HttpOnly Lax cookie with the state lifetime", bind)
 	}
@@ -242,11 +242,15 @@ func visitorLoginTicket(t *testing.T, s *Server, idp *fakeVisitorIdP, tunnelURL 
 	}
 	var stateCookie *http.Cookie
 	for _, cookie := range startRec.Result().Cookies() {
-		if strings.HasPrefix(cookie.Name, visitorStateCookiePrefix) {
+		if strings.HasPrefix(strings.TrimPrefix(cookie.Name, visitorCookieHostPrefix), visitorStateCookiePrefix) {
 			stateCookie = cookie
 		}
 	}
-	if stateCookie == nil || stateCookie.Path != visitorDefaultCallback || !stateCookie.HttpOnly {
+	wantStatePath := visitorDefaultCallback
+	if s.visitor.secure {
+		wantStatePath = "/"
+	}
+	if stateCookie == nil || stateCookie.Path != wantStatePath || !stateCookie.HttpOnly || stateCookie.Secure != s.visitor.secure || strings.HasPrefix(stateCookie.Name, visitorCookieHostPrefix) != s.visitor.secure {
 		t.Fatalf("start state cookie = %+v", stateCookie)
 	}
 	authorize, err := http.NewRequest(http.MethodGet, startRec.Header().Get("Location"), nil)
@@ -285,7 +289,7 @@ func visitorLoginFlow(t *testing.T, s *Server, idp *fakeVisitorIdP, tunnelURL st
 		return callback, nil
 	}
 	finish := visitorRequest(t, s, http.MethodGet, finishURL, htmlAccept(), bind)
-	return finish, responseCookie(finish.Result(), visitorSessionCookie)
+	return finish, responseCookie(finish.Result(), s.visitor.cookieName(visitorSessionCookie))
 }
 
 func TestVisitorLoginRedirectsBrowsersAndRejectsAPIClients(t *testing.T) {
@@ -716,5 +720,110 @@ func TestVisitorLoginTicketRequiresInitiatingBrowser(t *testing.T) {
 	ok := visitorRequest(t, s, http.MethodGet, finishURL, htmlAccept(), bind)
 	if ok.Code != http.StatusFound || responseCookie(ok.Result(), visitorSessionCookie) == nil {
 		t.Fatalf("legitimate flow = %d, want 302 with a session", ok.Code)
+	}
+}
+
+func TestVisitorCookieNamesCarryHostPrefixOnlyWhenSecure(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	for _, secure := range []bool{false, true} {
+		s := newVisitorTestServer(t, idp)
+		s.visitor.secure = secure
+		prefix := ""
+		if secure {
+			prefix = "__Host-"
+		}
+		bindVisitorTunnel(t, s, "app.example.com", proto.Bind{OIDC: &proto.OIDCLogin{}})
+		first := visitorRequest(t, s, http.MethodGet, "http://app.example.com/", htmlAccept())
+		bind := responseCookie(first.Result(), prefix+visitorBindCookie)
+		if bind == nil || bind.Secure != secure || bind.Path != "/" || bind.Domain != "" {
+			t.Fatalf("secure=%v binding cookie = %+v, want name %q", secure, bind, prefix+visitorBindCookie)
+		}
+		start := visitorRequest(t, s, http.MethodGet, first.Header().Get("Location"), htmlAccept())
+		state := ""
+		for _, cookie := range start.Result().Cookies() {
+			if strings.HasPrefix(cookie.Name, prefix+visitorStateCookiePrefix) {
+				state = cookie.Name
+				if cookie.Secure != secure || cookie.Domain != "" || (secure && cookie.Path != "/") || (!secure && cookie.Path != visitorDefaultCallback) {
+					t.Fatalf("secure=%v state cookie = %+v", secure, cookie)
+				}
+			}
+		}
+		if state == "" || (!secure && strings.HasPrefix(state, "__Host-")) {
+			t.Fatalf("secure=%v state cookie name = %q", secure, state)
+		}
+		_, session := visitorLoginFlow(t, s, idp, "http://app.example.com/")
+		if session == nil || session.Name != prefix+visitorSessionCookie || session.Secure != secure || session.Path != "/" || session.Domain != "" {
+			t.Fatalf("secure=%v session cookie = %+v, want name %q", secure, session, prefix+visitorSessionCookie)
+		}
+		ok := visitorRequest(t, s, http.MethodGet, "http://app.example.com/api", http.Header{"Accept": {"application/json"}}, session)
+		if ok.Code != http.StatusOK {
+			t.Fatalf("secure=%v session request = %d, want 200", secure, ok.Code)
+		}
+		logout := visitorRequest(t, s, http.MethodGet, "http://app.example.com"+visitorLogoutPath, htmlAccept(), session)
+		clearedNames := 0
+		for _, cookie := range logout.Result().Cookies() {
+			if cookie.Name == prefix+visitorSessionCookie && cookie.MaxAge < 0 {
+				clearedNames++
+			}
+		}
+		if clearedNames != 1 {
+			t.Fatalf("secure=%v logout cleared %d session cookies, want 1", secure, clearedNames)
+		}
+	}
+}
+
+func TestVisitorSessionSelectionRequiresExactlyOneValidCookie(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	captured := bindVisitorTunnel(t, s, "app.example.com", proto.Bind{OIDC: &proto.OIDCLogin{}})
+	_, first := visitorLoginFlow(t, s, idp, "http://app.example.com/")
+	_, second := visitorLoginFlow(t, s, idp, "http://app.example.com/")
+	if first == nil || second == nil || first.Value == second.Value {
+		t.Fatal("expected two distinct valid session cookies")
+	}
+	api := http.Header{"Accept": {"application/json"}}
+
+	if rec := visitorRequest(t, s, http.MethodGet, "http://app.example.com/api", api, first, second); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("two valid session cookies = %d, want 401", rec.Code)
+	}
+	if _, hits := captured.last(); hits != 0 {
+		t.Fatalf("origin reached %d times with two valid session cookies", hits)
+	}
+	junk := &http.Cookie{Name: first.Name, Value: "junk"}
+	if rec := visitorRequest(t, s, http.MethodGet, "http://app.example.com/api", api, junk, second); rec.Code != http.StatusOK {
+		t.Fatalf("one junk and one valid session cookie = %d, want 200", rec.Code)
+	}
+	if rec := visitorRequest(t, s, http.MethodGet, "http://app.example.com/api", api, junk); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("only a junk session cookie = %d, want 401", rec.Code)
+	}
+}
+
+func TestVisitorEdgeCookiesNeverReachTheUpstream(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	captured := bindVisitorTunnel(t, s, "app.example.com", proto.Bind{OIDC: &proto.OIDCLogin{}})
+	_, session := visitorLoginFlow(t, s, idp, "http://app.example.com/")
+	rec := visitorRequest(t, s, http.MethodGet, "http://app.example.com/api", http.Header{"Accept": {"application/json"}}, session,
+		&http.Cookie{Name: "app", Value: "keep"},
+		&http.Cookie{Name: "__Host-" + visitorSessionCookie, Value: "x"},
+		&http.Cookie{Name: visitorBindCookie, Value: "x"},
+		&http.Cookie{Name: "__Host-" + visitorBindCookie, Value: "x"},
+		&http.Cookie{Name: visitorStateCookiePrefix + "abc", Value: "x"},
+		&http.Cookie{Name: "__Host-" + visitorStateCookiePrefix + "abc", Value: "x"},
+	)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	got, _ := captured.last()
+	if cookie := got.Get("Cookie"); cookie != "app=keep" {
+		t.Fatalf("forwarded Cookie = %q, want only app=keep", cookie)
+	}
+}
+
+func TestStripVisitorSessionCookieStripsEveryEdgeCookie(t *testing.T) {
+	header := http.Header{"Cookie": {"a=1; __Host-" + visitorSessionCookie + "=s; " + visitorBindCookie + "=b", "__Host-" + visitorStateCookiePrefix + "x=st; ngstone_visitorx=keep; b=2"}}
+	stripVisitorSessionCookie(header)
+	if got := header.Values("Cookie"); len(got) != 1 || got[0] != "a=1; ngstone_visitorx=keep; b=2" {
+		t.Fatalf("Cookie = %q", got)
 	}
 }
