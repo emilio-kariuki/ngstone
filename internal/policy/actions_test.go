@@ -57,9 +57,6 @@ func TestTransformRulesApplyInOrderAndDoNotDecide(t *testing.T) {
 	}
 
 	resp := http.Header{"Server": {"app"}, "Content-Type": {"text/plain"}}
-	if !d.TransformsResponse() {
-		t.Fatal("TransformsResponse = false")
-	}
 	d.ApplyResponseHeaders(resp)
 	if resp.Get("Server") != "" || resp.Get("Cache-Control") != "no-store" || resp.Get("Content-Type") != "text/plain" {
 		t.Fatalf("response headers = %v", resp)
@@ -72,7 +69,7 @@ func TestTransformRulesApplyInOrderAndDoNotDecide(t *testing.T) {
 		t.Fatal("default deny allowed a request")
 	}
 	dd.ApplyRequestHeaders(denied.Header)
-	if denied.Header.Get("X-Env") != "" || denied.Header.Get("X-Debug") != "1" || dd.TransformsResponse() {
+	if denied.Header.Get("X-Env") != "" || denied.Header.Get("X-Debug") != "1" {
 		t.Fatal("transforms applied to a denied request")
 	}
 }

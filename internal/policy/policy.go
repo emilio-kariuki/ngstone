@@ -251,10 +251,6 @@ func (d *Decision) ApplyCORS(h http.Header) {
 	}
 }
 
-func (d *Decision) TransformsResponse() bool {
-	return len(d.response) > 0 || d.cors != nil
-}
-
 func ruleMatches(rule Rule, r *http.Request) bool {
 	if r == nil {
 		return false
