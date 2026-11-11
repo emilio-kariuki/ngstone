@@ -632,3 +632,96 @@ func TestAdminMTLSAuditRecordsActorAndFingerprint(t *testing.T) {
 		t.Fatalf("loopback event fields = %+v, want actor admin, auth_type loopback, no fingerprint", event.Fields)
 	}
 }
+
+func TestAdminMTLSKeepsOIDCFlowsOff(t *testing.T) {
+	s, idp, _ := newOIDCTestServer(t, []string{"admins"})
+	defer idp.Close()
+	h := startAdminMTLS(t, s)
+	viewer := h.cert(t, "vera", oidc.RoleViewer)
+	client := h.client(t, &viewer)
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	cookies := fmt.Sprintf("%s=stale; %s=stale; %s=stale", oidcSessionCookie, oidcCSRFCookie, oidcStateCookie)
+
+	fetch := func(method, path string, headers map[string]string) (*http.Response, string) {
+		t.Helper()
+		request, err := http.NewRequest(method, h.srv.URL+path, nil)
+		if err != nil {
+			t.Fatalf("NewRequest: %v", err)
+		}
+		for name, value := range headers {
+			request.Header.Set(name, value)
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		defer response.Body.Close()
+		data, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		return response, string(data)
+	}
+
+	response, body := fetch(http.MethodGet, "/", map[string]string{"Cookie": cookies})
+	if response.StatusCode != http.StatusOK || response.Header.Get("Location") != "" || !strings.Contains(body, "ngstone / ops") {
+		t.Fatalf("GET / with a viewer certificate = %d (Location %q), want the dashboard with 200", response.StatusCode, response.Header.Get("Location"))
+	}
+	if len(response.Header.Values("Set-Cookie")) != 0 {
+		t.Fatalf("GET / set cookies %v, want none", response.Header.Values("Set-Cookie"))
+	}
+
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/auth/oidc/start"},
+		{http.MethodGet, "/api/v1/auth/oidc/callback?code=c&state=s"},
+		{http.MethodGet, "/api/v1/auth/logout"},
+		{http.MethodPost, "/api/v1/auth/logout"},
+	}
+	for _, route := range routes {
+		response, body := fetch(route.method, route.path, map[string]string{"Cookie": cookies})
+		if response.StatusCode != http.StatusNotFound || adminErrorCode(t, body) != "not_found" {
+			t.Fatalf("%s %s on the mTLS listener = %d %s, want 404 not_found", route.method, route.path, response.StatusCode, body)
+		}
+		if len(response.Header.Values("Set-Cookie")) != 0 {
+			t.Fatalf("%s %s set cookies %v, want none", route.method, route.path, response.Header.Values("Set-Cookie"))
+		}
+	}
+
+	response, body = fetch(http.MethodPost, "/api/v1/auth/logout", map[string]string{"Cookie": cookies, "Sec-Fetch-Site": "cross-site", "Origin": "https://evil.example"})
+	if response.StatusCode != http.StatusNotFound || len(response.Header.Values("Set-Cookie")) != 0 {
+		t.Fatalf("cross-site logout = %d with cookies %v (%s), want 404 and no cookies", response.StatusCode, response.Header.Values("Set-Cookie"), body)
+	}
+
+	response, body = fetch(http.MethodGet, "/api/v1/auth/me", nil)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, `"auth_type":"mtls"`) || !strings.Contains(body, `"name":"vera"`) {
+		t.Fatalf("GET /api/v1/auth/me = %d %s, want the mTLS principal", response.StatusCode, body)
+	}
+}
+
+func TestOIDCFlowsStillServedOnOpsHandler(t *testing.T) {
+	s, idp, _ := newOIDCTestServer(t, []string{"admins"})
+	defer idp.Close()
+	serve := func(method, path string) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		s.opsMux().ServeHTTP(recorder, httptest.NewRequest(method, path, nil))
+		return recorder
+	}
+
+	if recorder := serve(http.MethodGet, "/"); recorder.Code != http.StatusFound || recorder.Header().Get("Location") != "/api/v1/auth/oidc/start" {
+		t.Fatalf("GET / without a session = %d Location %q, want 302 to the OIDC start route", recorder.Code, recorder.Header().Get("Location"))
+	}
+	start := serve(http.MethodGet, "/api/v1/auth/oidc/start")
+	if start.Code != http.StatusFound || responseCookie(start.Result(), oidcStateCookie) == nil {
+		t.Fatalf("OIDC start = %d with state cookie %v, want 302 and a state cookie", start.Code, responseCookie(start.Result(), oidcStateCookie))
+	}
+	if recorder := serve(http.MethodGet, "/api/v1/auth/oidc/callback"); recorder.Code != http.StatusBadRequest || adminErrorCode(t, recorder.Body.String()) != "oidc_state_invalid" {
+		t.Fatalf("OIDC callback without state = %d %s, want 400 oidc_state_invalid", recorder.Code, recorder.Body.String())
+	}
+	logout := serve(http.MethodPost, "/api/v1/auth/logout")
+	if logout.Code != http.StatusFound || logout.Header().Get("Location") != "/" || len(logout.Result().Cookies()) != 3 {
+		t.Fatalf("logout = %d Location %q cookies %v, want 302 to / clearing 3 cookies", logout.Code, logout.Header().Get("Location"), logout.Result().Cookies())
+	}
+}

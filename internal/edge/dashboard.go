@@ -541,7 +541,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if s.oidcEnabled() {
+	if auth, ok := adminAuthFromContext(r.Context()); ok && auth.AuthType == adminAuthTypeMTLS {
+		if !s.authorizeAdminRole(w, r, auth) {
+			return
+		}
+	} else if s.oidcEnabled() {
 		if _, ok := s.oidcSessionFromRequest(r); !ok {
 			http.Redirect(w, r, "/api/v1/auth/oidc/start", http.StatusFound)
 			return

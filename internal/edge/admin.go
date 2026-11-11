@@ -28,6 +28,11 @@ const (
 
 func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, adminapi.APIPrefix)
+	oidcRoute := path == "/auth/oidc/start" || path == "/auth/oidc/callback" || path == "/auth/logout"
+	if auth, ok := adminAuthFromContext(r.Context()); ok && auth.AuthType == adminAuthTypeMTLS && oidcRoute {
+		writeAdminError(w, http.StatusNotFound, "not_found", "management resource not found")
+		return
+	}
 	switch path {
 	case "/auth/oidc/start":
 		s.handleOIDCStart(w, r)
