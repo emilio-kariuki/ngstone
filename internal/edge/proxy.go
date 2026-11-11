@@ -116,6 +116,11 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	rec := &statusRecorder{ResponseWriter: w, idle: limits.ClientIdleTimeout}
 	defer recordRequestMetrics(rec)
 
+	if ambiguousRequestTarget(r.URL) {
+		http.Error(rec, "bad request", http.StatusBadRequest)
+		return
+	}
+
 	host := stripPort(r.Host)
 	if s.visitor.servesHost(host) && s.visitor.handlesApexPath(r.URL.Path) {
 		if !s.perIPLimiter.allow(stripPort(r.RemoteAddr)) {
@@ -446,6 +451,18 @@ func proxyErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	}
 
 	writeError(w, http.StatusBadGateway)
+}
+
+func ambiguousRequestTarget(u *url.URL) bool {
+	if u.Opaque != "" || !strings.HasPrefix(u.Path, "/") {
+		return true
+	}
+	for _, seg := range strings.Split(u.Path, "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) routeMissStatus(host string) int {

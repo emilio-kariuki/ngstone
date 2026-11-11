@@ -101,7 +101,7 @@ func TestHandlePublicVerifiesGitHubWebhooks(t *testing.T) {
 		t.Fatalf("unsigned status = %d body=%q", rec.Code, rec.Body.String())
 	}
 	rec = webhookRequest(s, "/other/../hooks/github", body, false, nil)
-	if rec.Code != http.StatusUnauthorized {
+	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("dot-segment bypass status = %d body=%q", rec.Code, rec.Body.String())
 	}
 	if strings.Contains(rec.Body.String(), testWebhookSecret) {
