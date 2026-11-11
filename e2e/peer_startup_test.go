@@ -33,9 +33,9 @@ func TestEdgeRefusesPeerAddrWithoutPostgres(t *testing.T) {
 		{
 			name: "peer listen address without a peer address",
 			extra: func(peerAddr string) ([]string, []string) {
-				return []string{"-token-sha256", sha256Hex("e2e-token"), "-peer-listen", peerAddr}, nil
+				return []string{"-token-sha256", sha256Hex("e2e-token"), "-peer-listen", peerAddr}, []string{}
 			},
-			want: "peer-addr",
+			want: "-peer-listen (or $NGSTONE_PEER_LISTEN) requires -peer-addr",
 		},
 	}
 	for _, tc := range cases {

@@ -2248,7 +2248,67 @@ func TestPeerServerRejectsUnknownFrameType(t *testing.T) {
 	}
 }
 
-func TestPeerServerRefusesTCPAndControlFramesForNow(t *testing.T) {
+func TestPeerServerDispatchesOnNegotiatedALPN(t *testing.T) {
+	cases := []struct {
+		name  string
+		alpns []string
+		send  func(t *testing.T) []byte
+	}{
+		{
+			name:  "peer-2 negotiated, legacy bytes sent",
+			alpns: []string{peerALPN2},
+			send: func(t *testing.T) []byte {
+				frame := peerFrame{kind: peerFrameSNI, src: netip.MustParseAddrPort("203.0.113.9:4000"), payload: helloFor(t, peerTestHost)}
+				b, ok := frame.encode(peerALPN1)
+				if !ok {
+					t.Fatal("legacy frame cannot be encoded")
+				}
+				return b
+			},
+		},
+		{
+			name:  "peer-1 negotiated, typed frame sent",
+			alpns: []string{peerALPN1},
+			send: func(t *testing.T) []byte {
+				frame := peerFrame{kind: peerFrameSNI, src: netip.MustParseAddrPort("203.0.113.9:4000"), payload: helloFor(t, peerTestHost)}
+				b, ok := frame.encode(peerALPN2)
+				if !ok {
+					t.Fatal("typed frame cannot be encoded")
+				}
+				return b
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pc := newPeerCluster(t)
+			a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
+			registerPeers(t, a, b)
+			b.bindTLS(t, peerTestHost)
+			accepted := metricDelta(metricPeerAcceptedConns)
+			cfg := a.srv.peers.clientTLS(b.pin())
+			cfg.NextProtos = tc.alpns
+
+			conn, err := dialPeerTLS(t, cfg, b.peerAddr())
+			if err != nil {
+				t.Fatalf("handshake: %v", err)
+			}
+			if got := conn.ConnectionState().NegotiatedProtocol; got != tc.alpns[0] {
+				t.Fatalf("negotiated %q, want %q", got, tc.alpns[0])
+			}
+			if _, err := conn.Write(tc.send(t)); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			expectClosed(t, conn)
+			time.Sleep(100 * time.Millisecond)
+			if accepted() != 0 || b.agentHit.Load() != 0 {
+				t.Fatalf("accepted=%d agentHit=%d, want both zero", accepted(), b.agentHit.Load())
+			}
+		})
+	}
+}
+
+func TestPeerServerRefusesTCPWithoutManagerAndControlWhileDraining(t *testing.T) {
 	pc := newPeerCluster(t)
 	a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
 	registerPeers(t, a, b)
@@ -2319,7 +2379,7 @@ func TestPeerSkewDoesNotMarkOwnerDown(t *testing.T) {
 	if tc != nil || outcome != peerSkew {
 		t.Fatalf("attempt = %v, %d; want nil, %d", tc, outcome, peerSkew)
 	}
-	if _, down := a.srv.peers.down.Get(owner.peer().EdgeID); down {
+	if _, down := a.srv.peers.down.Get(owner.peer().PeerAddr); down {
 		t.Fatal("a version skew marked the owner down")
 	}
 	if skew() != 1 {

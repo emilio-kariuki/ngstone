@@ -305,6 +305,18 @@ func TestReconcileRemoteCapAndAllocated(t *testing.T) {
 		expectPortRefused(t, extra)
 	})
 
+	t.Run("outside the manager range", func(t *testing.T) {
+		tm := newTCPManager(1, 2, "127.0.0.1", nil)
+		port := freePorts(t, 1)[0]
+		t.Cleanup(func() { tm.reconcileRemote(nil, accept) })
+
+		tm.reconcileRemote(map[int]struct{}{port: {}}, accept)
+		if len(tm.remote) != 0 {
+			t.Fatalf("listeners = %d, want 0 for a port outside the range", len(tm.remote))
+		}
+		expectPortRefused(t, port)
+	})
+
 	t.Run("allocated", func(t *testing.T) {
 		tm := newTCPManager(1, 65535, "127.0.0.1", nil)
 		ports := freePorts(t, 2)
