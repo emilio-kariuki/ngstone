@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -536,6 +537,28 @@ func TestNewRejectsInvalidPeerConfig(t *testing.T) {
 				t.Fatalf("err = %v, want it to mention %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestNewValidatesPeerAddrBeforeOpeningStorage(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "control.db")
+	s, err := New(Config{
+		Domain:        "example.com",
+		TokenSHA256:   sumToken("tok"),
+		PublicScheme:  "https",
+		StorageDriver: "sqlite",
+		StorageDSN:    dsn,
+		EdgeID:        "edge-a",
+		PeerAddr:      "localhost:4043",
+	})
+	if err == nil {
+		t.Fatalf("New accepted a hostname as the peer address: %+v", s.cfg)
+	}
+	if !strings.Contains(err.Error(), "invalid peer address") {
+		t.Fatalf("err = %v, want it to mention an invalid peer address", err)
+	}
+	if _, statErr := os.Stat(dsn); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("database file %s exists after a rejected peer address (stat err = %v)", dsn, statErr)
 	}
 }
 

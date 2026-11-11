@@ -154,6 +154,13 @@ func New(cfg Config) (*Server, error) {
 	registry := NewRegistry()
 	registry.SetLimits(limits)
 
+	storageConfigured := cfg.Storage != nil || strings.TrimSpace(cfg.StorageDriver) != "" || strings.TrimSpace(cfg.StorageDSN) != ""
+	if cfg.PeerAddr != "" || cfg.PeerListen != "" {
+		if err := validatePeerAddr(cfg, storageConfigured); err != nil {
+			return nil, err
+		}
+	}
+
 	var durableStore *storage.Store
 	if cfg.Storage != nil {
 		durableStore = cfg.Storage
@@ -177,13 +184,6 @@ func New(cfg Config) (*Server, error) {
 		closeOpenedStorage()
 		return nil, errors.New("edge: a public TLS config cannot be combined with insecure mode")
 	}
-	if cfg.PeerAddr != "" || cfg.PeerListen != "" {
-		if err := validatePeerAddr(cfg, durableStore != nil); err != nil {
-			closeOpenedStorage()
-			return nil, err
-		}
-	}
-
 	var credentialStore credentialStore
 	if durableStore != nil {
 		credentialStore = durableStore
