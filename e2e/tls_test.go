@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -53,26 +54,28 @@ func selfSignedTLSCert(t *testing.T, host string) (tls.Certificate, *x509.CertPo
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, pool
 }
 
-func startLocalTLSEcho(t *testing.T, cert tls.Certificate) string {
+func startLocalTLSEcho(t *testing.T, cert tls.Certificate) (string, *atomic.Int64) {
 	t.Helper()
 	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
 	if err != nil {
 		t.Fatalf("listen local tls app: %v", err)
 	}
 	t.Cleanup(func() { ln.Close() })
+	accepts := new(atomic.Int64)
 	go func() {
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
+			accepts.Add(1)
 			go func(c net.Conn) {
 				defer c.Close()
 				io.Copy(c, c)
 			}(c)
 		}
 	}()
-	return ln.Addr().String()
+	return ln.Addr().String(), accepts
 }
 
 var tlsAdvertRe = regexp.MustCompile(`tls://[^\s]+\s+->`)
@@ -104,7 +107,7 @@ func TestTLSPassthroughEndToEnd(t *testing.T) {
 	_, publicPort, _ := net.SplitHostPort(publicAddr)
 
 	localCert, localPool := selfSignedTLSCert(t, hostname)
-	localAddr := startLocalTLSEcho(t, localCert)
+	localAddr, localAccepts := startLocalTLSEcho(t, localCert)
 
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "plain-http-ok")
@@ -167,6 +170,7 @@ func TestTLSPassthroughEndToEnd(t *testing.T) {
 	})
 
 	t.Run("unknown_sni_is_not_passed_through", func(t *testing.T) {
+		acceptsBefore := localAccepts.Load()
 		raw, err := net.DialTimeout("tcp", publicAddr, 5*time.Second)
 		if err != nil {
 			t.Fatalf("dial public listener: %v", err)
@@ -176,6 +180,13 @@ func TestTLSPassthroughEndToEnd(t *testing.T) {
 		conn := tls.Client(raw, &tls.Config{ServerName: "other." + domain, RootCAs: localPool})
 		if err := conn.Handshake(); err == nil {
 			t.Fatal("handshake for an unbound hostname reached the local app")
+		}
+		settle := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(settle) {
+			if got := localAccepts.Load(); got != acceptsBefore {
+				t.Fatalf("local app accepted %d connection(s) for an unbound hostname", got-acceptsBefore)
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
 	})
 
