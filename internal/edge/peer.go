@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -31,7 +32,12 @@ import (
 )
 
 const (
-	peerALPN = "ngstone-peer-1"
+	peerALPN1 = "ngstone-peer-1"
+	peerALPN2 = "ngstone-peer-2"
+
+	peerFrameSNI     byte = 0x01
+	peerFrameTCP     byte = 0x02
+	peerFrameControl byte = 0x03
 
 	peerStatusAccept   byte = 0x00
 	peerStatusNotOwner byte = 0x01
@@ -188,18 +194,22 @@ func (p *peerForwarder) knownPin(pin string) bool {
 	return ok && time.Now().Before(expiresAt)
 }
 
+func peerKnownALPN(proto string) bool {
+	return proto == peerALPN2 || proto == peerALPN1
+}
+
 func (p *peerForwarder) serverTLS() *tls.Config {
 	return &tls.Config{
 		MinVersion:             tls.VersionTLS13,
 		Certificates:           []tls.Certificate{p.id.cert},
 		ClientAuth:             tls.RequireAnyClientCert,
-		NextProtos:             []string{peerALPN},
+		NextProtos:             []string{peerALPN2, peerALPN1},
 		SessionTicketsDisabled: true,
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			if cs.DidResume {
 				return errPeerResumed
 			}
-			if cs.NegotiatedProtocol != peerALPN {
+			if !peerKnownALPN(cs.NegotiatedProtocol) {
 				return errPeerALPN
 			}
 			if len(cs.PeerCertificates) == 0 {
@@ -224,12 +234,12 @@ func (p *peerForwarder) clientTLS(wantPin string) *tls.Config {
 		Certificates:       []tls.Certificate{p.id.cert},
 		InsecureSkipVerify: true,
 		ServerName:         "ngstone-peer",
-		NextProtos:         []string{peerALPN},
+		NextProtos:         []string{peerALPN2, peerALPN1},
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			if cs.DidResume {
 				return errPeerResumed
 			}
-			if cs.NegotiatedProtocol != peerALPN {
+			if !peerKnownALPN(cs.NegotiatedProtocol) {
 				return errPeerALPN
 			}
 			if len(cs.PeerCertificates) == 0 {
@@ -394,9 +404,38 @@ func (p *peerForwarder) serveConn(ctx context.Context, c net.Conn) {
 		c.Close()
 		return
 	}
+	kind := peerFrameSNI
+	if tc.ConnectionState().NegotiatedProtocol == peerALPN2 {
+		var head [1]byte
+		if _, err := io.ReadFull(tc, head[:]); err != nil {
+			slog.Debug("edge: peer frame header unreadable", "remote", c.RemoteAddr().String(), "err", err)
+			tc.Close()
+			return
+		}
+		kind = head[0]
+		switch kind {
+		case peerFrameSNI, peerFrameControl:
+		case peerFrameTCP:
+			var port [2]byte
+			if _, err := io.ReadFull(tc, port[:]); err != nil {
+				slog.Debug("edge: peer frame port unreadable", "remote", c.RemoteAddr().String(), "err", err)
+				tc.Close()
+				return
+			}
+		default:
+			slog.Debug("edge: peer frame of unknown type", "remote", c.RemoteAddr().String(), "type", kind)
+			tc.Close()
+			return
+		}
+	}
 	remote, err := readProxyProtoHeader(tc, nil)
 	if err != nil || remote == nil {
 		slog.Debug("edge: peer connection without a client address", "remote", c.RemoteAddr().String(), "err", err)
+		tc.Close()
+		return
+	}
+	if kind != peerFrameSNI {
+		writePeerStatus(tc, peerStatusNotOwner)
 		tc.Close()
 		return
 	}
@@ -516,9 +555,36 @@ const (
 	peerOK peerOutcome = iota
 	peerDown
 	peerStale
+	peerSkew
 )
 
-func (p *peerForwarder) attempt(owner storage.EdgePeer, payload []byte) (*tls.Conn, peerOutcome) {
+type peerFrame struct {
+	kind    byte
+	port    uint16
+	src     netip.AddrPort
+	payload []byte
+}
+
+func (f peerFrame) encode(alpn string) ([]byte, bool) {
+	if alpn != peerALPN2 && (alpn != peerALPN1 || f.kind != peerFrameSNI) {
+		return nil, false
+	}
+	line, err := proxyProtoV1Line(f.src)
+	if err != nil {
+		return nil, false
+	}
+	buf := make([]byte, 0, 3+len(line)+len(f.payload))
+	if alpn == peerALPN2 {
+		buf = append(buf, f.kind)
+		if f.kind == peerFrameTCP {
+			buf = binary.BigEndian.AppendUint16(buf, f.port)
+		}
+	}
+	buf = append(buf, line...)
+	return append(buf, f.payload...), true
+}
+
+func (p *peerForwarder) attempt(owner storage.EdgePeer, frame peerFrame) (*tls.Conn, peerOutcome) {
 	dialer := net.Dialer{Timeout: peerDialTimeout}
 	raw, err := dialer.Dial("tcp", owner.PeerAddr)
 	if err != nil {
@@ -534,6 +600,13 @@ func (p *peerForwarder) attempt(owner storage.EdgePeer, payload []byte) (*tls.Co
 		raw.Close()
 		slog.Debug("edge: peer handshake failed", "owner", owner.EdgeID, "err", err)
 		return nil, peerStale
+	}
+	payload, ok := frame.encode(tc.ConnectionState().NegotiatedProtocol)
+	if !ok {
+		tc.Close()
+		metricPeerVersionSkew.Add(1)
+		slog.Debug("edge: peer owner cannot carry this frame", "owner", owner.EdgeID, "kind", frame.kind, "alpn", tc.ConnectionState().NegotiatedProtocol)
+		return nil, peerSkew
 	}
 	var status [1]byte
 	err = tc.SetDeadline(time.Now().Add(peerStatusTimeout))
@@ -579,7 +652,7 @@ func (p *peerForwarder) pick(owners []storage.EdgePeer, failed storage.EdgePeer)
 	return storage.EdgePeer{}, false
 }
 
-func (p *peerForwarder) connect(key string, entry *ownerEntry, payload []byte) (upstream *tls.Conn, noOwner bool) {
+func (p *peerForwarder) connect(key string, entry *ownerEntry, frame peerFrame) (upstream *tls.Conn, noOwner bool) {
 	var failed storage.EdgePeer
 	resolved := false
 	reresolve := func() (found, noOwner bool) {
@@ -608,7 +681,7 @@ func (p *peerForwarder) connect(key string, entry *ownerEntry, payload []byte) (
 				return nil, false
 			}
 		}
-		upstream, outcome := p.attempt(owner, payload)
+		upstream, outcome := p.attempt(owner, frame)
 		if upstream != nil {
 			return upstream, false
 		}
@@ -640,16 +713,15 @@ func (p *peerForwarder) reserve(ip string) (func(), bool) {
 	}, true
 }
 
-func peerPayload(client *replayConn) ([]byte, netip.AddrPort, bool) {
+func peerPayload(client *replayConn) (peerFrame, bool) {
 	src, ok := peerClientAddrPort(client.RemoteAddr())
 	if !ok {
-		return nil, src, false
+		return peerFrame{}, false
 	}
-	line, err := proxyProtoV1Line(src)
-	if err != nil {
-		return nil, src, false
+	if _, err := proxyProtoV1Line(src); err != nil {
+		return peerFrame{}, false
 	}
-	return append([]byte(line), client.buf...), src, true
+	return peerFrame{kind: peerFrameSNI, src: src, payload: client.buf}, true
 }
 
 func (p *peerForwarder) forward(client *replayConn, host string) {
@@ -675,19 +747,19 @@ func (p *peerForwarder) forward(client *replayConn, host string) {
 		return
 	}
 	defer release()
-	payload, src, ok := peerPayload(client)
+	frame, ok := peerPayload(client)
 	if !ok {
 		slog.Debug("edge: peer forward without a client address", "host", host)
 		client.Close()
 		return
 	}
-	upstream, noOwner := p.connect(key, entry, payload)
+	upstream, noOwner := p.connect(key, entry, frame)
 	switch {
 	case noOwner:
 		p.local(client)
 	case upstream == nil:
 		metricPeerForwardFailed.Add(1)
-		slog.Debug("edge: peer forward failed", "host", host, "client", src.String())
+		slog.Debug("edge: peer forward failed", "host", host, "client", frame.src.String())
 		client.Close()
 	default:
 		p.run(client, upstream)

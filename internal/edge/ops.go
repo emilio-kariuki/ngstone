@@ -41,6 +41,7 @@ var (
 	metricPeerLookupErrors      = expvar.NewInt("ngstoned_peer_lookup_errors_total")
 	metricPeerRejectedLookupCap = expvar.NewInt("ngstoned_peer_rejected_lookup_cap_total")
 	metricPeerAcceptedConns     = expvar.NewInt("ngstoned_peer_accepted_conns_total")
+	metricPeerVersionSkew       = expvar.NewInt("ngstoned_peer_version_skew_total")
 	metricPeerRejectedAuth      = expvar.NewInt("ngstoned_peer_rejected_auth_total")
 	metricPeerMisdirected       = expvar.NewInt("ngstoned_peer_misdirected_421_total")
 	metricPeerApexRuleLookups   = expvar.NewInt("ngstoned_peer_apex_rule_lookups_total")

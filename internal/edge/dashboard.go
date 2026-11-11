@@ -89,6 +89,7 @@ type dashboardMetrics struct {
 	PeerRejectedLookupCap    int64 `json:"peer_rejected_lookup_cap"`
 	PeerAcceptedConns        int64 `json:"peer_accepted_conns"`
 	PeerRejectedAuth         int64 `json:"peer_rejected_auth"`
+	PeerVersionSkew          int64 `json:"peer_version_skew"`
 	PeerMisdirected421       int64 `json:"peer_misdirected_421"`
 	PeerApexRuleLookups      int64 `json:"peer_apex_rule_lookups"`
 	ActivePeerForwards       int64 `json:"active_peer_forwards"`
@@ -346,6 +347,7 @@ func dashboardMetricsSnapshot() dashboardMetrics {
 		PeerRejectedLookupCap:    metricPeerRejectedLookupCap.Value(),
 		PeerAcceptedConns:        metricPeerAcceptedConns.Value(),
 		PeerRejectedAuth:         metricPeerRejectedAuth.Value(),
+		PeerVersionSkew:          metricPeerVersionSkew.Value(),
 		PeerMisdirected421:       metricPeerMisdirected.Value(),
 		PeerApexRuleLookups:      metricPeerApexRuleLookups.Value(),
 		ActivePeerForwards:       metricActivePeerForwards.Value(),
@@ -400,6 +402,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writePrometheusCounter(w, "ngstoned_peer_rejected_lookup_cap_total", "Forwards rejected by the owner lookup concurrency cap.", metrics.PeerRejectedLookupCap)
 	writePrometheusCounter(w, "ngstoned_peer_accepted_conns_total", "Forwarded connections accepted from peer edges.", metrics.PeerAcceptedConns)
 	writePrometheusCounter(w, "ngstoned_peer_rejected_auth_total", "Peer connections rejected during authentication.", metrics.PeerRejectedAuth)
+	writePrometheusCounter(w, "ngstoned_peer_version_skew_total", "Forwards skipped because the owner edge only speaks an older peer protocol.", metrics.PeerVersionSkew)
 	writePrometheusCounter(w, "ngstoned_peer_misdirected_421_total", "Requests answered with 421 because the connection targeted another edge.", metrics.PeerMisdirected421)
 	writePrometheusCounter(w, "ngstoned_peer_apex_rule_lookups_total", "Visitor login rules read from shared storage for tunnels owned by another edge.", metrics.PeerApexRuleLookups)
 	writePrometheusGauge(w, "ngstoned_active_peer_forwards", "Currently spliced forwarded connections.", metrics.ActivePeerForwards)

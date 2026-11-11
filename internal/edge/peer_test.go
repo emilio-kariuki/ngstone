@@ -257,11 +257,16 @@ func peerRejected(t *testing.T, cfg *tls.Config, addr string) error {
 
 func sendForwarded(t *testing.T, c net.Conn, src string, hello []byte) {
 	t.Helper()
-	line, err := proxyProtoV1Line(netip.MustParseAddrPort(src))
-	if err != nil {
-		t.Fatalf("proxy line: %v", err)
+	tc, ok := c.(*tls.Conn)
+	if !ok {
+		t.Fatalf("sendForwarded needs a TLS connection, got %T", c)
 	}
-	if _, err := c.Write(append([]byte(line), hello...)); err != nil {
+	frame := peerFrame{kind: peerFrameSNI, src: netip.MustParseAddrPort(src), payload: hello}
+	payload, ok := frame.encode(tc.ConnectionState().NegotiatedProtocol)
+	if !ok {
+		t.Fatalf("frame cannot be encoded for %q", tc.ConnectionState().NegotiatedProtocol)
+	}
+	if _, err := c.Write(payload); err != nil {
 		t.Fatalf("write forwarded payload: %v", err)
 	}
 }
@@ -432,7 +437,7 @@ func TestPeerTLSNeverResumes(t *testing.T) {
 	if !b.srv.peers.serverTLS().SessionTicketsDisabled {
 		t.Fatal("server config issues session tickets")
 	}
-	resumed := tls.ConnectionState{DidResume: true, NegotiatedProtocol: peerALPN, PeerCertificates: []*x509.Certificate{b.srv.peers.id.cert.Leaf}}
+	resumed := tls.ConnectionState{DidResume: true, NegotiatedProtocol: peerALPN2, PeerCertificates: []*x509.Certificate{b.srv.peers.id.cert.Leaf}}
 	if err := b.srv.peers.serverTLS().VerifyConnection(resumed); !errors.Is(err, errPeerResumed) {
 		t.Fatalf("server accepted a resumed session: %v", err)
 	}
@@ -614,7 +619,7 @@ func TestPeerAcceptRejectsMissingProxyHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
 	}
-	if _, err := tc.Write(helloFor(t, peerTestHost)); err != nil {
+	if _, err := tc.Write(append([]byte{peerFrameSNI}, helloFor(t, peerTestHost)...)); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	expectClosed(t, tc)
@@ -1312,7 +1317,7 @@ func TestPeerAcceptClosesProxyHeaderWithoutClientAddress(t *testing.T) {
 			if err := tc.Handshake(); err != nil {
 				t.Fatalf("handshake: %v", err)
 			}
-			if _, err := tc.Write(append(append([]byte{}, header...), helloFor(t, peerTestHost)...)); err != nil {
+			if _, err := tc.Write(append(append([]byte{peerFrameSNI}, header...), helloFor(t, peerTestHost)...)); err != nil {
 				t.Fatalf("write: %v", err)
 			}
 			expectClosed(t, tc)
@@ -1812,4 +1817,274 @@ func TestPeerListenAdvertisesPeerAddr(t *testing.T) {
 		peers, err := store.LiveEdgePeers(context.Background(), time.Now())
 		return err == nil && len(peers) == 1 && peers[0].PeerAddr == advertised
 	})
+}
+
+type fakePeerOwner struct {
+	addr string
+	pin  string
+	got  chan []byte
+}
+
+func newFakePeer1Owner(t *testing.T) *fakePeerOwner {
+	t.Helper()
+	id, err := newPeerIdentity()
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	f := &fakePeerOwner{addr: ln.Addr().String(), pin: id.pin, got: make(chan []byte, 4)}
+	cfg := &tls.Config{
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{id.cert},
+		ClientAuth:   tls.RequireAnyClientCert,
+		NextProtos:   []string{peerALPN1},
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			func() {
+				defer c.Close()
+				_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+				tc := tls.Server(c, cfg)
+				if tc.Handshake() != nil {
+					return
+				}
+				buf := make([]byte, 4096)
+				n, _ := tc.Read(buf)
+				if n == 0 {
+					return
+				}
+				got := append([]byte{}, buf[:n]...)
+				_ = tc.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+				for {
+					n, err := tc.Read(buf)
+					got = append(got, buf[:n]...)
+					if err != nil {
+						break
+					}
+				}
+				f.got <- got
+				_, _ = tc.Write([]byte{peerStatusAccept})
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		<-done
+	})
+	return f
+}
+
+func (f *fakePeerOwner) peer() storage.EdgePeer {
+	return storage.EdgePeer{EdgeID: "fake-owner", PeerAddr: f.addr, SPKISHA256: f.pin}
+}
+
+func sendFrame(t *testing.T, c *tls.Conn, kind byte, port uint16, src string, payload []byte) {
+	t.Helper()
+	frame := peerFrame{kind: kind, port: port, src: netip.MustParseAddrPort(src), payload: payload}
+	b, ok := frame.encode(peerALPN2)
+	if !ok {
+		t.Fatalf("frame kind %#x cannot be encoded", kind)
+	}
+	if _, err := c.Write(b); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+}
+
+func TestPeerServerPrefersPeer2(t *testing.T) {
+	pc := newPeerCluster(t)
+	a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
+	registerPeers(t, a, b)
+
+	tc, err := dialPeerTLS(t, a.srv.peers.clientTLS(b.pin()), b.peerAddr())
+	if err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	if got := tc.ConnectionState().NegotiatedProtocol; got != peerALPN2 {
+		t.Fatalf("negotiated %q, want %q", got, peerALPN2)
+	}
+}
+
+func TestPeerServerServesPeer1Client(t *testing.T) {
+	pc := newPeerCluster(t)
+	a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
+	registerPeers(t, a, b)
+	b.bindTLS(t, peerTestHost)
+	cfg := a.srv.peers.clientTLS(b.pin())
+	cfg.NextProtos = []string{peerALPN1}
+
+	tc, err := dialPeerTLS(t, cfg, b.peerAddr())
+	if err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	if got := tc.ConnectionState().NegotiatedProtocol; got != peerALPN1 {
+		t.Fatalf("negotiated %q, want %q", got, peerALPN1)
+	}
+	sendForwarded(t, tc, "203.0.113.9:4000", helloFor(t, peerTestHost))
+	mustPeerStatus(t, tc, peerStatusAccept)
+	peerEventually(t, "agent stream", func() bool { return b.lastPre.Load() != nil })
+	pre := b.lastPre.Load()
+	if pre.Kind != proto.KindTLS || pre.Host != peerTestHost || pre.ClientAddr != "203.0.113.9:4000" {
+		t.Fatalf("agent preamble = %+v", *pre)
+	}
+}
+
+func TestPeerClientNeverSendsTypedFrameToPeer1Owner(t *testing.T) {
+	pc := newPeerCluster(t)
+	a := pc.edge(t, "edge-a")
+	owner := newFakePeer1Owner(t)
+	hello := helloFor(t, peerTestHost)
+	frame := peerFrame{kind: peerFrameSNI, src: netip.MustParseAddrPort("203.0.113.9:4000"), payload: hello}
+
+	tc, outcome := a.srv.peers.attempt(owner.peer(), frame)
+	if outcome != peerOK || tc == nil {
+		t.Fatalf("attempt outcome = %d, want %d", outcome, peerOK)
+	}
+	tc.Close()
+	select {
+	case got := <-owner.got:
+		if len(got) == 0 || got[0] != 'P' {
+			t.Fatalf("first byte sent to a peer-1 owner = %#x, want 'P' of PROXY", got[:min(len(got), 1)])
+		}
+		if !strings.HasPrefix(string(got), "PROXY TCP4 203.0.113.9 203.0.113.9 4000 4000\r\n") || !strings.HasSuffix(string(got), string(hello)) {
+			t.Fatalf("legacy bytes = %d bytes, want the PROXY line and the %d byte ClientHello", len(got), len(hello))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the peer-1 owner received nothing")
+	}
+}
+
+func TestPeerFrameEncode(t *testing.T) {
+	src := netip.MustParseAddrPort("203.0.113.9:4000")
+	const line = "PROXY TCP4 203.0.113.9 203.0.113.9 4000 4000\r\n"
+	cases := []struct {
+		name   string
+		frame  peerFrame
+		alpn   string
+		want   string
+		wantOK bool
+	}{
+		{"sni peer-2", peerFrame{kind: peerFrameSNI, src: src, payload: []byte("HELLO")}, peerALPN2, "\x01" + line + "HELLO", true},
+		{"sni peer-1", peerFrame{kind: peerFrameSNI, src: src, payload: []byte("HELLO")}, peerALPN1, line + "HELLO", true},
+		{"tcp peer-2", peerFrame{kind: peerFrameTCP, port: 8080, src: src}, peerALPN2, "\x02\x1f\x90" + line, true},
+		{"tcp peer-2 high port", peerFrame{kind: peerFrameTCP, port: 65535, src: src}, peerALPN2, "\x02\xff\xff" + line, true},
+		{"control peer-2", peerFrame{kind: peerFrameControl, src: src, payload: []byte("abc")}, peerALPN2, "\x03" + line + "abc", true},
+		{"tcp peer-1", peerFrame{kind: peerFrameTCP, port: 8080, src: src}, peerALPN1, "", false},
+		{"control peer-1", peerFrame{kind: peerFrameControl, src: src, payload: []byte("abc")}, peerALPN1, "", false},
+		{"unknown protocol", peerFrame{kind: peerFrameSNI, src: src}, "ngstone-peer-9", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := tc.frame.encode(tc.alpn)
+			if ok != tc.wantOK || string(got) != tc.want {
+				t.Fatalf("encode = %q, %v; want %q, %v", got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestPeerServerRejectsUnknownFrameType(t *testing.T) {
+	pc := newPeerCluster(t)
+	a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
+	registerPeers(t, a, b)
+	b.bindTLS(t, peerTestHost)
+	accepted := metricDelta(metricPeerAcceptedConns)
+
+	tc, err := dialPeerTLS(t, a.srv.peers.clientTLS(b.pin()), b.peerAddr())
+	if err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	sendFrame(t, tc, 0x7f, 0, "203.0.113.9:4000", helloFor(t, peerTestHost))
+	expectClosed(t, tc)
+	time.Sleep(100 * time.Millisecond)
+	if accepted() != 0 || b.agentHit.Load() != 0 {
+		t.Fatalf("accepted=%d agentHit=%d, want both zero", accepted(), b.agentHit.Load())
+	}
+}
+
+func TestPeerServerRefusesTCPAndControlFramesForNow(t *testing.T) {
+	pc := newPeerCluster(t)
+	a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
+	registerPeers(t, a, b)
+	b.bindTLS(t, peerTestHost)
+	accepted := metricDelta(metricPeerAcceptedConns)
+
+	cases := []struct {
+		name    string
+		kind    byte
+		port    uint16
+		payload []byte
+	}{
+		{"tcp", peerFrameTCP, 8080, nil},
+		{"control", peerFrameControl, 0, []byte("GET / HTTP/1.1\r\n\r\n")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, err := dialPeerTLS(t, a.srv.peers.clientTLS(b.pin()), b.peerAddr())
+			if err != nil {
+				t.Fatalf("handshake: %v", err)
+			}
+			sendFrame(t, conn, tc.kind, tc.port, "203.0.113.9:4000", tc.payload)
+			mustPeerStatus(t, conn, peerStatusNotOwner)
+			expectClosed(t, conn)
+		})
+	}
+	time.Sleep(100 * time.Millisecond)
+	if accepted() != 0 || b.agentHit.Load() != 0 {
+		t.Fatalf("accepted=%d agentHit=%d, want both zero", accepted(), b.agentHit.Load())
+	}
+}
+
+func TestPeerServerRejectsUnknownALPN(t *testing.T) {
+	pc := newPeerCluster(t)
+	a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
+	registerPeers(t, a, b)
+
+	cfg := a.srv.peers.clientTLS(b.pin())
+	cfg.VerifyConnection = nil
+	cfg.NextProtos = []string{"ngstone-peer-9"}
+	if err := peerRejected(t, cfg, b.peerAddr()); err == nil {
+		t.Fatal("a client offering only an unknown protocol was accepted")
+	}
+
+	state := tls.ConnectionState{NegotiatedProtocol: "ngstone-peer-9", PeerCertificates: []*x509.Certificate{a.srv.peers.id.cert.Leaf}}
+	if err := b.srv.peers.serverTLS().VerifyConnection(state); !errors.Is(err, errPeerALPN) {
+		t.Fatalf("server VerifyConnection = %v, want %v", err, errPeerALPN)
+	}
+	state.PeerCertificates = []*x509.Certificate{b.srv.peers.id.cert.Leaf}
+	if err := a.srv.peers.clientTLS(b.pin()).VerifyConnection(state); !errors.Is(err, errPeerALPN) {
+		t.Fatalf("client VerifyConnection = %v, want %v", err, errPeerALPN)
+	}
+}
+
+func TestPeerSkewDoesNotMarkOwnerDown(t *testing.T) {
+	pc := newPeerCluster(t)
+	a := pc.edge(t, "edge-a")
+	owner := newFakePeer1Owner(t)
+	skew := metricDelta(metricPeerVersionSkew)
+	frame := peerFrame{kind: peerFrameTCP, port: 8080, src: netip.MustParseAddrPort("203.0.113.9:4000")}
+
+	tc, outcome := a.srv.peers.attempt(owner.peer(), frame)
+	if tc != nil || outcome != peerSkew {
+		t.Fatalf("attempt = %v, %d; want nil, %d", tc, outcome, peerSkew)
+	}
+	if _, down := a.srv.peers.down.Get(owner.peer().EdgeID); down {
+		t.Fatal("a version skew marked the owner down")
+	}
+	if skew() != 1 {
+		t.Fatalf("skew counter moved by %d, want 1", skew())
+	}
+	select {
+	case got := <-owner.got:
+		t.Fatalf("the peer-1 owner received %q", got)
+	case <-time.After(100 * time.Millisecond):
+	}
 }

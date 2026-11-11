@@ -353,13 +353,24 @@ connection reaching an edge without the connector is forwarded in one hop:
    down. Lookups are coalesced per hostname, and a global cap bounds the
    concurrent database queries, not the waiters.
 3. It dials the owner over TLS 1.3 with mutual authentication, ALPN
-   `ngstone-peer-1`, no session resumption, and the peer's certificate pinned
-   to the SPKI hash stored in `edge_peers`.
-4. It writes a PROXY v1 line carrying the real client address, then the
-   buffered ClientHello.
-5. The owner reads the PROXY line, classifies the connection as forwarded, and
+   `ngstone-peer-2` (or `ngstone-peer-1`), no session resumption, and the
+   peer's certificate pinned to the SPKI hash stored in `edge_peers`.
+4. It writes, in one write, the frame: for `ngstone-peer-2` a type byte
+   (`0x01` SNI, `0x02` TCP followed by a big-endian port, `0x03` control), then
+   a PROXY v1 line carrying the real client address, then the buffered
+   ClientHello. `ngstone-peer-1` omits the type byte and carries SNI
+   connections only.
+5. The owner reads the frame, classifies the connection as forwarded, and
    answers with one status byte: accept or not-owner. On accept both sides
    splice bytes. A forwarded connection is never forwarded again.
+
+The two hop protocols are negotiated by ALPN, and the owner dispatches on the
+negotiated protocol, never on the first byte. Peer-2 carries the frame type so
+later steps can add TCP and control targets; the owner currently answers
+not-owner to TCP and control frames, and closes on any other type. Peer-1
+remains accepted so edges can be upgraded one at a time: an ingress that
+would need a peer-2 frame skips a peer-1 owner without marking it down and
+counts it in `ngstoned_peer_version_skew_total`.
 
 Two 421 rules apply when forwarding is enabled: a route miss on a forwarded
 connection, and a route miss on a TLS connection whose SNI differs from the
