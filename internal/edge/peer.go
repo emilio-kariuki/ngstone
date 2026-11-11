@@ -648,7 +648,9 @@ func (p *peerForwarder) attempt(owner storage.EdgePeer, frame peerFrame) (*tls.C
 	dialer := net.Dialer{Timeout: peerDialTimeout}
 	raw, err := dialer.Dial("tcp", owner.PeerAddr)
 	if err != nil {
-		p.down.Add(owner.PeerAddr, time.Now())
+		if _, marked := p.down.Peek(owner.PeerAddr); !marked {
+			p.down.Add(owner.PeerAddr, time.Now())
+		}
 		slog.Debug("edge: peer dial failed", "owner", owner.EdgeID, "err", err)
 		return nil, peerDown
 	}

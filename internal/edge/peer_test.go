@@ -1736,6 +1736,56 @@ func TestPeerForwardDialsReRegisteredEdgeAtNewAddress(t *testing.T) {
 	}
 }
 
+func TestPeerLateDialFailuresDoNotRenewDownMark(t *testing.T) {
+	pc := newPeerCluster(t)
+	a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
+	registerPeers(t, a, b)
+	b.bindTLS(t, peerTestHost)
+	b.srv.peers.ln.Close()
+	p := a.srv.peers
+	frame := peerFrame{kind: peerFrameSNI, src: netip.MustParseAddrPort("203.0.113.9:4000")}
+	stale := &ownerEntry{peers: []storage.EdgePeer{b.record()}, resolved: time.Now().Add(-peerDownCacheTTL - time.Second)}
+	lookups := metricDelta(metricPeerLookups)
+
+	if upstream, noOwner := p.connect(peerTestHost, stale, frame); upstream != nil || noOwner {
+		t.Fatalf("connect to an unreachable owner = %v, noOwner=%v; want a failure", upstream, noOwner)
+	}
+	if lookups() != 1 {
+		t.Fatalf("lookups after the first failure = %d, want the one re-resolve", lookups())
+	}
+	marked, ok := p.down.Peek(b.peerAddr())
+	if !ok {
+		t.Fatal("the unreachable address was not marked down")
+	}
+	fresh, ok := p.owners.Peek(peerTestHost)
+	if !ok || !fresh.resolved.After(marked) {
+		t.Fatalf("re-resolved entry = %+v, %v; want one resolved after the down mark", fresh, ok)
+	}
+	time.Sleep(5 * time.Millisecond)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if upstream, outcome := p.attempt(b.record(), frame); upstream != nil || outcome != peerDown {
+				t.Errorf("late attempt = %v, %d; want nil, %d", upstream, outcome, peerDown)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if upstream, noOwner := p.connect(peerTestHost, fresh, frame); upstream != nil || noOwner {
+		t.Fatalf("connect after the late failures = %v, noOwner=%v; want a failure", upstream, noOwner)
+	}
+	if lookups() != 1 {
+		t.Fatalf("lookups = %d, want 1: late failures must not make the fresh entry look older than the down mark", lookups())
+	}
+	if again, _ := p.down.Peek(b.peerAddr()); !again.Equal(marked) {
+		t.Fatalf("down mark moved from %v to %v, want the first mark kept", marked, again)
+	}
+}
+
 func TestPeerForwardCapsRejectWithoutDialing(t *testing.T) {
 	t.Run("forward slots exhausted", func(t *testing.T) {
 		pc := newPeerCluster(t)
