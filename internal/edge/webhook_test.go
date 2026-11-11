@@ -196,6 +196,34 @@ func TestHandlePublicWebhookMaxBodyBytes(t *testing.T) {
 	}
 }
 
+func TestWebhookOversizeChunkedClosesOnlyHTTP1(t *testing.T) {
+	v, err := webhook.New(webhook.Config{Provider: webhook.ProviderGitHub, Secret: testWebhookSecret})
+	if err != nil {
+		t.Fatalf("webhook.New: %v", err)
+	}
+	body := strings.Repeat("x", 33)
+	for _, major := range []int{1, 2} {
+		req := httptest.NewRequest(http.MethodPost, "http://hooks.example.com/", chunkedReader{strings.NewReader(body)})
+		req.ContentLength = -1
+		req.ProtoMajor = major
+		req.Header.Set(webhook.GitHubSignatureHeader, webhooktest.GitHubSignature(testWebhookSecret, []byte(body)))
+		rec := httptest.NewRecorder()
+		if _, ok := verifyWebhookRequest(rec, req, v, 32, nil, time.Now()); ok {
+			t.Fatalf("HTTP/%d oversize body accepted", major)
+		}
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("HTTP/%d status = %d", major, rec.Code)
+		}
+		want := ""
+		if major == 1 {
+			want = "close"
+		}
+		if got := rec.Header().Get("Connection"); got != want {
+			t.Fatalf("HTTP/%d Connection = %q, want %q", major, got, want)
+		}
+	}
+}
+
 type readTrap struct{ read bool }
 
 func (r *readTrap) Read(p []byte) (int, error) {
@@ -507,6 +535,33 @@ func TestHandleBindKeepsWebhookVerifierAcrossRebinds(t *testing.T) {
 		}
 		if rec := webhookRequest(s, "/", `{"zen":"x"}`, false, nil); rec.Code != http.StatusUnauthorized {
 			t.Fatalf("%s: unsigned request status = %d body=%q", step.name, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestHandleBindKeepsWebhookVerifierOnConnectorReconnect(t *testing.T) {
+	s := newServerForTest(LimitsConfig{PerIPRate: 1000, PerIPBurst: 1000})
+	want, err := webhook.New(webhook.Config{Provider: webhook.ProviderGitHub, Secret: testWebhookSecret})
+	if err != nil {
+		t.Fatalf("webhook.New: %v", err)
+	}
+	bind := proto.Bind{Kind: proto.KindHTTP, Subdomain: "hooks", MultiConnector: true, ConnectorTokenSHA256: testConnectorTokenDigest, Webhook: &proto.WebhookVerification{Provider: "github", Secret: testWebhookSecret}}
+	for _, name := range []string{"first connector", "same-instance connector reconnect"} {
+		as := newFakeAgentSession(t, "connector-a", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok") })
+		as.NegotiatedVersion = proto.ProtoVersion
+		reply := bindSessionOverControl(t, s, as, bind)
+		if reply.Type != proto.TypeBindOK {
+			t.Fatalf("%s: reply = %s %s", name, reply.Type, reply.Data)
+		}
+		b, ok := s.registry.Route("hooks.example.com")
+		if !ok || b.connectorForSession(as) == nil {
+			t.Fatalf("%s: session is not a connector of the binding", name)
+		}
+		if got := b.snapshot.Load().webhook; got == nil || !got.Equal(want) {
+			t.Fatalf("%s: webhook verifier was not kept", name)
+		}
+		if rec := webhookRequest(s, "/", `{"zen":"x"}`, false, nil); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s: unsigned request status = %d body=%q", name, rec.Code, rec.Body.String())
 		}
 	}
 }
