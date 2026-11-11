@@ -9,16 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"ngstone/internal/access"
 	"ngstone/internal/policy"
 	"ngstone/internal/proto"
 	"ngstone/internal/storage"
 )
-
-type durableAccessRecord struct {
-	BasicAuthSHA256 []string `json:"basic_auth_sha256,omitempty"`
-	BasicAuthRealm  string   `json:"basic_auth_realm,omitempty"`
-	AllowCIDRs      []string `json:"allow_cidrs,omitempty"`
-}
 
 func durableLeaseKey(kind, hostname string, remotePort int) string {
 	return strings.ToLower(strings.TrimSpace(kind)) + ":" + strings.ToLower(strings.TrimSpace(hostname)) + ":" + strconv.Itoa(remotePort)
@@ -35,11 +30,15 @@ func durableOwnerID(as *AgentSession) string {
 }
 
 func durableAccessJSON(bind proto.Bind) string {
-	data, err := json.Marshal(durableAccessRecord{
+	record := access.Config{
 		BasicAuthSHA256: bind.BasicAuthSHA256,
 		BasicAuthRealm:  bind.BasicAuthRealm,
 		AllowCIDRs:      bind.AllowCIDRs,
-	})
+	}
+	if bind.OIDC != nil {
+		record.VisitorLogin = &access.VisitorLogin{AllowEmails: bind.OIDC.AllowEmails, AllowDomains: bind.OIDC.AllowDomains}
+	}
+	data, err := json.Marshal(record)
 	if err != nil {
 		return "{}"
 	}

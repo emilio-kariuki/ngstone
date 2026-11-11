@@ -19,9 +19,15 @@ const (
 )
 
 type Config struct {
-	BasicAuthSHA256 []string `json:"basic_auth_sha256,omitempty"`
-	BasicAuthRealm  string   `json:"basic_auth_realm,omitempty"`
-	AllowCIDRs      []string `json:"allow_cidrs,omitempty"`
+	BasicAuthSHA256 []string      `json:"basic_auth_sha256,omitempty"`
+	BasicAuthRealm  string        `json:"basic_auth_realm,omitempty"`
+	AllowCIDRs      []string      `json:"allow_cidrs,omitempty"`
+	VisitorLogin    *VisitorLogin `json:"visitor_login,omitempty"`
+}
+
+type VisitorLogin struct {
+	AllowEmails  []string `json:"allow_emails,omitempty"`
+	AllowDomains []string `json:"allow_domains,omitempty"`
 }
 
 func Normalize(c Config) (Config, error) {
@@ -46,8 +52,17 @@ func Normalize(c Config) (Config, error) {
 	}
 	slices.Sort(c.BasicAuthSHA256)
 	slices.Sort(c.AllowCIDRs)
+	var login *VisitorLogin
+	if c.VisitorLogin != nil {
+		emails, domains, err := NormalizeLogin(c.VisitorLogin.AllowEmails, c.VisitorLogin.AllowDomains)
+		if err != nil {
+			return Config{}, err
+		}
+		login = &VisitorLogin{AllowEmails: emails, AllowDomains: domains}
+	}
+	c.VisitorLogin = login
 	if len(c.BasicAuthSHA256) == 0 && len(c.AllowCIDRs) == 0 && c.BasicAuthRealm == "" {
-		return Config{}, nil
+		return Config{VisitorLogin: login}, nil
 	}
 	var realm strings.Builder
 	for _, r := range c.BasicAuthRealm {

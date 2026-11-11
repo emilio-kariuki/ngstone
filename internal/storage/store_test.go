@@ -161,6 +161,50 @@ func TestMultiConnectorLeases(t *testing.T) {
 	}
 }
 
+func TestMultiConnectorLeasesRequireMatchingLoginRule(t *testing.T) {
+	cases := []struct {
+		name    string
+		first   string
+		second  string
+		wantErr error
+	}{
+		{name: "identical emails bind", first: `{"visitor_login":{"allow_emails":["a@example.org"]}}`, second: `{"visitor_login":{"allow_emails":["A@example.org"]}}`},
+		{name: "identical empty wall binds", first: `{"visitor_login":{}}`, second: `{"visitor_login":{}}`},
+		{name: "no wall binds", first: `{}`, second: `{}`},
+		{name: "differing emails", first: `{"visitor_login":{"allow_emails":["a@example.org"]}}`, second: `{"visitor_login":{"allow_emails":["b@example.org"]}}`, wantErr: ErrTunnelConflict},
+		{name: "differing domains", first: `{"visitor_login":{"allow_domains":["example.org"]}}`, second: `{"visitor_login":{"allow_domains":["example.net"]}}`, wantErr: ErrTunnelConflict},
+		{name: "no wall then empty wall", first: `{}`, second: `{"visitor_login":{}}`, wantErr: ErrTunnelConflict},
+		{name: "empty wall then no wall", first: `{"visitor_login":{}}`, second: `{}`, wantErr: ErrTunnelConflict},
+		{name: "restricted wall then empty wall", first: `{"visitor_login":{"allow_domains":["example.org"]}}`, second: `{"visitor_login":{}}`, wantErr: ErrTunnelConflict},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openTestStore(t, filepath.Join(t.TempDir(), "control.db"))
+			request := LeaseRequest{
+				Name:                 "pool",
+				Hostname:             "pool.example.com",
+				Kind:                 "http",
+				OwnerID:              "credential-1",
+				InstanceID:           "instance-1",
+				SessionID:            "session-1",
+				MultiConnector:       true,
+				ConnectorTokenDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				AccessJSON:           tc.first,
+			}
+			if _, err := store.AcquireLease(context.Background(), request); err != nil {
+				t.Fatalf("acquire first connector: %v", err)
+			}
+			request.InstanceID = "instance-2"
+			request.SessionID = "session-2"
+			request.AccessJSON = tc.second
+			_, err := store.AcquireLease(context.Background(), request)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("second connector error = %v, want %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestAuditPoliciesAndCustomDomains(t *testing.T) {
 	store := openTestStore(t, filepath.Join(t.TempDir(), "control.db"))
 	p := &policy.Policy{DefaultAction: "deny", Rules: []policy.Rule{{Action: "allow", PathPrefix: "/health"}}}
