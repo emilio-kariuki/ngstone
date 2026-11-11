@@ -84,11 +84,7 @@ func (c Config) Normalize() (Config, error) {
 		if strings.ContainsAny(c.PathPrefix, "%?#") {
 			return c, errors.New("webhook path prefix must not contain %, ? or #")
 		}
-		trailing := strings.HasSuffix(c.PathPrefix, "/")
 		c.PathPrefix = path.Clean(c.PathPrefix)
-		if trailing && c.PathPrefix != "/" {
-			c.PathPrefix += "/"
-		}
 		if c.PathPrefix == "/" {
 			c.PathPrefix = ""
 		}
@@ -212,18 +208,22 @@ func (v *Verifier) Matches(requestPath string) bool {
 		return true
 	}
 	decoded, err := url.PathUnescape(requestPath)
-	if err != nil {
+	if err != nil || !strings.HasPrefix(decoded, "/") {
 		return true
 	}
 	for i := 0; i < len(decoded); i++ {
-		if ch := decoded[i]; ch < 0x20 || ch == 0x7f || ch == '\\' || ch == ';' || ch == '%' {
+		if ch := decoded[i]; ch < 0x20 || ch >= 0x7f || ch == '\\' || ch == ';' || ch == '%' {
 			return true
 		}
 	}
-	decoded = strings.ToLower(decoded)
-	prefix = strings.ToLower(prefix)
-	cleaned := path.Clean("/" + decoded)
-	return strings.Contains(decoded+"/", prefix) || strings.Contains(cleaned+"/", prefix)
+	if decoded != "/" {
+		for _, seg := range strings.Split(strings.TrimSuffix(decoded[1:], "/"), "/") {
+			if seg == "" || seg == "." || seg == ".." {
+				return true
+			}
+		}
+	}
+	return strings.Contains(strings.ToLower(decoded)+"/", strings.ToLower(prefix))
 }
 
 func (v *Verifier) Verify(h http.Header, body []byte, now time.Time) error {

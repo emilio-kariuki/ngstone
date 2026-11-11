@@ -107,7 +107,11 @@ func TestHandlePublicVerifiesGitHubWebhooks(t *testing.T) {
 	if strings.Contains(rec.Body.String(), testWebhookSecret) {
 		t.Fatal("rejection leaked the secret")
 	}
-	for _, path := range []string{"/hooks%2Fgithub", "/x%5Chooks", "/hooks.json", "/index.php/hooks/github", "/x;y"} {
+	rec = webhookRequest(s, "/hooks/a%2Fb/../github", body, false, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("encoded-slash dot-segment status = %d body=%q", rec.Code, rec.Body.String())
+	}
+	for _, path := range []string{"/hooks%2Fgithub", "/x%5Chooks", "/hooks.json", "/index.php/hooks/github", "/x;y", "/a%2Fb", "/other%2fx"} {
 		rec = webhookRequest(s, path, body, false, nil)
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("unsigned %s status = %d body=%q", path, rec.Code, rec.Body.String())
