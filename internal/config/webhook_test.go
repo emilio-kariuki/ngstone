@@ -33,6 +33,10 @@ func TestLoadProjectRejectsBadWebhook(t *testing.T) {
 		`{"tunnels":{"web":{"target":"3000","webhook":{"provider":"hmac","header":"X-Sig","encoding":"base32"}}}}`:                "encoding",
 		`{"tunnels":{"web":{"target":"3000","webhook":{"provider":"github","path_prefix":"hooks"}}}}`:                             "start with /",
 		`{"tunnels":{"web":{"target":"3000","webhook":{"provider":"github","header":"X-Hub-Signature-256","prefix":"sha256="}}}}`: "apply only",
+		`{"tunnels":{"web":{"target":"3000","webhook":{"provider":"slack","tolerance":"1500ms"}}}}`:                               "whole number of seconds",
+		`{"tunnels":{"web":{"target":"3000","webhook":{"provider":"github","path_prefix":"/hooks?x"}}}}`:                          "must not contain",
+		`{"tunnels":{"web":{"target":"3000","http2":true,"webhook":{"provider":"github"}}}}`:                                      "cannot be combined with http2",
+		`{"tunnels":{"web":{"target":"3000","oidc":true,"webhook":{"provider":"github"}}}}`:                                       "cannot be combined with oidc",
 	}
 	for data, want := range cases {
 		_, err := LoadProject(writeProject(t, data))
@@ -71,5 +75,19 @@ tunnels:
 `))
 	if err == nil || !strings.Contains(err.Error(), "only valid for http") {
 		t.Fatalf("tcp webhook error = %v", err)
+	}
+
+	for flag, want := range map[string]string{"http2": "cannot be combined with http2", "oidc": "cannot be combined with oidc"} {
+		_, err = ParseTunnels([]byte(`
+tunnels:
+  hooks:
+    port: 3000
+    ` + flag + `: true
+    webhook:
+      provider: github
+`))
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s webhook error = %v", flag, err)
+		}
 	}
 }

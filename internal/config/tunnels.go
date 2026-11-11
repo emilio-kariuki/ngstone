@@ -266,5 +266,5 @@ func (t *NamedTunnel) validate() error {
 	default:
 		return fmt.Errorf("kind %q must be http, tcp, or tls", t.Kind)
 	}
-	return t.Webhook.Validate(t.Kind)
+	return t.Webhook.Validate(t.Kind, t.HTTP2, t.OIDC)
 }

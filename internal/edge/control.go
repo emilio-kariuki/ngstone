@@ -783,7 +783,7 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 		bind.Takeover = false
 	}
 	if as.NegotiatedVersion < 2 && bindHasAccessFields(bind) {
-		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInvalidAccess, Message: "access control, traffic policies, HTTP/2 tunnels, or multiple connectors require protocol v2"})
+		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInvalidAccess, Message: "access control, traffic policies, HTTP/2 tunnels, multiple connectors, webhook verification, or visitor login require protocol v2"})
 		return
 	}
 	if bind.Kind == proto.KindTCP {

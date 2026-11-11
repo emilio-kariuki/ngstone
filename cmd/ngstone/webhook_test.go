@@ -41,6 +41,40 @@ func TestPortFlagsParseWebhook(t *testing.T) {
 	}
 }
 
+func TestValidatePortFlagsRejectsWebhookCombinations(t *testing.T) {
+	for _, preview := range []bool{false, true} {
+		flags := &portFlags{ttl: time.Minute, http2: true, webhook: webhookFlags{provider: "github"}}
+		if err := validatePortFlags(flags, preview); err == nil || !strings.Contains(err.Error(), "--http2") {
+			t.Fatalf("preview=%v webhook+http2 error = %v", preview, err)
+		}
+		flags = &portFlags{ttl: time.Minute, oidc: true, webhook: webhookFlags{provider: "github"}}
+		if err := validatePortFlags(flags, preview); err == nil || !strings.Contains(err.Error(), "--oidc") {
+			t.Fatalf("preview=%v webhook+oidc error = %v", preview, err)
+		}
+		flags = &portFlags{ttl: time.Minute, webhook: webhookFlags{provider: "github"}}
+		if err := validatePortFlags(flags, preview); err != nil {
+			t.Fatalf("preview=%v webhook alone: %v", preview, err)
+		}
+	}
+}
+
+func TestServeRejectsWebhookFlags(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("NGSTONE_TOKEN", "")
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"--verify-webhook", "github", dir},
+		{"--verify-webhook-path", "/hooks", dir},
+	} {
+		if code := cmdServe(args); code != 2 {
+			t.Fatalf("cmdServe(%v) = %d, want 2", args, code)
+		}
+	}
+	if code := cmdServe([]string{dir}); code != 1 {
+		t.Fatalf("cmdServe without webhook flags = %d, want 1 for the missing token", code)
+	}
+}
+
 func TestResolveWebhookFlags(t *testing.T) {
 	if cfg, err := resolveWebhookFlags(&webhookFlags{}, "env"); err != nil || cfg != nil {
 		t.Fatalf("no flags = %v, %v", cfg, err)

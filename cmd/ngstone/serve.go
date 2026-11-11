@@ -26,6 +26,10 @@ func cmdServe(args []string) int {
 	if err != nil {
 		return 2
 	}
+	if pf.webhook.provider != "" || pf.webhook.set() {
+		fmt.Fprintln(os.Stderr, "ngstone: serve does not support --verify-webhook; use ngstone port in front of an app that receives webhooks")
+		return 2
+	}
 	if len(positionals) > 1 {
 		fmt.Fprintln(os.Stderr, "usage: ngstone serve [dir] [--subdomain name] [--spa]")
 		return 2

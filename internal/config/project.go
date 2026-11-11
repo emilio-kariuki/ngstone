@@ -160,7 +160,7 @@ func (p Project) Validate() error {
 		if kind == "tcp" && tunnel.PolicyFile != "" {
 			return fmt.Errorf("tunnel %q policy_file is only valid for http tunnels", name)
 		}
-		if err := tunnel.Webhook.Validate(kind); err != nil {
+		if err := tunnel.Webhook.Validate(kind, tunnel.HTTP2, tunnel.OIDC); err != nil {
 			return fmt.Errorf("tunnel %q: %w", name, err)
 		}
 		if kind != "http" && (tunnel.OIDC || len(tunnel.OIDCAllowEmail) > 0 || len(tunnel.OIDCAllowDomain) > 0) {

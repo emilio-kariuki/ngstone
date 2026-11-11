@@ -1,8 +1,10 @@
 package edge
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -351,11 +353,18 @@ func TestHandleBindWebhook(t *testing.T) {
 		}
 	}
 
+	const distinctive = "whsec_DISTINCTIVE_7f3a9c_never_echo"
+	logs := &lockedBuffer{}
+	prevLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
 	rejected := []proto.Bind{
-		{Kind: proto.KindHTTP, Subdomain: "bad1", Webhook: &proto.WebhookVerification{Provider: "paypal", Secret: "s"}},
+		{Kind: proto.KindHTTP, Subdomain: "bad1", Webhook: &proto.WebhookVerification{Provider: "paypal", Secret: distinctive}},
 		{Kind: proto.KindHTTP, Subdomain: "bad2", Webhook: &proto.WebhookVerification{Provider: "github"}},
-		{Kind: proto.KindHTTP, Subdomain: "bad3", Webhook: &proto.WebhookVerification{Provider: "slack", Secret: "s", ToleranceSeconds: -1}},
-		{Kind: proto.KindHTTP, Subdomain: "bad4", Webhook: &proto.WebhookVerification{Provider: "hmac", Secret: "s"}},
+		{Kind: proto.KindHTTP, Subdomain: "bad3", Webhook: &proto.WebhookVerification{Provider: "slack", Secret: distinctive, ToleranceSeconds: -1}},
+		{Kind: proto.KindHTTP, Subdomain: "bad4", Webhook: &proto.WebhookVerification{Provider: "hmac", Secret: distinctive}},
+		{Kind: proto.KindHTTP, Subdomain: "bad5", HTTP2: true, Webhook: &proto.WebhookVerification{Provider: "github", Secret: distinctive}},
+		{Kind: proto.KindHTTP, Subdomain: "bad6", Webhook: &proto.WebhookVerification{Provider: "github", Secret: distinctive, PathPrefix: "/" + distinctive + "?"}},
 	}
 	for _, bind := range rejected {
 		reply := bindOverControl(t, s, bind)
@@ -363,9 +372,66 @@ func TestHandleBindWebhook(t *testing.T) {
 			t.Fatalf("bind %s accepted: %s", bind.Subdomain, reply.Data)
 		}
 		e, _ := proto.Decode[proto.BindErr](reply)
-		if e.Code != proto.CodeInvalidAccess || strings.Contains(e.Message, "s\"") {
+		if e.Code != proto.CodeInvalidAccess || strings.Contains(e.Message, distinctive) || strings.Contains(string(reply.Data), distinctive) {
 			t.Fatalf("bind %s error = %+v", bind.Subdomain, e)
 		}
+	}
+	for _, event := range s.events.snapshot() {
+		if strings.Contains(event.Message, distinctive) {
+			t.Fatalf("event %+v exposes the webhook secret", event)
+		}
+		for k, v := range event.Fields {
+			if strings.Contains(k+v, distinctive) {
+				t.Fatalf("event %+v exposes the webhook secret", event)
+			}
+		}
+	}
+	if strings.Contains(logs.String(), distinctive) {
+		t.Fatalf("logs expose the webhook secret: %s", logs.String())
+	}
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestHandleBindRejectsWebhookWithHTTP2(t *testing.T) {
+	s := newTestServer("tok")
+	reply := bindOverControl(t, s, proto.Bind{Kind: proto.KindHTTP, Subdomain: "h2hook", HTTP2: true, Webhook: &proto.WebhookVerification{Provider: "github", Secret: testWebhookSecret}})
+	if reply.Type != proto.TypeBindErr {
+		t.Fatalf("http2 bind with webhook accepted: %s", reply.Data)
+	}
+	e, _ := proto.Decode[proto.BindErr](reply)
+	if e.Code != proto.CodeInvalidAccess || !strings.Contains(e.Message, "HTTP/2") {
+		t.Fatalf("error = %+v", e)
+	}
+	if _, ok := s.registry.Route("h2hook.example.com"); ok {
+		t.Fatal("rejected bind left a binding behind")
+	}
+}
+
+func TestHandleBindRejectsWebhookWithVisitorLogin(t *testing.T) {
+	s := newVisitorTestServer(t, newFakeVisitorIdP(t))
+	reply := bindOverControl(t, s, proto.Bind{Kind: proto.KindHTTP, Subdomain: "oidchook", OIDC: &proto.OIDCLogin{AllowEmails: []string{"alice@example.com"}}, Webhook: &proto.WebhookVerification{Provider: "github", Secret: testWebhookSecret}})
+	if reply.Type != proto.TypeBindErr {
+		t.Fatalf("visitor-login bind with webhook accepted: %s", reply.Data)
+	}
+	e, _ := proto.Decode[proto.BindErr](reply)
+	if e.Code != proto.CodeInvalidAccess || !strings.Contains(e.Message, "visitor login") {
+		t.Fatalf("error = %+v", e)
 	}
 }
 

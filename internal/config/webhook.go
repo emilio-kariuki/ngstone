@@ -21,12 +21,18 @@ type TunnelWebhook struct {
 	Tolerance  string `json:"tolerance,omitempty" yaml:"tolerance"`
 }
 
-func (w *TunnelWebhook) Validate(kind string) error {
+func (w *TunnelWebhook) Validate(kind string, http2, oidc bool) error {
 	if w == nil {
 		return nil
 	}
 	if kind != KindHTTP {
 		return errors.New("webhook verification is only valid for http tunnels")
+	}
+	if http2 {
+		return errors.New("webhook verification cannot be combined with http2")
+	}
+	if oidc {
+		return errors.New("webhook verification cannot be combined with oidc visitor login")
 	}
 	if w.SecretFile != "" && w.SecretEnv != "" {
 		return errors.New("webhook must use either secret_file or secret_env")

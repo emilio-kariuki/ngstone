@@ -657,6 +657,12 @@ func validatePortFlags(pf *portFlags, preview bool) error {
 	if err := agent.ValidateTransport(pf.transport); err != nil {
 		return err
 	}
+	if pf.webhook.provider != "" && pf.http2 {
+		return fmt.Errorf("--verify-webhook cannot be combined with --http2")
+	}
+	if pf.webhook.provider != "" && pf.oidc {
+		return fmt.Errorf("--verify-webhook cannot be combined with --oidc")
+	}
 	if preview {
 		if pf.multiConnector {
 			return fmt.Errorf("preview URLs cannot use --multi-connector; choose a named subdomain with --subdomain")

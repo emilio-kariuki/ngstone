@@ -15,6 +15,12 @@ func buildWebhookVerifier(bind proto.Bind) (*webhook.Verifier, error) {
 	if bind.Webhook == nil {
 		return nil, nil
 	}
+	if bind.HTTP2 {
+		return nil, errors.New("webhook verification cannot be combined with HTTP/2 tunnels")
+	}
+	if bind.OIDC != nil {
+		return nil, errors.New("webhook verification cannot be combined with visitor login")
+	}
 	if bind.Webhook.ToleranceSeconds < 0 || bind.Webhook.ToleranceSeconds > int64(webhook.MaxTolerance/time.Second) {
 		return nil, errors.New("webhook tolerance is out of range")
 	}

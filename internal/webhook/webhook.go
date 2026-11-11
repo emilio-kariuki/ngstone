@@ -81,6 +81,9 @@ func (c Config) Normalize() (Config, error) {
 		if len(c.PathPrefix) > MaxPathPrefixBytes {
 			return c, fmt.Errorf("webhook path prefix is longer than %d bytes", MaxPathPrefixBytes)
 		}
+		if strings.ContainsAny(c.PathPrefix, "%?#") {
+			return c, errors.New("webhook path prefix must not contain %, ? or #")
+		}
 		trailing := strings.HasSuffix(c.PathPrefix, "/")
 		c.PathPrefix = path.Clean(c.PathPrefix)
 		if trailing && c.PathPrefix != "/" {
@@ -95,6 +98,9 @@ func (c Config) Normalize() (Config, error) {
 	}
 	if c.Tolerance > MaxTolerance {
 		return c, fmt.Errorf("webhook tolerance must be at most %s", MaxTolerance)
+	}
+	if c.Tolerance != 0 && (c.Tolerance < time.Second || c.Tolerance%time.Second != 0) {
+		return c, errors.New("webhook tolerance must be a whole number of seconds")
 	}
 	switch c.Provider {
 	case ProviderStripe, ProviderSlack:
