@@ -586,9 +586,16 @@ How it works:
 - The tunnel host trades the ticket for an encrypted, host-only, `HttpOnly`,
   `SameSite=Lax` `ngstone_visitor_session` cookie (8 hours). A cookie for one
   tunnel is rejected on every other tunnel.
-- On each request the edge strips the session cookie, deletes every
-  client-supplied `X-Ngstone-User-*` header (on all tunnels, with or without
-  `--oidc`), and sets `X-Ngstone-User-Email`, `X-Ngstone-User-Subject`, and
+- The ticket is tied to the browser that started the login by a short-lived
+  `HttpOnly` binding cookie, so a ticket opened in another browser is refused.
+  On the secure scheme the session, state, and binding cookies use the
+  `__Host-` prefix so a sibling tunnel cannot plant them; under `-insecure`
+  (development only) these protections do not apply. The tunnel's login rule is
+  stored in the durable lease record.
+- On each request the edge strips every edge visitor cookie, deletes every
+  client-supplied `X-Ngstone-*`, `X-Forwarded-*`, `Forwarded`, and `X-Real-IP`
+  header in any spelling, such as `X_Ngstone_User_Email` (on all tunnels, with
+  or without `--oidc`), and sets `X-Ngstone-User-Email`, `X-Ngstone-User-Subject`, and
   `X-Ngstone-User-Name` for the local app. Trust these headers only when the
   app is reachable solely through the tunnel.
 - Limits to know about: every tunnel shares one registrable domain, so
