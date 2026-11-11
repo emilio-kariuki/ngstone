@@ -99,6 +99,7 @@ type dashboardMetrics struct {
 	ShareDirectoryErrors     int64 `json:"share_directory_errors"`
 	PeerTCPBindFailed        int64 `json:"peer_tcp_bind_failed"`
 	PeerTCPListeners         int64 `json:"peer_tcp_listeners"`
+	AdminMTLSRejected        int64 `json:"admin_mtls_rejected"`
 }
 
 func (s *Server) dashboardState(r *http.Request) dashboardState {
@@ -363,6 +364,7 @@ func dashboardMetricsSnapshot() dashboardMetrics {
 		ShareDirectoryErrors:     metricShareDirectoryErrors.Value(),
 		PeerTCPBindFailed:        metricPeerTCPBindFailed.Value(),
 		PeerTCPListeners:         metricPeerTCPListeners.Value(),
+		AdminMTLSRejected:        metricAdminMTLSRejected.Value(),
 	}
 }
 
@@ -424,6 +426,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writePrometheusCounter(w, "ngstoned_share_directory_errors_total", "Share directory writes that failed after the share was accepted.", metrics.ShareDirectoryErrors)
 	writePrometheusCounter(w, "ngstoned_peer_tcp_bind_failed_total", "Ports of TCP tunnels on other edges that this edge could not bind.", metrics.PeerTCPBindFailed)
 	writePrometheusGauge(w, "ngstoned_peer_tcp_listeners", "Ports currently open to forward raw TCP tunnels owned by other edges.", metrics.PeerTCPListeners)
+	writePrometheusCounter(w, "ngstoned_admin_mtls_rejected_total", "Management connections rejected for an invalid client certificate.", metrics.AdminMTLSRejected)
 	writePrometheusGauge(w, "ngstoned_active_tunnels", "Currently routed HTTP and TCP tunnels.", int64(len(s.dashboardTunnels())))
 	writePrometheusGauge(w, "ngstoned_uptime_seconds", "Seconds since ngstoned started.", uptimeSeconds(s.startedAt))
 	fmt.Fprintln(w, "# HELP ngstoned_tunnel_requests_total Requests observed for a tunnel.")

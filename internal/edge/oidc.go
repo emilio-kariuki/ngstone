@@ -22,9 +22,10 @@ const (
 type adminAuthContextKey struct{}
 
 type adminAuth struct {
-	Principal oidc.Principal
-	AuthType  string
-	CSRF      string
+	Principal  oidc.Principal
+	AuthType   string
+	CSRF       string
+	CertSHA256 string
 }
 
 func withAdminAuth(ctx context.Context, auth adminAuth) context.Context {
@@ -231,6 +232,13 @@ func (s *Server) requiredAdminRole(r *http.Request) string {
 }
 
 func (s *Server) checkAdminCSRF(w http.ResponseWriter, r *http.Request, auth adminAuth) bool {
+	if auth.AuthType == adminAuthTypeMTLS {
+		if adminCrossOrigin.Check(r) != nil {
+			writeAdminError(w, http.StatusForbidden, "cross_origin_rejected", "cross-origin management requests are not allowed")
+			return false
+		}
+		return true
+	}
 	if auth.AuthType != "oidc" || r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
 		return true
 	}

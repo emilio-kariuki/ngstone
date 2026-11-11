@@ -122,6 +122,9 @@ func TestDashboardAndMetricsHandlers(t *testing.T) {
 	if !strings.Contains(metrics.Body.String(), "# TYPE ngstoned_requests_total counter") || !strings.Contains(metrics.Body.String(), "ngstoned_active_tunnels") {
 		t.Fatalf("metrics body is missing expected series: %s", metrics.Body.String())
 	}
+	if !strings.Contains(metrics.Body.String(), "ngstoned_admin_mtls_rejected_total") {
+		t.Fatalf("metrics body is missing the admin mTLS rejection counter: %s", metrics.Body.String())
+	}
 
 	missing := httptest.NewRecorder()
 	mux.ServeHTTP(missing, httptest.NewRequest(http.MethodGet, "/not-dashboard", nil))

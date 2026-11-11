@@ -74,6 +74,9 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authorizeAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if auth, ok := adminAuthFromContext(r.Context()); ok && auth.AuthType == adminAuthTypeMTLS {
+		return s.authorizeAdminRole(w, r, auth)
+	}
 	if session, ok := s.oidcSessionFromRequest(r); ok {
 		auth := adminAuth{Principal: session.Principal, AuthType: "oidc", CSRF: session.CSRF}
 		if !s.authorizeAdminRole(w, r, auth) {

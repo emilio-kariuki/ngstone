@@ -52,6 +52,8 @@ var (
 	metricShareDirectoryErrors   = expvar.NewInt("ngstoned_share_directory_errors_total")
 	metricPeerTCPBindFailed      = expvar.NewInt("ngstoned_peer_tcp_bind_failed_total")
 	metricPeerTCPListeners       = expvar.NewInt("ngstoned_peer_tcp_listeners")
+
+	metricAdminMTLSRejected = expvar.NewInt("ngstoned_admin_mtls_rejected_total")
 )
 
 type certStatusJSON struct {

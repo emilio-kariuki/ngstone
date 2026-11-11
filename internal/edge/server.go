@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"golang.org/x/net/netutil"
 	"golang.org/x/sync/errgroup"
 
 	"ngstone/internal/credentials"
@@ -57,6 +59,9 @@ type Config struct {
 
 	HTTPAddr string
 	OpsAddr  string
+
+	AdminMTLSAddr         string
+	AdminMTLSClientCAFile string
 
 	PeerAddr        string
 	PeerListen      string
@@ -104,6 +109,8 @@ type Server struct {
 
 	webhookBudget *byteBudget
 
+	adminClientCAs *x509.CertPool
+
 	tlsMgr *TLSManager
 	tcpMgr *tcpManager
 	peers  *peerForwarder
@@ -150,6 +157,20 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("edge: invalid limits config: %w", err)
 	}
 	cfg.Limits = limits
+
+	var adminClientCAs *x509.CertPool
+	if cfg.AdminMTLSAddr != "" || cfg.AdminMTLSClientCAFile != "" {
+		if cfg.AdminMTLSAddr == "" || cfg.AdminMTLSClientCAFile == "" {
+			return nil, errors.New("edge: admin mTLS needs both an address and a client CA file")
+		}
+		if cfg.Insecure {
+			return nil, errors.New("edge: admin mTLS cannot be combined with insecure mode")
+		}
+		adminClientCAs, err = loadAdminClientCAs(cfg.AdminMTLSClientCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("edge: %w", err)
+		}
+	}
 
 	registry := NewRegistry()
 	registry.SetLimits(limits)
@@ -258,6 +279,7 @@ func New(cfg Config) (*Server, error) {
 
 	srv := &Server{
 		cfg:               cfg,
+		adminClientCAs:    adminClientCAs,
 		startedAt:         time.Now(),
 		events:            newEventRing(200),
 		registry:          registry,
@@ -392,6 +414,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	var httpLn net.Listener
 	var opsLn net.Listener
+	var adminMTLSLn net.Listener
 	var peerLn net.Listener
 
 	closeAll := func() {
@@ -402,6 +425,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		if opsLn != nil {
 			opsLn.Close()
+		}
+		if adminMTLSLn != nil {
+			adminMTLSLn.Close()
 		}
 		if peerLn != nil {
 			peerLn.Close()
@@ -429,6 +455,15 @@ func (s *Server) Run(ctx context.Context) error {
 			closeAll()
 			return fmt.Errorf("edge: ops listen: %w", err)
 		}
+	}
+
+	if s.adminClientCAs != nil {
+		rawLn, listenErr := net.Listen("tcp", s.cfg.AdminMTLSAddr)
+		if listenErr != nil {
+			closeAll()
+			return fmt.Errorf("edge: admin mtls listen: %w", listenErr)
+		}
+		adminMTLSLn = tls.NewListener(netutil.LimitListener(rawLn, adminMTLSMaxConns), s.adminMTLSTLSConfig())
 	}
 
 	if s.peers != nil {
@@ -481,6 +516,18 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}
 
+	var adminMTLSSrv *http.Server
+	if adminMTLSLn != nil {
+		adminMTLSSrv = &http.Server{
+			Handler:           s.adminMTLSHandler(),
+			ReadHeaderTimeout: limits.ReadHeaderTimeout,
+			ReadTimeout:       limits.ReadHeaderTimeout,
+			IdleTimeout:       limits.IdleTimeout,
+			MaxHeaderBytes:    limits.MaxHeaderBytes,
+			ErrorLog:          slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug),
+		}
+	}
+
 	g.Go(func() error {
 		return s.observabilityLoop(gctx)
 	})
@@ -500,6 +547,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		if opsSrv != nil {
 			opsSrv.Shutdown(shutdownCtx)
+		}
+		if adminMTLSSrv != nil {
+			adminMTLSSrv.Shutdown(shutdownCtx)
 		}
 		s.peers.waitSplices(shutdownCtx)
 		return nil
@@ -549,7 +599,17 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	}
 
-	slog.Info("ngstoned: listeners up", "control", s.cfg.ControlAddr, "public", s.cfg.PublicAddr, "insecure", s.cfg.Insecure, "proxy_protocol", s.cfg.ProxyProtocol, "peer_addr", s.cfg.PeerAddr, "peer_listen", s.cfg.PeerListen)
+	if adminMTLSSrv != nil {
+		g.Go(func() error {
+			err := adminMTLSSrv.Serve(adminMTLSLn)
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
+		})
+	}
+
+	slog.Info("ngstoned: listeners up", "control", s.cfg.ControlAddr, "public", s.cfg.PublicAddr, "insecure", s.cfg.Insecure, "proxy_protocol", s.cfg.ProxyProtocol, "peer_addr", s.cfg.PeerAddr, "peer_listen", s.cfg.PeerListen, "admin_mtls", s.cfg.AdminMTLSAddr)
 	s.recordEvent("info", "listeners up", map[string]string{
 		"control": s.cfg.ControlAddr,
 		"public":  s.cfg.PublicAddr,

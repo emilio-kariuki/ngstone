@@ -29,6 +29,8 @@ func main() {
 	controlAddr := flag.String("control", ":4443", "control plane listen address")
 	httpAddr := flag.String("http", ":80", "HTTP redirect listen address (unused with -insecure)")
 	opsAddr := flag.String("ops", "127.0.0.1:4041", "loopback ops endpoint address (dashboard, /api/state, /metrics, expvar, /healthz, pprof); empty disables it")
+	adminMTLSAddr := flag.String("admin-mtls-addr", "", "address for the mTLS management listener; requires -admin-mtls-client-ca")
+	adminMTLSClientCA := flag.String("admin-mtls-client-ca", "", "PEM file of CA certificates that issue management client certificates")
 	tokenSHA256Hex := flag.String("token-sha256", "", "legacy hex-encoded SHA-256 of the shared auth token (defaults to $NGSTONE_TOKEN_SHA256; prefer -credentials-file)")
 	credentialsFileFlag := flag.String("credentials-file", "", "versioned per-tunnel credential file (defaults to $NGSTONE_CREDENTIALS_FILE)")
 	databaseDriver := flag.String("database-driver", "", "control-plane database driver: sqlite or postgres (defaults from the database URL)")
@@ -121,6 +123,8 @@ func main() {
 	if resolvedEdgeID == "" {
 		resolvedEdgeID = *edgeID
 	}
+	resolvedAdminMTLSAddr := envOrFlag("NGSTONE_ADMIN_MTLS_ADDR", *adminMTLSAddr)
+	resolvedAdminMTLSClientCA := envOrFlag("NGSTONE_ADMIN_MTLS_CLIENT_CA", *adminMTLSClientCA)
 	resolvedPeerAddr := envOrFlag("NGSTONE_PEER_ADDR", *peerAddr)
 	resolvedPeerListen := envOrFlag("NGSTONE_PEER_LISTEN", *peerListen)
 	tokenSHA256HexVal := os.Getenv("NGSTONE_TOKEN_SHA256")
@@ -329,6 +333,9 @@ func main() {
 		CertStoragePath:      *certStorage,
 		DNSProvider:          provider,
 
+		AdminMTLSAddr:         resolvedAdminMTLSAddr,
+		AdminMTLSClientCAFile: resolvedAdminMTLSClientCA,
+
 		Limits: edge.LimitsConfig{
 			ReadHeaderTimeout:         *readHeaderTimeout,
 			IdleTimeout:               *idleTimeout,
@@ -356,7 +363,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA, "dns-provider", *dnsProvider, "proxy-protocol", *proxyProtocol, "scoped_credentials", credentialsFile != "", "durable_storage", databaseURL != "", "peer_addr", resolvedPeerAddr, "peer_listen", resolvedPeerListen, "admin_bearer", adminTokenSHA256HexVal != "", "oidc", oidcConfig != nil)
+	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA, "dns-provider", *dnsProvider, "proxy-protocol", *proxyProtocol, "scoped_credentials", credentialsFile != "", "durable_storage", databaseURL != "", "peer_addr", resolvedPeerAddr, "peer_listen", resolvedPeerListen, "admin_bearer", adminTokenSHA256HexVal != "", "oidc", oidcConfig != nil, "admin_mtls", resolvedAdminMTLSAddr != "")
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("ngstoned: exited with error", "err", err)
 		os.Exit(1)
