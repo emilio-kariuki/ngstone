@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -203,19 +204,22 @@ func (v *Verifier) Matches(requestPath string) bool {
 	if prefix == "" {
 		return true
 	}
-	if requestPath == "" {
-		requestPath = "/"
+	if strings.Contains(strings.ToLower(requestPath), "%2f") {
+		return true
 	}
-	cleaned := path.Clean("/" + requestPath)
-	if strings.HasSuffix(requestPath, "/") && cleaned != "/" {
-		cleaned += "/"
+	decoded, err := url.PathUnescape(requestPath)
+	if err != nil {
+		return true
 	}
-	cleaned = strings.ToLower(cleaned)
+	for i := 0; i < len(decoded); i++ {
+		if ch := decoded[i]; ch < 0x20 || ch == 0x7f || ch == '\\' || ch == ';' || ch == '%' {
+			return true
+		}
+	}
+	decoded = strings.ToLower(decoded)
 	prefix = strings.ToLower(prefix)
-	if strings.HasSuffix(prefix, "/") {
-		return strings.HasPrefix(cleaned, prefix) || cleaned == strings.TrimSuffix(prefix, "/")
-	}
-	return cleaned == prefix || strings.HasPrefix(cleaned, prefix+"/")
+	cleaned := path.Clean("/" + decoded)
+	return strings.Contains(decoded+"/", prefix) || strings.Contains(cleaned+"/", prefix)
 }
 
 func (v *Verifier) Verify(h http.Header, body []byte, now time.Time) error {

@@ -97,8 +97,12 @@ $ ngstone port 3000 --verify-webhook github --verify-webhook-secret-file github.
           <code>NGSTONE_WEBHOOK_SECRET</code>.
         </Property>
         <Property name="--verify-webhook-path" type="string" defaultValue="every request">
-          Only verify requests under this path prefix. Matching cleans{" "}
-          <code>..</code> and duplicate slashes and ignores case.
+          Verify every request whose decoded, cleaned path contains this
+          prefix starting at any <code>/</code>, ignoring case, so{" "}
+          <code>/webhooks/stripe.json</code> and{" "}
+          <code>/index.php/webhooks/stripe</code> are checked too. Paths the
+          edge cannot classify (encoded slashes or backslashes, bad escapes,
+          control bytes, backslashes, <code>;</code>) are always verified.
         </Property>
         <Property name="--verify-webhook-tolerance" type="duration" defaultValue="5m">
           Timestamp tolerance for <code>stripe</code> and <code>slack</code>.
@@ -183,8 +187,9 @@ $ ngstone port 3000 --verify-webhook github --verify-webhook-secret-file github.
         use this with an edge you operate or trust.
       </Callout>
       <p>
-        If you set a path prefix, requests outside it are forwarded without
-        a check. Leave it empty to verify everything the tunnel receives.
+        If you set a path prefix, requests whose path does not contain it
+        are forwarded without a check. Leave it empty to verify everything
+        the tunnel receives.
         With <code>--multi-connector</code>, every connector must present
         the same webhook settings and secret. An edge too old to verify
         webhooks makes the agent refuse to bind instead of opening an

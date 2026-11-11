@@ -40,7 +40,7 @@ func webhookBodyLimit(limits LimitsConfig) int64 {
 }
 
 func verifyWebhookRequest(w http.ResponseWriter, r *http.Request, v *webhook.Verifier, limit int64, now time.Time) bool {
-	if v == nil || !v.Matches(r.URL.Path) {
+	if v == nil || !v.Matches(r.URL.EscapedPath()) {
 		return true
 	}
 	if r.ContentLength > limit {
