@@ -619,11 +619,11 @@ ngstone port 3000 --verify-webhook hmac --verify-webhook-header X-Shopify-Hmac-S
 
 The secret comes from `--verify-webhook-secret-file` or `NGSTONE_WEBHOOK_SECRET`;
 there is deliberately no flag that takes the secret itself. `--verify-webhook-path`
-verifies every request whose decoded, cleaned path contains the prefix starting at
-any `/`, case-insensitively, so `/webhooks/stripe.json`, `/webhooks/stripe;x=1` and
+verifies every request whose decoded, cleaned path contains the configured path at
+a segment boundary (starting at any `/`), case-insensitively, so `/webhooks/stripe.json`, `/webhooks/stripe;x=1` and
 `/index.php/webhooks/stripe` are all checked; a path the edge cannot classify
 (an encoded slash or backslash, a bad escape, a control byte, a backslash, `;`)
-is verified too. Without it every request is verified. The prefix must not
+is verified too. Without it every request is verified. The path must not
 contain `%`, `?` or `#`.
 
 Replay protection is limited. `stripe` and `slack` reject a delivery only when
