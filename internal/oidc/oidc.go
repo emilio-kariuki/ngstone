@@ -363,7 +363,7 @@ func (p *Provider) principalFromClaims(claims map[string]json.RawMessage) (Princ
 	if principal.Subject == "" {
 		return Principal{}, errors.New("oidc userinfo response is missing sub")
 	}
-	if principal.Subject == credentials.GlobalOwnerID || principal.Subject == credentials.InvalidOwnerID {
+	if principal.Subject == credentials.GlobalOwnerID || principal.Subject == credentials.InvalidOwnerID || strings.HasPrefix(principal.Subject, credentials.MTLSOwnerPrefix) {
 		return Principal{}, ErrForbidden
 	}
 	if len(p.cfg.AllowedEmailDomains) > 0 && !claimBool(claims, "email_verified") {

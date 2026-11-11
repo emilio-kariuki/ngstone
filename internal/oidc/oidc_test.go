@@ -211,3 +211,29 @@ func TestRoleMappingRejectsUsersOutsideConfiguredTeams(t *testing.T) {
 		t.Fatalf("principal error = %v, want ErrForbidden", err)
 	}
 }
+
+func TestPrincipalFromClaimsRejectsReservedMTLSSubject(t *testing.T) {
+	provider, err := New(Config{
+		Issuer:        "https://issuer.example.com",
+		ClientID:      "client-id",
+		RedirectURL:   "https://edge.example.com/callback",
+		CookieSecret:  []byte(strings.Repeat("s", 32)),
+		AdminGroups:   []string{"ngstone-admins"},
+		AllowInsecure: false,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	claim := func(sub string) map[string]json.RawMessage {
+		return map[string]json.RawMessage{
+			"sub":    json.RawMessage(`"` + sub + `"`),
+			"groups": json.RawMessage(`["ngstone-admins"]`),
+		}
+	}
+	if _, err := provider.principalFromClaims(claim("alice")); err != nil {
+		t.Fatalf("ordinary subject rejected: %v", err)
+	}
+	if _, err := provider.principalFromClaims(claim("mtls:alice")); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("mtls subject error = %v, want ErrForbidden", err)
+	}
+}

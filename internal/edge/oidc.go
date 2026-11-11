@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"ngstone/internal/adminapi"
+	"ngstone/internal/credentials"
 	"ngstone/internal/oidc"
 )
 
@@ -48,6 +49,9 @@ func (s *Server) oidcSessionFromRequest(r *http.Request) (oidc.Session, bool) {
 		return oidc.Session{}, false
 	}
 	if session.Subject == "" || session.CSRF == "" || !oidc.HasRole(session.Role, oidc.RoleViewer) || session.ExpiresAt.IsZero() || !time.Now().Before(session.ExpiresAt) {
+		return oidc.Session{}, false
+	}
+	if strings.HasPrefix(session.Subject, credentials.MTLSOwnerPrefix) {
 		return oidc.Session{}, false
 	}
 	return session, true

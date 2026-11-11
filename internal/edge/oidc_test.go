@@ -230,3 +230,29 @@ func responseCookie(response *http.Response, name string) *http.Cookie {
 	}
 	return nil
 }
+
+func TestOIDCSessionRejectsMTLSSubject(t *testing.T) {
+	s, idp, _ := newOIDCTestServer(t, []string{"viewers"})
+	defer idp.Close()
+	probe := func(subject string) int {
+		session, err := oidc.NewSession(oidc.Principal{Subject: subject, Role: oidc.RoleAdmin}, time.Now().UTC(), time.Hour)
+		if err != nil {
+			t.Fatalf("NewSession: %v", err)
+		}
+		encoded, err := s.oidcCodec.Encode(session)
+		if err != nil {
+			t.Fatalf("encode session: %v", err)
+		}
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
+		request.AddCookie(&http.Cookie{Name: oidcSessionCookie, Value: encoded})
+		s.opsMux().ServeHTTP(recorder, request)
+		return recorder.Code
+	}
+	if got := probe("alice"); got != http.StatusOK {
+		t.Fatalf("ordinary session status = %d, want 200", got)
+	}
+	if got := probe("mtls:alice"); got != http.StatusUnauthorized {
+		t.Fatalf("mtls-subject session status = %d, want 401", got)
+	}
+}

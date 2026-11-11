@@ -22,18 +22,19 @@ import (
 )
 
 const (
-	FileVersion    = 1
-	KindHTTP       = "http"
-	KindTCP        = "tcp"
-	KindTLS        = "tls"
-	KindPreview    = "preview"
-	KindShare      = "share"
-	MaxTTL         = 30 * 24 * time.Hour
-	GlobalOwnerID  = "__ngstone_global_admin__"
-	InvalidOwnerID = "__ngstone_invalid_owner__"
-	tokenTag       = "nst"
-	idBytes        = 16
-	secretBytes    = 32
+	FileVersion     = 1
+	KindHTTP        = "http"
+	KindTCP         = "tcp"
+	KindTLS         = "tls"
+	KindPreview     = "preview"
+	KindShare       = "share"
+	MaxTTL          = 30 * 24 * time.Hour
+	GlobalOwnerID   = "__ngstone_global_admin__"
+	InvalidOwnerID  = "__ngstone_invalid_owner__"
+	MTLSOwnerPrefix = "mtls:"
+	tokenTag        = "nst"
+	idBytes         = 16
+	secretBytes     = 32
 )
 
 var (
