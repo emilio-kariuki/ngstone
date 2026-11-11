@@ -460,6 +460,11 @@ chmod 600 alice.key
 ngstone admin status --server https://<apex-domain>:4044 --client-cert alice.pem --client-key alice.key
 ```
 
+The person signing decides the role: inspect the request's subject with
+`openssl req -in alice.csr -noout -subject`, or set it with `-subj` when
+signing, rather than accepting a requester's `OU`. Always sign with
+`client.ext` so the certificate cannot act as a CA.
+
 Copy `admin-ca.pem` (never the key) to `/etc/ngstoned/admin-ca.pem` on every
 edge. Guidance:
 
