@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -39,6 +40,11 @@ func NormalizeLogin(emails, domains []string) ([]string, []string, error) {
 }
 
 func LoginAllows(emails, domains []string, email string, verified bool) bool {
+	for i := 0; i < len(email); i++ {
+		if email[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
 	if len(emails) == 0 && len(domains) == 0 {
 		return true
 	}

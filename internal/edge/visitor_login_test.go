@@ -276,8 +276,8 @@ func visitorLoginTicket(t *testing.T, s *Server, idp *fakeVisitorIdP, tunnelURL 
 		t.Fatalf("parse finish URL: %v", err)
 	}
 	tunnel, _ := url.Parse(tunnelURL)
-	if finishURL.Host != tunnel.Host || finishURL.Path != visitorFinishPath {
-		t.Fatalf("callback redirect = %q, want finish on %s", finishURL, tunnel.Host)
+	if finishURL.Host != tunnel.Hostname() || finishURL.Path != visitorFinishPath {
+		t.Fatalf("callback redirect = %q, want finish on %s", finishURL, tunnel.Hostname())
 	}
 	return callback, finishURL.String(), bind
 }
@@ -825,5 +825,51 @@ func TestStripVisitorSessionCookieStripsEveryEdgeCookie(t *testing.T) {
 	stripVisitorSessionCookie(header)
 	if got := header.Values("Cookie"); len(got) != 1 || got[0] != "a=1; ngstone_visitorx=keep; b=2" {
 		t.Fatalf("Cookie = %q", got)
+	}
+}
+
+func TestVisitorFinishRedirectIgnoresAttackerChosenPort(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	bindVisitorTunnel(t, s, "app.example.com", proto.Bind{OIDC: &proto.OIDCLogin{}})
+
+	callback, finishURL, _ := visitorLoginTicket(t, s, idp, "http://app.example.com:47105/")
+	if callback.Code != http.StatusFound {
+		t.Fatalf("callback status = %d, want 302; body=%s", callback.Code, callback.Body.String())
+	}
+	target, err := url.Parse(finishURL)
+	if err != nil || target.Host != "app.example.com" || target.Port() != "" {
+		t.Fatalf("finish redirect = %q, want host app.example.com without the requested port", finishURL)
+	}
+}
+
+func TestVisitorCallbackRefusesTunnelWithoutLoginRule(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	captured := bindVisitorTunnel(t, s, "open.example.com", proto.Bind{})
+
+	startURL, err := s.visitor.startURL(httptest.NewRequest(http.MethodGet, "http://open.example.com/", nil), "binding")
+	if err != nil {
+		t.Fatalf("startURL: %v", err)
+	}
+	start := visitorRequest(t, s, http.MethodGet, startURL, htmlAccept())
+	var stateCookie *http.Cookie
+	for _, cookie := range start.Result().Cookies() {
+		if strings.HasPrefix(cookie.Name, visitorStateCookiePrefix) {
+			stateCookie = cookie
+		}
+	}
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Get(start.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+	resp.Body.Close()
+	callback := visitorRequest(t, s, http.MethodGet, resp.Header.Get("Location"), htmlAccept(), stateCookie)
+	if callback.Code != http.StatusForbidden || !strings.Contains(callback.Body.String(), "<title>Sign-in not available</title>") || callback.Header().Get("Location") != "" {
+		t.Fatalf("callback = %d %q location=%q, want 403 Sign-in not available and no ticket", callback.Code, callback.Body.String(), callback.Header().Get("Location"))
+	}
+	if _, hits := captured.last(); hits != 0 {
+		t.Fatalf("origin reached %d times", hits)
 	}
 }

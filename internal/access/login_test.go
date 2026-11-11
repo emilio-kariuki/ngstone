@@ -60,3 +60,24 @@ func TestLoginAllows(t *testing.T) {
 		t.Fatal("an empty allow list must accept any authenticated visitor")
 	}
 }
+
+func TestLoginAllowsRejectsNonASCIIEmails(t *testing.T) {
+	cases := []struct {
+		name    string
+		emails  []string
+		domains []string
+		email   string
+	}{
+		{"dotted capital I folds to i in the domain", nil, []string{"gmail.com"}, "x@gmaİl.com"},
+		{"kelvin sign folds to k in the local part", []string{"kim@example.org"}, nil, "Kim@example.org"},
+		{"non-ASCII email with an empty rule", nil, nil, "Kim@example.org"},
+	}
+	for _, tc := range cases {
+		if LoginAllows(tc.emails, tc.domains, tc.email, true) {
+			t.Errorf("%s: LoginAllows(%q) = true, want false", tc.name, tc.email)
+		}
+	}
+	if !LoginAllows([]string{"kim@example.org"}, nil, "Kim@example.org", true) {
+		t.Error("ASCII mixed-case email must still match")
+	}
+}

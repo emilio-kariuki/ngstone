@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -95,9 +96,6 @@ func newVisitorLogin(cfg Config) (*visitorLogin, error) {
 	provider, err := oidc.New(providerCfg)
 	if err != nil {
 		return nil, err
-	}
-	if len(providerCfg.CookieSecret) < 32 {
-		return nil, errors.New("visitor OIDC cookie secret must contain at least 32 bytes")
 	}
 	codec, err := oidc.NewCodec(append([]byte(visitorCodecLabel), providerCfg.CookieSecret...))
 	if err != nil {
@@ -196,7 +194,11 @@ func (s *Server) handleVisitorCallback(w http.ResponseWriter, r *http.Request, v
 		writeVisitorPage(w, http.StatusNotFound, "Tunnel offline", "The tunnel you were visiting is no longer online.")
 		return
 	}
-	if rule != nil && !rule.allows(principal.Email, principal.EmailVerified) {
+	if rule == nil {
+		writeVisitorPage(w, http.StatusForbidden, "Sign-in not available", "This tunnel does not use visitor sign-in.")
+		return
+	}
+	if !rule.allows(principal.Email, principal.EmailVerified) {
 		metricRejectedUnauthorized.Add(1)
 		s.recordEvent("warn", "visitor login denied", map[string]string{"hostname": stripPort(st.Host), "subject": principal.Subject})
 		writeVisitorPage(w, http.StatusForbidden, "Access denied", "Your account is not allowed to access this tunnel.")
@@ -223,7 +225,11 @@ func (s *Server) handleVisitorCallback(w http.ResponseWriter, r *http.Request, v
 		writeVisitorPage(w, http.StatusInternalServerError, "Sign-in failed", "Could not complete the sign-in.")
 		return
 	}
-	target := url.URL{Scheme: v.callback.Scheme, Host: st.Host, Path: visitorFinishPath, RawQuery: url.Values{"ticket": {ticket}}.Encode()}
+	finishHost := st.Host
+	if port := v.callback.Port(); port != "" {
+		finishHost = net.JoinHostPort(st.Host, port)
+	}
+	target := url.URL{Scheme: v.callback.Scheme, Host: finishHost, Path: visitorFinishPath, RawQuery: url.Values{"ticket": {ticket}}.Encode()}
 	http.Redirect(w, r, target.String(), http.StatusFound)
 }
 
@@ -344,7 +350,7 @@ func (v *visitorLogin) startURL(r *http.Request, binding string) (string, error)
 			path = "/"
 		}
 	}
-	sealed, err := v.codec.Encode(visitorToken{Purpose: visitorPurposeReturn, Host: r.Host, Path: path, Binding: binding, ExpiresAt: time.Now().Add(oidc.StateLifetime)})
+	sealed, err := v.codec.Encode(visitorToken{Purpose: visitorPurposeReturn, Host: strings.ToLower(stripPort(r.Host)), Path: path, Binding: binding, ExpiresAt: time.Now().Add(oidc.StateLifetime)})
 	if err != nil {
 		return "", err
 	}
