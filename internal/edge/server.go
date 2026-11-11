@@ -47,6 +47,7 @@ type Config struct {
 	AlertWebhookURL   string
 	AlertWebhookToken string
 	OIDC              *oidc.Config
+	VisitorOIDC       *oidc.Config
 
 	Insecure bool
 
@@ -106,6 +107,7 @@ type Server struct {
 	alerts        *alertDispatcher
 	oidc          *oidc.Provider
 	oidcCodec     *oidc.Codec
+	visitor       *visitorLogin
 	auditCh       chan storage.AuditEvent
 	auditStop     chan struct{}
 	auditWG       sync.WaitGroup
@@ -230,6 +232,11 @@ func New(cfg Config) (*Server, error) {
 			return nil, fmt.Errorf("edge: invalid OIDC cookie configuration: %w", err)
 		}
 	}
+	visitor, err := newVisitorLogin(cfg)
+	if err != nil {
+		closeOpenedStorage()
+		return nil, fmt.Errorf("edge: invalid visitor OIDC configuration: %w", err)
+	}
 
 	srv := &Server{
 		cfg:               cfg,
@@ -254,6 +261,7 @@ func New(cfg Config) (*Server, error) {
 		alerts:            alerts,
 		oidc:              oidcProvider,
 		oidcCodec:         oidcCodec,
+		visitor:           visitor,
 		proxyProtoTrusted: trustedPrefixes,
 		shares:            newShareRegistry(cfg.MaxShareTTL),
 		shareSem:          newGlobalSemaphore(maxGlobalShareConns),

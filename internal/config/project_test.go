@@ -60,6 +60,8 @@ func TestLoadProjectRejectsInvalidTTLAndKind(t *testing.T) {
 		`{"tunnels":{"web":{"target":"3000","multi_connector":true}}}`,
 		`{"tunnels":{"web":{"target":"3000","remote_port":15432}}}`,
 		`{"tunnels":{"web":{"target":"3000","credential_env":"not-valid"}}}`,
+		`{"tunnels":{"web":{"target":"3000","oidc":true,"kind":"tcp"}}}`,
+		`{"tunnels":{"web":{"target":"3000","oidc_allow_domain":["example.com"]}}}`,
 	}
 	for _, data := range cases {
 		_, err := LoadProject(writeProject(t, data))
@@ -115,5 +117,27 @@ func TestFindProject(t *testing.T) {
 	}
 	if gotResolved != wantResolved {
 		t.Fatalf("FindProject = %q, want %q", got, path)
+	}
+}
+
+func TestLoadProjectAcceptsOIDCVisitorLogin(t *testing.T) {
+	path := writeProject(t, `{"tunnels":{"web":{"target":"3000","oidc":true,"oidc_allow_email":["a@example.com"],"oidc_allow_domain":["example.org"]}}}`)
+	project, err := LoadProject(path)
+	if err != nil {
+		t.Fatalf("LoadProject: %v", err)
+	}
+	tunnel := project.Tunnels["web"]
+	if !tunnel.OIDC || len(tunnel.OIDCAllowEmail) != 1 || len(tunnel.OIDCAllowDomain) != 1 {
+		t.Fatalf("tunnel = %+v", tunnel)
+	}
+}
+
+func TestParseTunnelsAcceptsOIDCVisitorLogin(t *testing.T) {
+	f, err := ParseTunnels([]byte("tunnels:\n  web:\n    port: 3000\n    oidc: true\n    oidc_allow_domain: [example.org]\n"))
+	if err != nil {
+		t.Fatalf("ParseTunnels: %v", err)
+	}
+	if !f.Tunnels[0].OIDC || len(f.Tunnels[0].OIDCAllowDomain) != 1 {
+		t.Fatalf("tunnel = %+v", f.Tunnels[0])
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/netip"
+	"slices"
 
 	"ngstone/internal/access"
 	"ngstone/internal/proto"
@@ -23,10 +24,16 @@ type accessControl struct {
 	basicDigests [][32]byte
 	realm        string
 	allow        []netip.Prefix
+	login        *visitorLoginRule
+}
+
+type visitorLoginRule struct {
+	emails  []string
+	domains []string
 }
 
 func buildAccessControl(bind proto.Bind) (*accessControl, error) {
-	if len(bind.BasicAuthSHA256) == 0 && bind.BasicAuthRealm == "" && len(bind.AllowCIDRs) == 0 {
+	if len(bind.BasicAuthSHA256) == 0 && bind.BasicAuthRealm == "" && len(bind.AllowCIDRs) == 0 && bind.OIDC == nil {
 		return nil, nil
 	}
 
@@ -49,7 +56,32 @@ func buildAccessControl(bind proto.Bind) (*accessControl, error) {
 		}
 		ac.allow = append(ac.allow, prefix)
 	}
+	if bind.OIDC != nil {
+		emails, domains, err := access.NormalizeLogin(bind.OIDC.AllowEmails, bind.OIDC.AllowDomains)
+		if err != nil {
+			return nil, err
+		}
+		ac.login = &visitorLoginRule{emails: emails, domains: domains}
+	}
 	return ac, nil
+}
+
+func (ac *accessControl) loginRule() *visitorLoginRule {
+	if ac == nil {
+		return nil
+	}
+	return ac.login
+}
+
+func (rule *visitorLoginRule) allows(email string, verified bool) bool {
+	return rule != nil && access.LoginAllows(rule.emails, rule.domains, email, verified)
+}
+
+func visitorLoginRuleEqual(a, b *visitorLoginRule) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return slices.Equal(a.emails, b.emails) && slices.Equal(a.domains, b.domains)
 }
 
 func prefixesContain(ps []netip.Prefix, ip netip.Addr) bool {

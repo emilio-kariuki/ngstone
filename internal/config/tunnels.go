@@ -71,6 +71,10 @@ type Tunnel struct {
 	BasicAuth     []string `yaml:"basic_auth"`
 	BasicAuthFile string   `yaml:"basic_auth_file"`
 
+	OIDC            bool     `yaml:"oidc"`
+	OIDCAllowEmail  []string `yaml:"oidc_allow_email"`
+	OIDCAllowDomain []string `yaml:"oidc_allow_domain"`
+
 	// TCP only.
 	RemotePort int `yaml:"remote_port"`
 
@@ -215,6 +219,9 @@ func (t *NamedTunnel) validate() error {
 		if len(t.BasicAuth) > 0 && t.BasicAuthFile != "" {
 			return errors.New("set basic_auth or basic_auth_file, not both")
 		}
+		if !t.OIDC && (len(t.OIDCAllowEmail) > 0 || len(t.OIDCAllowDomain) > 0) {
+			return errors.New("oidc_allow_email and oidc_allow_domain require oidc: true")
+		}
 	case KindTCP:
 		if (t.Port == 0) == (t.Address == "") {
 			return errors.New("set exactly one of port or address")
@@ -230,6 +237,9 @@ func (t *NamedTunnel) validate() error {
 		}
 		if t.URL != "" || t.Subdomain != "" || t.HostHeader != "" || len(t.BasicAuth) > 0 || t.BasicAuthFile != "" {
 			return errors.New("url, subdomain, host_header and basic auth are only for kind: http")
+		}
+		if t.OIDC || len(t.OIDCAllowEmail) > 0 || len(t.OIDCAllowDomain) > 0 {
+			return errors.New("oidc, oidc_allow_email and oidc_allow_domain are only for kind: http")
 		}
 	default:
 		return fmt.Errorf("kind %q must be http or tcp", t.Kind)

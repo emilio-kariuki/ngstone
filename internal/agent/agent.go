@@ -93,6 +93,7 @@ type Config struct {
 	AllowCIDRs      []string
 	Policy          *policy.Policy
 	Webhook         *webhook.Config
+	OIDC            *proto.OIDCLogin
 
 	InstanceID string
 
@@ -561,12 +562,12 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		}
 	}
 
-	if (len(a.cfg.BasicAuthSHA256) > 0 || len(a.cfg.AllowCIDRs) > 0 || a.cfg.Policy != nil || a.cfg.HTTP2 || a.cfg.MultiConnector) && negotiated < 2 {
+	if (len(a.cfg.BasicAuthSHA256) > 0 || len(a.cfg.AllowCIDRs) > 0 || a.cfg.Policy != nil || a.cfg.HTTP2 || a.cfg.MultiConnector || a.cfg.OIDC != nil) && negotiated < 2 {
 		return proto.BindOK{}, fmt.Errorf("%w: edge does not support access control, traffic policies, HTTP/2 tunnels, or multiple connectors (negotiated protocol v%d); upgrade ngstoned", errFatalHandshake, negotiated)
 	}
 
-	if a.bindKind() == proto.KindTCP && (len(a.cfg.BasicAuthSHA256) > 0 || a.cfg.Policy != nil || a.cfg.HTTP2 || a.cfg.MultiConnector) {
-		return proto.BindOK{}, fmt.Errorf("%w: basic auth, traffic policies, HTTP/2, and multiple connectors are not supported for tcp tunnels", errFatalHandshake)
+	if a.bindKind() == proto.KindTCP && (len(a.cfg.BasicAuthSHA256) > 0 || a.cfg.Policy != nil || a.cfg.HTTP2 || a.cfg.MultiConnector || a.cfg.OIDC != nil) {
+		return proto.BindOK{}, fmt.Errorf("%w: basic auth, OIDC visitor login, traffic policies, HTTP/2, and multiple connectors are not supported for tcp tunnels", errFatalHandshake)
 	}
 
 	webhookBind, err := a.webhookBind(negotiated)
@@ -608,6 +609,7 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		if len(a.cfg.BasicAuthSHA256) > 0 {
 			bindMsg.BasicAuthRealm = a.cfg.BasicAuthRealm
 		}
+		bindMsg.OIDC = a.cfg.OIDC
 	}
 
 	bindID := idgen.Next()
@@ -644,6 +646,9 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		}
 		if webhookBind != nil && bindOK.Webhook != webhookBind.Provider {
 			return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge webhook verification; upgrade ngstoned", errFatalHandshake)
+		}
+		if a.cfg.OIDC != nil && !bindOK.OIDC {
+			return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge OIDC visitor login; upgrade ngstoned", errFatalHandshake)
 		}
 		return bindOK, nil
 	default:

@@ -42,6 +42,10 @@ func main() {
 	oidcViewerGroups := flag.String("oidc-viewer-groups", "", "comma-separated OIDC groups mapped to the viewer role")
 	oidcAllowedEmailDomains := flag.String("oidc-allowed-email-domains", "", "comma-separated email domains allowed to log in")
 	oidcDefaultRole := flag.String("oidc-default-role", "", "optional role for authenticated OIDC users without a matching group; empty requires a configured group")
+	visitorOIDCIssuer := flag.String("visitor-oidc-issuer", "", "OIDC issuer URL for tunnel visitor login (defaults to $NGSTONE_VISITOR_OIDC_ISSUER; empty disables --oidc tunnels)")
+	visitorOIDCClientID := flag.String("visitor-oidc-client-id", "", "OIDC client ID for tunnel visitor login (defaults to $NGSTONE_VISITOR_OIDC_CLIENT_ID)")
+	visitorOIDCRedirectURL := flag.String("visitor-oidc-redirect-url", "", "visitor login callback URL on the apex host (defaults to $NGSTONE_VISITOR_OIDC_REDIRECT_URL or <public-scheme>://<domain>/.ngstone/auth/callback)")
+	visitorOIDCAllowedEmailDomains := flag.String("visitor-oidc-allowed-email-domains", "", "comma-separated email domains every visitor must belong to, on top of per-tunnel rules (defaults to $NGSTONE_VISITOR_OIDC_ALLOWED_EMAIL_DOMAINS)")
 	domain := flag.String("domain", "", "base domain used to build tunnel hostnames and the two managed certificates (required), for example example.com")
 	publicScheme := flag.String("public-scheme", "https", "scheme advertised in BindOK.URL (http or https)")
 	tcpPortRange := flag.String("tcp-ports", "", "port range for raw TCP tunnels, e.g. \"10000-10999\"; empty disables TCP tunnels. These ports are exposed directly to the internet (not behind a reverse proxy) and must be opened in the firewall.")
@@ -181,6 +185,25 @@ func main() {
 			AllowInsecure:       *insecure,
 		}
 	}
+	var visitorOIDCConfig *oidc.Config
+	resolvedVisitorIssuer := envOrFlag("NGSTONE_VISITOR_OIDC_ISSUER", *visitorOIDCIssuer)
+	resolvedVisitorClientID := envOrFlag("NGSTONE_VISITOR_OIDC_CLIENT_ID", *visitorOIDCClientID)
+	if resolvedVisitorIssuer != "" || resolvedVisitorClientID != "" {
+		cookieSecret, secretErr := oidc.ParseCookieSecret(os.Getenv("NGSTONE_VISITOR_OIDC_COOKIE_SECRET"))
+		if secretErr != nil {
+			logger.Error("ngstoned: invalid visitor OIDC cookie secret ($NGSTONE_VISITOR_OIDC_COOKIE_SECRET)", "err", secretErr)
+			os.Exit(1)
+		}
+		visitorOIDCConfig = &oidc.Config{
+			Issuer:              resolvedVisitorIssuer,
+			ClientID:            resolvedVisitorClientID,
+			ClientSecret:        os.Getenv("NGSTONE_VISITOR_OIDC_CLIENT_SECRET"),
+			RedirectURL:         envOrFlag("NGSTONE_VISITOR_OIDC_REDIRECT_URL", *visitorOIDCRedirectURL),
+			CookieSecret:        cookieSecret,
+			AllowedEmailDomains: splitCSV(envOrFlag("NGSTONE_VISITOR_OIDC_ALLOWED_EMAIL_DOMAINS", *visitorOIDCAllowedEmailDomains)),
+			AllowInsecure:       *insecure,
+		}
+	}
 	var sum []byte
 	if databaseURL == "" && credentialsFile == "" && tokenSHA256HexVal == "" {
 		databaseURL = storage.DefaultSQLite
@@ -261,6 +284,7 @@ func main() {
 		AlertWebhookURL:   resolvedAlertWebhookURL,
 		AlertWebhookToken: alertWebhookToken,
 		OIDC:              oidcConfig,
+		VisitorOIDC:       visitorOIDCConfig,
 		TCPPortRange:      *tcpPortRange,
 		TCPBindAddr:       *tcpBindAddr,
 		MaxShareTTL:       *maxShareTTL,
@@ -304,6 +328,13 @@ func main() {
 		logger.Error("ngstoned: exited with error", "err", err)
 		os.Exit(1)
 	}
+}
+
+func envOrFlag(name, flagValue string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return flagValue
 }
 
 func splitCSV(value string) []string {

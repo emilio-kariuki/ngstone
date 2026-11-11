@@ -187,8 +187,14 @@ type Bind struct {
 	AllowCIDRs      []string       `json:"allow_cidrs,omitempty"`
 	Policy          *policy.Policy `json:"policy,omitempty"`
 	PolicyDigest    string         `json:"policy_digest,omitempty"`
+	OIDC            *OIDCLogin     `json:"oidc,omitempty"`
 
 	Webhook *WebhookVerification `json:"webhook,omitempty"`
+}
+
+type OIDCLogin struct {
+	AllowEmails  []string `json:"allow_emails,omitempty"`
+	AllowDomains []string `json:"allow_domains,omitempty"`
 }
 
 type WebhookVerification struct {
@@ -221,6 +227,7 @@ type BindOK struct {
 	MultiConnector bool   `json:"multi_connector,omitempty"`
 	PolicyDigest   string `json:"policy_digest,omitempty"`
 	Webhook        string `json:"webhook,omitempty"`
+	OIDC           bool   `json:"oidc,omitempty"`
 }
 
 type BindErr struct {

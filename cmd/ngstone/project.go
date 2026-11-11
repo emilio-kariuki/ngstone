@@ -315,6 +315,10 @@ func buildProjectAgent(name string, tunnel config.ProjectTunnel, projectDir stri
 	if err != nil {
 		return agent.Config{}, 0, err
 	}
+	oidcLogin, err := parseOIDCLogin(tunnel.OIDC, tunnel.OIDCAllowEmail, tunnel.OIDCAllowDomain)
+	if err != nil {
+		return agent.Config{}, 0, err
+	}
 	ttl, err := tunnel.TTLDuration()
 	if err != nil {
 		return agent.Config{}, 0, err
@@ -337,6 +341,7 @@ func buildProjectAgent(name string, tunnel config.ProjectTunnel, projectDir stri
 		AllowCIDRs:      allowCIDRs,
 		Policy:          trafficPolicy,
 		Webhook:         webhookCfg,
+		OIDC:            oidcLogin,
 		Insecure:        tunnel.Insecure,
 		ServerName:      tunnel.ServerName,
 		Pin:             tunnel.Pin,
