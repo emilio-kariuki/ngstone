@@ -84,6 +84,8 @@ func main() {
 	perIPInFlight := flag.Int("per-ip-inflight", edge.DefaultPerIPInFlight, "max HTTP requests plus TCP tunnel connections one client address can have in flight (IPv6 grouped by /48)")
 	clientIdleTimeout := flag.Duration("client-idle-timeout", edge.DefaultClientIdleTimeout, "max time one read of a request body, or one write of a response, may wait on the public client; a stalled upload gets 408")
 	tcpIdleTimeout := flag.Duration("tcp-idle-timeout", edge.DefaultTCPIdleTimeout, "close a TCP tunnel connection after this long with no bytes in either direction")
+	webhookMaxBodyBytes := flag.Int64("webhook-max-body-bytes", edge.DefaultWebhookMaxBodyBytes, "maximum request body buffered for webhook signature verification before a 413")
+	webhookBufferBytes := flag.Int64("webhook-buffer-bytes", edge.DefaultWebhookBufferBytes, "total bytes all in-flight webhook verifications may buffer before a 503")
 
 	showVersion := flag.Bool("version", false, "print version and exit")
 
@@ -320,6 +322,8 @@ func main() {
 			PerIPInFlight:             *perIPInFlight,
 			ClientIdleTimeout:         *clientIdleTimeout,
 			TCPIdleTimeout:            *tcpIdleTimeout,
+			WebhookMaxBodyBytes:       *webhookMaxBodyBytes,
+			WebhookBufferBytes:        *webhookBufferBytes,
 		},
 	})
 	if err != nil {

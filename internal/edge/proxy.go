@@ -259,7 +259,9 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		r.Body = body
 		ctx = context.WithValue(ctx, ctxKeyIdleBody, body)
 	}
-	if !verifyWebhookRequest(rec, r, webhookVerifier, webhookBodyLimit(limits), time.Now()) {
+	releaseWebhook, ok := verifyWebhookRequest(rec, r, webhookVerifier, webhookBodyLimit(limits), s.webhookBudget, time.Now())
+	defer releaseWebhook()
+	if !ok {
 		return
 	}
 

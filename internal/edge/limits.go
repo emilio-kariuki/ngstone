@@ -40,6 +40,9 @@ const (
 	// DefaultTCPIdleTimeout closes a TCP tunnel connection that has carried
 	// no bytes in either direction for this long.
 	DefaultTCPIdleTimeout = 30 * time.Minute
+
+	DefaultWebhookMaxBodyBytes = 1 << 20
+	DefaultWebhookBufferBytes  = 64 << 20
 )
 
 type LimitsConfig struct {
@@ -65,6 +68,9 @@ type LimitsConfig struct {
 	PerIPInFlight     int
 	ClientIdleTimeout time.Duration
 	TCPIdleTimeout    time.Duration
+
+	WebhookMaxBodyBytes int64
+	WebhookBufferBytes  int64
 }
 
 func (l LimitsConfig) withDefaults() (LimitsConfig, error) {
@@ -169,6 +175,21 @@ func (l LimitsConfig) withDefaults() (LimitsConfig, error) {
 	}
 	if l.TCPIdleTimeout == 0 {
 		l.TCPIdleTimeout = DefaultTCPIdleTimeout
+	}
+	if l.WebhookMaxBodyBytes < 0 {
+		return l, fmt.Errorf("edge: webhook-max-body-bytes must not be negative, got %d", l.WebhookMaxBodyBytes)
+	}
+	if l.WebhookMaxBodyBytes == 0 {
+		l.WebhookMaxBodyBytes = DefaultWebhookMaxBodyBytes
+	}
+	if l.WebhookBufferBytes < 0 {
+		return l, fmt.Errorf("edge: webhook-buffer-bytes must not be negative, got %d", l.WebhookBufferBytes)
+	}
+	if l.WebhookBufferBytes == 0 {
+		l.WebhookBufferBytes = DefaultWebhookBufferBytes
+	}
+	if l.WebhookMaxBodyBytes > l.WebhookBufferBytes {
+		return l, fmt.Errorf("edge: webhook-max-body-bytes (%d) must not exceed webhook-buffer-bytes (%d)", l.WebhookMaxBodyBytes, l.WebhookBufferBytes)
 	}
 	return l, nil
 }
@@ -288,6 +309,45 @@ func semaphoreStats(s *globalSemaphore) (active, capacity int64) {
 		return 0, 0
 	}
 	return int64(len(s.slots)), int64(cap(s.slots))
+}
+
+type byteBudget struct {
+	max int64
+
+	mu   sync.Mutex
+	used int64
+}
+
+func newByteBudget(max int64) *byteBudget {
+	return &byteBudget{max: max}
+}
+
+func (b *byteBudget) reserve(n int64) (release func(), ok bool) {
+	if b == nil || n <= 0 {
+		return func() {}, true
+	}
+	b.mu.Lock()
+	if n > b.max-b.used {
+		b.mu.Unlock()
+		return nil, false
+	}
+	b.used += n
+	b.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			b.mu.Lock()
+			b.used -= n
+			b.mu.Unlock()
+		})
+	}, true
+}
+
+func (b *byteBudget) inUse() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.used
 }
 
 func writeTooManyRequests(w http.ResponseWriter) {

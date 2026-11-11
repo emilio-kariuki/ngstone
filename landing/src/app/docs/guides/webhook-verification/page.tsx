@@ -160,10 +160,14 @@ $ ngstone port 3000 --verify-webhook github --verify-webhook-secret-file github.
 
       <Anchor id="rejections">What gets rejected</Anchor>
       <p>
-        The edge buffers the body (up to the smaller of its{" "}
-        <code>-max-body-bytes</code> limit and 25 MiB), checks the
+        A missing or malformed signature header is rejected before any of
+        the body is read. Otherwise the edge buffers the body (up to the
+        smaller of its <code>-webhook-max-body-bytes</code> and{" "}
+        <code>-max-body-bytes</code> limits, 1 MiB by default), checks the
         signature with a constant-time comparison, then forwards the
-        untouched body. Failures get a short plain-text reason:
+        untouched body. All verifications together share a{" "}
+        <code>-webhook-buffer-bytes</code> budget (64 MiB by default).
+        Failures get a short plain-text reason:
       </p>
       <CodeBlock
         language="text"
@@ -171,11 +175,15 @@ $ ngstone port 3000 --verify-webhook github --verify-webhook-secret-file github.
 401 webhook signature rejected: malformed signature
 401 webhook signature rejected: invalid signature
 401 webhook signature rejected: timestamp outside tolerance
-413 request entity too large`}
+413 request entity too large
+503 webhook verification is busy`}
       />
       <p>
-        Rejections are counted in{" "}
-        <code>ngstoned_rejected_webhook_signature_total</code>.
+        Signature rejections are counted in{" "}
+        <code>ngstoned_rejected_webhook_signature_total</code>; a{" "}
+        <code>503</code> (sent with <code>Retry-After</code>) means the
+        buffer budget is spent and is counted in{" "}
+        <code>ngstoned_rejected_webhook_buffer_total</code>.
       </p>
 
       <Anchor id="security-notes">Security notes</Anchor>

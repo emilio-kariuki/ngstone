@@ -634,11 +634,16 @@ tunnels:
       secret_env: SLACK_SIGNING_SECRET   # defaults to NGSTONE_WEBHOOK_SECRET
 ```
 
-The edge buffers a matching request body up to the smaller of
-`-max-body-bytes` and 25 MiB (`413` beyond that), compares signatures in
-constant time, then forwards the original body unchanged. Failures return a
-short reason (`missing signature`, `malformed signature`, `invalid signature`,
-`timestamp outside tolerance`) and increment
+A missing or malformed signature header gets `401` before any body is read.
+Otherwise the edge buffers a matching request body up to the smaller of
+`-webhook-max-body-bytes` (default 1 MiB) and `-max-body-bytes` (`413` beyond
+that), compares signatures in constant time, then forwards the original body
+unchanged. All in-flight verifications share a `-webhook-buffer-bytes` budget
+(default 64 MiB); the edge reserves the declared length, or the full cap for a
+chunked body, before reading, and answers `503` with `Retry-After` when the
+budget is spent (`ngstoned_rejected_webhook_buffer_total`). Signature failures
+return a short reason (`missing signature`, `malformed signature`, `invalid
+signature`, `timestamp outside tolerance`) and increment
 `ngstoned_rejected_webhook_signature_total`.
 
 HMAC verification needs the signing secret itself, so the agent sends it to the

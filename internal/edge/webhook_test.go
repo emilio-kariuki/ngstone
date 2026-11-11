@@ -159,8 +159,146 @@ func TestHandlePublicWebhookBodyCap(t *testing.T) {
 	if n := len(capture.received()); n != 0 {
 		t.Fatalf("local app received %d oversize requests", n)
 	}
-	if got := webhookBodyLimit(LimitsConfig{MaxBodyBytes: DefaultMaxBodyBytes}); got != webhook.MaxBodyBytes {
-		t.Fatalf("webhookBodyLimit = %d, want %d", got, webhook.MaxBodyBytes)
+	defaults, err := LimitsConfig{}.withDefaults()
+	if err != nil {
+		t.Fatalf("withDefaults: %v", err)
+	}
+	if got := webhookBodyLimit(defaults); got != DefaultWebhookMaxBodyBytes {
+		t.Fatalf("webhookBodyLimit = %d, want %d", got, DefaultWebhookMaxBodyBytes)
+	}
+	if s.webhookBudget.inUse() != 0 {
+		t.Fatalf("webhook budget in use = %d after oversize requests", s.webhookBudget.inUse())
+	}
+}
+
+func TestHandlePublicWebhookMaxBodyBytes(t *testing.T) {
+	s, capture := newWebhookTestServer(t, LimitsConfig{WebhookMaxBodyBytes: 32}, webhook.Config{Provider: webhook.ProviderGitHub, Secret: testWebhookSecret})
+	small := strings.Repeat("x", 32)
+	if rec := webhookRequest(s, "/", small, true, map[string]string{webhook.GitHubSignatureHeader: webhook.GitHubSignature(testWebhookSecret, []byte(small))}); rec.Code != http.StatusOK {
+		t.Fatalf("body at the cap status = %d body=%q", rec.Code, rec.Body.String())
+	}
+	body := strings.Repeat("x", 33)
+	sig := webhook.GitHubSignature(testWebhookSecret, []byte(body))
+	for _, chunked := range []bool{false, true} {
+		rec := webhookRequest(s, "/", body, chunked, map[string]string{webhook.GitHubSignatureHeader: sig})
+		if rec.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("chunked=%v oversize status = %d", chunked, rec.Code)
+		}
+	}
+	if n := len(capture.received()); n != 1 {
+		t.Fatalf("local app received %d requests, want 1", n)
+	}
+	if s.webhookBudget.inUse() != 0 {
+		t.Fatalf("webhook budget in use = %d", s.webhookBudget.inUse())
+	}
+}
+
+type readTrap struct{ read bool }
+
+func (r *readTrap) Read(p []byte) (int, error) {
+	r.read = true
+	return 0, io.EOF
+}
+
+func TestHandlePublicWebhookRejectsMissingHeaderBeforeReadingBody(t *testing.T) {
+	s, capture := newWebhookTestServer(t, LimitsConfig{}, webhook.Config{Provider: webhook.ProviderStripe, Secret: testWebhookSecret})
+	for name, headers := range map[string]map[string]string{
+		"missing":   nil,
+		"malformed": {webhook.StripeSignatureHeader: "garbage"},
+	} {
+		trap := &readTrap{}
+		req := httptest.NewRequest(http.MethodPost, "http://hooks.example.com/stripe", trap)
+		req.ContentLength = 1 << 20
+		req.Host = "hooks.example.com"
+		req.RemoteAddr = "203.0.113.7:4444"
+		for k, v := range headers {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		s.handlePublic(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s header status = %d body=%q", name, rec.Code, rec.Body.String())
+		}
+		if trap.read {
+			t.Fatalf("%s header: body was read before the signature header was checked", name)
+		}
+	}
+	if n := len(capture.received()); n != 0 {
+		t.Fatalf("local app received %d requests", n)
+	}
+	if s.webhookBudget.inUse() != 0 {
+		t.Fatalf("webhook budget in use = %d", s.webhookBudget.inUse())
+	}
+}
+
+func TestHandlePublicWebhookBufferBudget(t *testing.T) {
+	s, capture := newWebhookTestServer(t, LimitsConfig{WebhookMaxBodyBytes: 64, WebhookBufferBytes: 100}, webhook.Config{Provider: webhook.ProviderGitHub, Secret: testWebhookSecret})
+	body := strings.Repeat("x", 50)
+	headers := map[string]string{webhook.GitHubSignatureHeader: webhook.GitHubSignature(testWebhookSecret, []byte(body))}
+
+	held, ok := s.webhookBudget.reserve(60)
+	if !ok {
+		t.Fatal("could not reserve part of the budget")
+	}
+	before := metricRejectedWebhookBuffer.Value()
+	for _, chunked := range []bool{false, true} {
+		rec := webhookRequest(s, "/", body, chunked, headers)
+		if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") == "" {
+			t.Fatalf("chunked=%v exhausted budget status = %d retry-after=%q", chunked, rec.Code, rec.Header().Get("Retry-After"))
+		}
+	}
+	if got := metricRejectedWebhookBuffer.Value() - before; got != 2 {
+		t.Fatalf("webhook buffer rejections = %d, want 2", got)
+	}
+	if got := s.webhookBudget.inUse(); got != 60 {
+		t.Fatalf("webhook budget in use = %d, want 60", got)
+	}
+	held()
+
+	if rec := webhookRequest(s, "/", body, true, headers); rec.Code != http.StatusOK {
+		t.Fatalf("after release status = %d body=%q", rec.Code, rec.Body.String())
+	}
+	if rec := webhookRequest(s, "/", body+"!", false, headers); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("tampered status = %d", rec.Code)
+	}
+	if n := len(capture.received()); n != 1 {
+		t.Fatalf("local app received %d requests, want 1", n)
+	}
+	if got := s.webhookBudget.inUse(); got != 0 {
+		t.Fatalf("webhook budget in use = %d, want 0", got)
+	}
+}
+
+func TestHandlePublicWebhookHoldsBudgetWhileProxying(t *testing.T) {
+	verifier, err := webhook.New(webhook.Config{Provider: webhook.ProviderGitHub, Secret: testWebhookSecret})
+	if err != nil {
+		t.Fatalf("webhook.New: %v", err)
+	}
+	s := newServerForTest(LimitsConfig{PerIPRate: 1000, PerIPBurst: 1000})
+	entered := make(chan int64, 1)
+	unblock := make(chan struct{})
+	as := newFakeAgentSession(t, "webhook-hold", func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		entered <- s.webhookBudget.inUse()
+		<-unblock
+	})
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "hooks.example.com", Session: as, Takeover: true, Webhook: verifier}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	body := `{"ok":true}`
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- webhookRequest(s, "/", body, false, map[string]string{webhook.GitHubSignatureHeader: webhook.GitHubSignature(testWebhookSecret, []byte(body))})
+	}()
+	if got := <-entered; got != int64(len(body)) {
+		t.Fatalf("webhook budget in use while proxying = %d, want %d", got, len(body))
+	}
+	close(unblock)
+	if rec := <-done; rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%q", rec.Code, rec.Body.String())
+	}
+	if got := s.webhookBudget.inUse(); got != 0 {
+		t.Fatalf("webhook budget in use after proxying = %d", got)
 	}
 }
 

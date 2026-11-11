@@ -85,6 +85,20 @@ export default function LimitsTimeoutsPage() {
           <code>ErrorHandler</code> that type-checks{" "}
           <code>*http.MaxBytesError</code>.
         </Property>
+        <Property name="-webhook-max-body-bytes" type="bytes" defaultValue="1 MiB">
+          Largest body the edge buffers to verify a webhook signature
+          (capped by <code>-max-body-bytes</code>). Larger bodies get{" "}
+          <code>413</code>.
+        </Property>
+        <Property name="-webhook-buffer-bytes" type="bytes" defaultValue="64 MiB">
+          Total memory all in-flight webhook verifications may hold. The
+          edge reserves a request&apos;s declared length (or the full
+          per-request cap for chunked bodies) before reading it; when the
+          budget is spent it answers <code>503</code> with{" "}
+          <code>Retry-After</code> and counts{" "}
+          <code>ngstoned_rejected_webhook_buffer_total</code>. Must be at
+          least <code>-webhook-max-body-bytes</code>.
+        </Property>
       </ParamTable>
       <Callout variant="warning" title="A chunked 413 may ship a partial body">
         The naive design — relying on <code>MaxBytesReader</code> alone —

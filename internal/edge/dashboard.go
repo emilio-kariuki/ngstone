@@ -74,6 +74,8 @@ type dashboardMetrics struct {
 	RejectedForbiddenCIDR    int64 `json:"rejected_forbidden_cidr"`
 	RejectedUnauthorized     int64 `json:"rejected_unauthorized"`
 	RejectedTrafficPolicy    int64 `json:"rejected_traffic_policy"`
+	RejectedWebhookSignature int64 `json:"rejected_webhook_signature"`
+	RejectedWebhookBuffer    int64 `json:"rejected_webhook_buffer"`
 	RejectedUpgradeCap       int64 `json:"rejected_upgrade_cap"`
 	TCPRejectedGlobalCap     int64 `json:"tcp_rejected_global_cap"`
 	TCPRejectedBindCap       int64 `json:"tcp_rejected_bind_cap"`
@@ -318,6 +320,8 @@ func dashboardMetricsSnapshot() dashboardMetrics {
 		RejectedForbiddenCIDR:    metricRejectedForbiddenCIDR.Value(),
 		RejectedUnauthorized:     metricRejectedUnauthorized.Value(),
 		RejectedTrafficPolicy:    metricRejectedTrafficPolicy.Value(),
+		RejectedWebhookSignature: metricRejectedWebhook.Value(),
+		RejectedWebhookBuffer:    metricRejectedWebhookBuffer.Value(),
 		RejectedUpgradeCap:       metricRejectedUpgradeCap.Value(),
 		TCPRejectedGlobalCap:     metricTCPRejectedGlobalCap.Value(),
 		TCPRejectedBindCap:       metricTCPRejectedBindCap.Value(),
@@ -359,7 +363,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writePrometheusCounter(w, "ngstoned_rejected_forbidden_cidr_total", "Requests rejected by an IP allowlist.", metrics.RejectedForbiddenCIDR)
 	writePrometheusCounter(w, "ngstoned_rejected_unauthorized_total", "Requests rejected by HTTP basic authentication.", metrics.RejectedUnauthorized)
 	writePrometheusCounter(w, "ngstoned_rejected_traffic_policy_total", "Requests rejected by a traffic policy.", metrics.RejectedTrafficPolicy)
-	writePrometheusCounter(w, "ngstoned_rejected_webhook_signature_total", "Requests rejected by webhook signature verification.", metricRejectedWebhook.Value())
+	writePrometheusCounter(w, "ngstoned_rejected_webhook_signature_total", "Requests rejected by webhook signature verification.", metrics.RejectedWebhookSignature)
+	writePrometheusCounter(w, "ngstoned_rejected_webhook_buffer_total", "Requests rejected because the webhook buffer budget was exhausted.", metrics.RejectedWebhookBuffer)
 	writePrometheusCounter(w, "ngstoned_rejected_upgrade_cap_total", "Requests rejected by the upgrade concurrency cap.", metrics.RejectedUpgradeCap)
 	writePrometheusCounter(w, "ngstoned_tcp_rejected_global_cap_total", "TCP connections rejected by the global concurrency cap.", metrics.TCPRejectedGlobalCap)
 	writePrometheusCounter(w, "ngstoned_tcp_rejected_bind_cap_total", "TCP binds rejected by the per-session bind cap.", metrics.TCPRejectedBindCap)

@@ -271,6 +271,39 @@ func TestVerify(t *testing.T) {
 	}
 }
 
+func TestCheckHeaders(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     Config
+		header  http.Header
+		wantErr error
+	}{
+		{name: "stripe missing", cfg: Config{Provider: ProviderStripe, Secret: "s"}, header: http.Header{}, wantErr: ErrMissingSignature},
+		{name: "stripe malformed", cfg: Config{Provider: ProviderStripe, Secret: "s"}, header: headers(StripeSignatureHeader, "v1="+stripeV1), wantErr: ErrMalformedSignature},
+		{name: "stripe wrong mac", cfg: Config{Provider: ProviderStripe, Secret: "s"}, header: headers(StripeSignatureHeader, "t=1700000000,v1="+stripeV1)},
+		{name: "github missing", cfg: Config{Provider: ProviderGitHub, Secret: "s"}, header: http.Header{}, wantErr: ErrMissingSignature},
+		{name: "github malformed", cfg: Config{Provider: ProviderGitHub, Secret: "s"}, header: headers(GitHubSignatureHeader, "sha1=00"), wantErr: ErrMalformedSignature},
+		{name: "github wrong mac", cfg: Config{Provider: ProviderGitHub, Secret: "s"}, header: headers(GitHubSignatureHeader, githubDocSignature)},
+		{name: "slack missing timestamp", cfg: Config{Provider: ProviderSlack, Secret: "s"}, header: headers(SlackSignatureHeader, slackDocSignature), wantErr: ErrMissingSignature},
+		{name: "slack malformed", cfg: Config{Provider: ProviderSlack, Secret: "s"}, header: headers(SlackSignatureHeader, "v0=zz", SlackTimestampHeader, slackDocTimestamp), wantErr: ErrMalformedSignature},
+		{name: "slack wrong mac", cfg: Config{Provider: ProviderSlack, Secret: "s"}, header: headers(SlackSignatureHeader, slackDocSignature, SlackTimestampHeader, slackDocTimestamp)},
+		{name: "hmac missing", cfg: Config{Provider: ProviderHMAC, Secret: "s", Header: "X-Sig"}, header: http.Header{}, wantErr: ErrMissingSignature},
+		{name: "hmac malformed", cfg: Config{Provider: ProviderHMAC, Secret: "s", Header: "X-Sig"}, header: headers("X-Sig", "abc"), wantErr: ErrMalformedSignature},
+		{name: "hmac wrong mac", cfg: Config{Provider: ProviderHMAC, Secret: "s", Header: "X-Sig"}, header: headers("X-Sig", hmacHexSignature)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v, err := New(tt.cfg)
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if err := v.CheckHeaders(tt.header); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("CheckHeaders = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestSignHelpersMatchDocumentedVectors(t *testing.T) {
 	if got := GitHubSignature(githubDocSecret, []byte(githubDocBody)); got != githubDocSignature {
 		t.Fatalf("GitHubSignature = %s", got)

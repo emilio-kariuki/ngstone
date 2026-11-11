@@ -97,6 +97,8 @@ type Server struct {
 	unauthSem    *globalSemaphore
 	fallbackSem  *globalSemaphore
 
+	webhookBudget *byteBudget
+
 	tlsMgr *TLSManager
 	tcpMgr *tcpManager
 
@@ -256,6 +258,7 @@ func New(cfg Config) (*Server, error) {
 		handshakeSem:      newGlobalSemaphore(int64(limits.HandshakeConcurrency)),
 		unauthSem:         newGlobalSemaphore(int64(limits.UnauthSessions)),
 		fallbackSem:       newGlobalSemaphore(int64(limits.UnauthSessions)),
+		webhookBudget:     newByteBudget(limits.WebhookBufferBytes),
 		tcpMgr:            tcpMgr,
 		observability:     newObservabilityRegistry(),
 		alerts:            alerts,

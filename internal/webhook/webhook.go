@@ -34,8 +34,6 @@ const (
 	MaxPrefixBytes     = 64
 	MaxPathPrefixBytes = 1024
 
-	MaxBodyBytes = 25 << 20
-
 	StripeSignatureHeader = "Stripe-Signature"
 	GitHubSignatureHeader = "X-Hub-Signature-256"
 	SlackSignatureHeader  = "X-Slack-Signature"
@@ -237,6 +235,14 @@ func (v *Verifier) Verify(h http.Header, body []byte, now time.Time) error {
 		return v.verifyHMAC(h, body)
 	}
 	return ErrInvalidSignature
+}
+
+func (v *Verifier) CheckHeaders(h http.Header) error {
+	err := v.Verify(h, nil, time.Time{})
+	if errors.Is(err, ErrMissingSignature) || errors.Is(err, ErrMalformedSignature) {
+		return err
+	}
+	return nil
 }
 
 func (v *Verifier) mac(parts ...[]byte) []byte {

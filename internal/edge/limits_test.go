@@ -152,6 +152,25 @@ func TestLimitsConfigWithDefaultsRejectsNegativePerSessionUpgradeInFlight(t *tes
 	}
 }
 
+func TestLimitsConfigWithDefaultsWebhookLimits(t *testing.T) {
+	l, err := LimitsConfig{}.withDefaults()
+	if err != nil {
+		t.Fatalf("withDefaults: %v", err)
+	}
+	if l.WebhookMaxBodyBytes != DefaultWebhookMaxBodyBytes || l.WebhookBufferBytes != DefaultWebhookBufferBytes {
+		t.Fatalf("webhook limits = %d/%d, want %d/%d", l.WebhookMaxBodyBytes, l.WebhookBufferBytes, DefaultWebhookMaxBodyBytes, DefaultWebhookBufferBytes)
+	}
+	for _, bad := range []LimitsConfig{
+		{WebhookMaxBodyBytes: -1},
+		{WebhookBufferBytes: -1},
+		{WebhookMaxBodyBytes: 2048, WebhookBufferBytes: 1024},
+	} {
+		if _, err := bad.withDefaults(); err == nil {
+			t.Fatalf("withDefaults(%+v) accepted", bad)
+		}
+	}
+}
+
 func TestPerIPLimiterTripsAtBurstAndIsPerIP(t *testing.T) {
 	l := newPerIPLimiter(1000, 3, 100)
 	ip := "1.2.3.4"

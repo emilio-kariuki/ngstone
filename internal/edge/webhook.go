@@ -3,7 +3,6 @@ package edge
 import (
 	"bytes"
 	"errors"
-	"expvar"
 	"io"
 	"net/http"
 	"time"
@@ -11,8 +10,6 @@ import (
 	"ngstone/internal/proto"
 	"ngstone/internal/webhook"
 )
-
-var metricRejectedWebhook = expvar.NewInt("ngstoned_rejected_webhook_signature_total")
 
 func buildWebhookVerifier(bind proto.Bind) (*webhook.Verifier, error) {
 	if bind.Webhook == nil {
@@ -33,51 +30,89 @@ func buildWebhookVerifier(bind proto.Bind) (*webhook.Verifier, error) {
 }
 
 func webhookBodyLimit(limits LimitsConfig) int64 {
-	if limits.MaxBodyBytes > 0 && limits.MaxBodyBytes < webhook.MaxBodyBytes {
-		return limits.MaxBodyBytes
-	}
-	return webhook.MaxBodyBytes
+	return min(limits.WebhookMaxBodyBytes, limits.MaxBodyBytes)
 }
 
-func verifyWebhookRequest(w http.ResponseWriter, r *http.Request, v *webhook.Verifier, limit int64, now time.Time) bool {
+func verifyWebhookRequest(w http.ResponseWriter, r *http.Request, v *webhook.Verifier, limit int64, budget *byteBudget, now time.Time) (release func(), ok bool) {
 	if v == nil || !v.Matches(r.URL.EscapedPath()) {
-		return true
+		return func() {}, true
+	}
+	if err := v.CheckHeaders(r.Header); err != nil {
+		rejectWebhookSignature(w, err)
+		return func() {}, false
 	}
 	if r.ContentLength > limit {
 		metricRejected413.Add(1)
 		http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
-		return false
+		return func() {}, false
 	}
-	var body []byte
-	if r.Body != nil && r.Body != http.NoBody {
-		data, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
-		if err != nil {
-			writeWebhookBodyError(w, r, err)
-			return false
-		}
-		if int64(len(data)) > limit {
-			metricRejected413.Add(1)
-			w.Header().Set("Connection", "close")
-			http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
-			return false
-		}
-		body = data
+	body, release, ok := readWebhookBody(w, r, limit, budget)
+	if !ok {
+		return func() {}, false
 	}
 	if err := v.Verify(r.Header, body, now); err != nil {
-		metricRejectedWebhook.Add(1)
-		http.Error(w, "webhook signature rejected: "+err.Error(), http.StatusUnauthorized)
-		return false
+		release()
+		rejectWebhookSignature(w, err)
+		return func() {}, false
 	}
 	r.ContentLength = int64(len(body))
 	r.TransferEncoding = nil
 	if len(body) == 0 {
 		r.Body = http.NoBody
 		r.GetBody = func() (io.ReadCloser, error) { return http.NoBody, nil }
-		return true
+		return release, true
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
-	return true
+	return release, true
+}
+
+func readWebhookBody(w http.ResponseWriter, r *http.Request, limit int64, budget *byteBudget) ([]byte, func(), bool) {
+	if r.Body == nil || r.Body == http.NoBody {
+		return nil, func() {}, true
+	}
+	size := r.ContentLength
+	if size < 0 {
+		size = limit
+	}
+	release, ok := budget.reserve(size)
+	if !ok {
+		metricRejectedWebhookBuffer.Add(1)
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "webhook verification is busy", http.StatusServiceUnavailable)
+		return nil, nil, false
+	}
+	buf := make([]byte, size)
+	n, err := io.ReadFull(r.Body, buf)
+	if err != nil && (r.ContentLength >= 0 || (!errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF))) {
+		release()
+		writeWebhookBodyError(w, r, err)
+		return nil, nil, false
+	}
+	if n == len(buf) {
+		var probe [1]byte
+		m, err := io.ReadFull(r.Body, probe[:])
+		if m > 0 {
+			release()
+			metricRejected413.Add(1)
+			if r.ProtoMajor == 1 {
+				w.Header().Set("Connection", "close")
+			}
+			http.Error(w, "request entity too large", http.StatusRequestEntityTooLarge)
+			return nil, nil, false
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			release()
+			writeWebhookBodyError(w, r, err)
+			return nil, nil, false
+		}
+	}
+	return buf[:n], release, true
+}
+
+func rejectWebhookSignature(w http.ResponseWriter, err error) {
+	metricRejectedWebhook.Add(1)
+	http.Error(w, "webhook signature rejected: "+err.Error(), http.StatusUnauthorized)
 }
 
 func writeWebhookBodyError(w http.ResponseWriter, r *http.Request, err error) {
