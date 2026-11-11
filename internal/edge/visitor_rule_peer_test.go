@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -97,7 +98,14 @@ func TestVisitorRuleForHostFallsBackToStorage(t *testing.T) {
 				a.store.Close()
 			}
 			lookups := metricDelta(metricPeerApexRuleLookups)
+			logs := &lockedBuffer{}
+			prevLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+			defer slog.SetDefault(prevLogger)
 			rule, found := a.srv.visitorRuleForHost(context.Background(), host)
+			if logged := strings.Contains(logs.String(), "lookup host access"); logged != tc.closeDB {
+				t.Fatalf("storage error logged = %v, want %v; logs: %s", logged, tc.closeDB, logs.String())
+			}
 			if found != tc.wantFound || (rule != nil) != tc.wantRule {
 				t.Fatalf("visitorRuleForHost = %+v, %v; want rule=%v found=%v", rule, found, tc.wantRule, tc.wantFound)
 			}

@@ -1885,6 +1885,53 @@ func TestSpliceGraceEndsHalfOpenConnection(t *testing.T) {
 	})
 }
 
+func TestSpliceGraceCapHoldsAgainstClientTraffic(t *testing.T) {
+	clientFar, clientNear := realConnPair(t)
+	upstreamNear, upstreamFar := realConnPair(t)
+	done := make(chan struct{})
+	go func() {
+		splice(clientNear, upstreamNear, 400*time.Millisecond, 300*time.Millisecond)
+		close(done)
+	}()
+	stop := make(chan struct{})
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				if _, err := clientFar.Write([]byte{1}); err != nil {
+					return
+				}
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		clientFar.Close()
+		clientNear.Close()
+		upstreamNear.Close()
+		upstreamFar.Close()
+		<-writerDone
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			t.Error("splice did not return after every connection was closed")
+		}
+	}()
+
+	upstreamFar.(*net.TCPConn).CloseWrite()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("splice with a 300ms grace was still running after one second of client traffic")
+	}
+}
+
 func TestValidatePeerListen(t *testing.T) {
 	cases := []struct {
 		name   string
