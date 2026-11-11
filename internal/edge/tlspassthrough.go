@@ -305,6 +305,17 @@ func (s *Server) serveTLSPassthrough(b *Binding, host string, client *replayConn
 	defer stream.Close()
 	metricTLSPassthroughConns.Add(1)
 
+	finished := make(chan struct{})
+	defer close(finished)
+	go func() {
+		select {
+		case <-as.Done():
+			client.Close()
+			stream.Close()
+		case <-finished:
+		}
+	}()
+
 	idle := newIdleDeadline(s.limitsOrDefault().TCPIdleTimeout, client, stream)
 	var wg sync.WaitGroup
 	wg.Add(2)

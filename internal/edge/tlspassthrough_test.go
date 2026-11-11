@@ -709,3 +709,37 @@ func TestHandlePublicMisdirectsTLSPassthroughHost(t *testing.T) {
 		})
 	}
 }
+
+func TestTLSPassthroughReleasesSlotsWhenSessionCloses(t *testing.T) {
+	agentCert, agentPool := passthroughTestCert(t, "secure.example.com")
+	h := newSNIHarness(t, agentCert, nil)
+	h.bindTLS(t, "secure.example.com", nil)
+
+	tc, err := dialTLSClient(t, h.addr, nil, &tls.Config{ServerName: "secure.example.com", RootCAs: agentPool})
+	if err != nil {
+		t.Fatalf("client handshake through passthrough: %v", err)
+	}
+	if _, err := tc.Write([]byte("ping")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(tc, buf); err != nil || string(buf) != "ping" {
+		t.Fatalf("echo = %q, %v", buf, err)
+	}
+	if got := h.srv.perIP.inUse("127.0.0.1"); got != 1 {
+		t.Fatalf("per-IP slots in use = %d, want 1", got)
+	}
+	if got := len(h.ln.sem.slots); got != 1 {
+		t.Fatalf("global slots in use = %d, want 1", got)
+	}
+
+	h.fx.as.Sess.Close("test: session ends")
+
+	deadline := time.Now().Add(2 * time.Second)
+	for h.srv.perIP.inUse("127.0.0.1") != 0 || len(h.ln.sem.slots) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("slots not released after session close: per-IP %d, global %d", h.srv.perIP.inUse("127.0.0.1"), len(h.ln.sem.slots))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
