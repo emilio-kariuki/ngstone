@@ -253,10 +253,37 @@ NGSTONE_DATABASE_URL=postgres://ngstone:<password>@db.internal/ngstone?sslmode=r
 NGSTONE_EDGE_ID=edge-b
 ```
 
-The shared database coordinates names and leases, but public request routing
-is still local to the edge that receives the request. Use a load balancer or
-DNS strategy that targets the edge holding the connector; inter-edge request
-forwarding is a later layer.
+To let any edge serve any tunnel, enable inter-edge forwarding. Add the edge's
+private address and a peer port to the same root-only environment file on every
+edge:
+
+```
+NGSTONE_PEER_ADDR=10.0.0.11:4043
+```
+
+Then open that port to the other edges only, for example:
+
+```
+sudo ufw allow from 10.0.0.0/24 to any port 4043 proto tcp
+```
+
+Forwarding requires PostgreSQL (not SQLite, not `-insecure`), a concrete
+private address, a certificate for the same domain on every edge (share the
+certificate storage to stay under the ACME duplicate-certificate limit), and
+identical `NGSTONE_VISITOR_OIDC_*` values, including the cookie secret, on
+every edge. Raw TCP tunnels, share links and custom domains are not
+forwarded. With Docker, use host networking.
+
+The peer port must be reachable only from other edges: it accepts at most 64
+concurrent handshakes with a 5 second deadline and has no per-source limit.
+Each edge needs a distinct `NGSTONE_EDGE_ID`; two edges with the same id
+overwrite each other's registration. A forwarded connection holds one of the
+client address's in-flight slots on the ingress edge for its lifetime and
+closes after the TCP idle timeout (30 minutes by default) of silence in both
+directions, so long-lived WebSocket and SSE connections need traffic or
+keep-alives within that window. During a database outage, connections for
+tunnel hostnames not bound on the receiving edge are closed, where a single
+edge would answer 404.
 
 Keep the PostgreSQL URL in the root-only environment file or a secret manager;
 do not put it in `ExecStart`, because a password in a process argument is

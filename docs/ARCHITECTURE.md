@@ -338,10 +338,67 @@ The file-backed credential store and `NGSTONE_TOKEN_SHA256` remain compatibility
 paths for existing single-edge deployments. They do not provide durable tunnel
 ownership or active/active coordination and should not be used for a cluster.
 
-Durable ownership is not inter-edge data forwarding. A public request still
-has to arrive at the edge whose local registry contains the connector. A
-shared database therefore needs a compatible load-balancer or DNS strategy
-until an inter-edge forwarding layer is introduced.
+#### Inter-edge forwarding
+
+When `NGSTONE_PEER_ADDR` is set (PostgreSQL only, never `-insecure`), each edge
+registers its peer address and SPKI pin in `edge_peers` and listens for peers
+on that address. A public connection reaching an edge without the connector is
+forwarded in one hop:
+
+1. The SNI router peeks the ClientHello and finds no local route.
+2. The edge looks up the live owners of the hostname in storage (every edge
+   holding a live lease, ordered by edge id, at most 8), through short-lived
+   owner, miss and peer-down caches, and picks the first that is not marked
+   down. Lookups are coalesced per hostname, and a global cap bounds the
+   concurrent database queries, not the waiters.
+3. It dials the owner over TLS 1.3 with mutual authentication, ALPN
+   `ngstone-peer-1`, no session resumption, and the peer's certificate pinned
+   to the SPKI hash stored in `edge_peers`.
+4. It writes a PROXY v1 line carrying the real client address, then the
+   buffered ClientHello.
+5. The owner reads the PROXY line, classifies the connection as forwarded, and
+   answers with one status byte: accept or not-owner. On accept both sides
+   splice bytes. A forwarded connection is never forwarded again.
+
+Two 421 rules apply when forwarding is enabled: a route miss on a forwarded
+connection, and a route miss on a TLS connection whose SNI differs from the
+Host header, both return 421. The 421 makes the client retry on a new
+connection, whose SNI then routes it to the right edge; a request whose Host is
+bound on the edge it reached is served under that host's own access rules.
+
+Failure behaviour: a not-owner answer or a failed handshake means the cached
+owners are stale, so the ingress drops the cache entry, resolves again and
+retries once against the first candidate that is not marked down and is not the
+identical registration (same edge, address and pin) that just failed, so a stale
+pin or a moved tunnel is retried once against the refreshed registration. A TCP dial failure marks the edge down for a short time without
+a new lookup and moves to the next candidate. If owners exist but none is
+reachable the connection is closed; only a hostname with no live owner in
+storage gets the normal 404. A storage error closes the connection and is
+never cached as a miss, so with forwarding enabled a database outage closes
+connections for tunnel hostnames not bound on the receiving edge, where a
+single edge would answer 404. The router checks the per-IP rate limit once for
+every connection before the owner lookup or any dial.
+
+Operating limits: the peer port accepts at most 64 concurrent handshakes with
+a 5 second deadline and has no per-source limit, so it must be reachable only
+from other edges. A forwarded connection holds one of the client address's
+in-flight slots on the ingress edge for its lifetime and closes after the TCP
+idle timeout (30 minutes by default) of silence in both directions. An ingress
+edge carries at most 1024 concurrent forwarded connections. Edge clocks must
+agree to within about two thirds of the lease TTL (30 s with the default TTL);
+beyond that, peer registrations look expired and forwarding fails closed. After
+the owner closes a forwarded connection the ingress closes its side within five
+seconds. Each edge
+needs a distinct `NGSTONE_EDGE_ID`; two edges with the same id overwrite each
+other's registration. Pins carry the registration expiry, so a pin whose row
+expired or was deleted stops being accepted once its cached expiry passes,
+even while storage is unreachable.
+
+Trust model: peers are trusted only through pins in the shared database, so
+write access to that database grants peer status. The owner accepts a
+forwarded client address only on a connection that completed the pinned mutual
+handshake. Raw TCP, share links, custom domains, and connections with no SNI
+or a ClientHello over 16 KiB are not forwarded.
 
 ### Public-side protocol handling
 
@@ -584,7 +641,7 @@ func (s *Store) Subscribe(ctx context.Context) <-chan *Exchange
 5. **Header spoofing** — inbound `Forwarded`/`X-Forwarded-*` are stripped by `Rewrite` and replaced by `SetXForwarded` at the edge; `X-Real-IP` is stripped explicitly (it is not in the stdlib delete set). The local app can trust them **only if the agent-side proxy preserves them** — see §6, where the same stdlib behavior silently deletes them if you use `Rewrite` on the agent.
 6. **Malicious web page attacking the inspector (CSRF / DNS rebinding)** — not applicable as shipped. The original design's `127.0.0.1:4040` API would have needed the `X-Ngstone` header + Origin/Host checks described in earlier drafts of this document, but the inspector shipped as a terminal UI instead (§6): there is no listening port, no HTTP API, and therefore nothing for a browser tab to reach or rebind to.
 7. **Resource exhaustion** — every buffer has a stated cap, *including the yamux receive windows* (§5 table) that an earlier draft omitted while claiming completeness; no code path buffers an entire body. The unauthenticated surface on :4443 is separately capped (concurrent handshakes, unauthenticated sessions) so a stranger cannot hoard control-plane resources for the cost of a TCP connect.
-8. **Visitor login (OIDC wall)** — a tunnel bound with `oidc` is enforced on the edge, never in the agent, so a visitor without a session cannot open a stream to the laptop. The edge reuses `internal/oidc` (discovery, PKCE, RS256 ID-token checks, AES-GCM cookie codec) with its own client from `NGSTONE_VISITOR_OIDC_*`. The visitor codec key is the cookie secret with a fixed domain-separation prefix, so a visitor token can never be decoded as an ops-dashboard session even if the operator reuses one secret. Every sealed value carries a purpose (`return`, `state`, `ticket`, `session`) that is checked on open, so one cannot stand in for another. The callback lives on one apex host because providers need a fixed redirect URI. The return host and path travel only inside sealed, ten-minute state, which blocks open redirects. The callback hands the browser to the tunnel host with a one-minute ticket that is consumed once per edge process. The resulting session cookie is host-only and records its host, so a cookie issued for one tunnel is rejected by every other tunnel. Allow lists require `email_verified` and are re-checked on every request, so changing a tunnel's list on rebind takes effect immediately. The ticket is bound to the browser that started the login by a `HttpOnly` binding cookie that is checked on `/.ngstone/auth/finish` and cleared only after a ticket is accepted, so a ticket pasted into another browser is refused. On the secure scheme the session, state and binding cookies carry the `__Host-` prefix, so a sibling tunnel cannot plant them; under `-insecure` (development only) these protections do not apply. Before proxying, the edge removes every visitor cookie from `Cookie`, every inbound `X-Ngstone-*` header on all tunnels, and every spelling of the headers it asserts upstream (`Forwarded`, `X-Real-IP`, `X-Forwarded-*`, `X-Ngstone-*`, matched after folding case and any non-alphanumeric byte to `-`, so `X_Ngstone_User_Email` and `X.Ngstone.User.Email` cannot shadow the real ones in CGI-style stacks). The login rule is stored in the durable lease record, so it survives an edge restart. It then sets `X-Ngstone-User-Email`, `-Subject`, and `-Name` from the session, so the local app may trust those headers only when it is reachable solely through the tunnel. Order of checks: CIDR → per-IP rate limit → basic auth → visitor login → traffic policy, so policies can match on verified identity. Residual risks: all tunnels share one registrable domain, so `SameSite=Lax` does not separate sibling tunnels and apps still need their own CSRF/`Origin` checks; one IdP client is shared by all tunnel owners, so an owner can learn the email, subject and name of anyone who follows a link to their walled tunnel; the ticket replay cache is per edge process (a ticket captured from a URL could be replayed once on another edge within its one-minute lifetime); sessions are stateless and cannot be revoked before their 8-hour expiry except by rotating the cookie secret; `/.ngstone/auth/finish` and `/.ngstone/auth/logout` are reserved on login-protected tunnels.
+8. **Visitor login (OIDC wall)** — a tunnel bound with `oidc` is enforced on the edge, never in the agent, so a visitor without a session cannot open a stream to the laptop. The edge reuses `internal/oidc` (discovery, PKCE, RS256 ID-token checks, AES-GCM cookie codec) with its own client from `NGSTONE_VISITOR_OIDC_*`. The visitor codec key is the cookie secret with a fixed domain-separation prefix, so a visitor token can never be decoded as an ops-dashboard session even if the operator reuses one secret. Every sealed value carries a purpose (`return`, `state`, `ticket`, `session`) that is checked on open, so one cannot stand in for another. The callback lives on one apex host because providers need a fixed redirect URI. The return host and path travel only inside sealed, ten-minute state, which blocks open redirects. The callback hands the browser to the tunnel host with a one-minute ticket that is consumed once per edge process. The resulting session cookie is host-only and records its host, so a cookie issued for one tunnel is rejected by every other tunnel. Allow lists require `email_verified` and are re-checked on every request, so changing a tunnel's list on rebind takes effect immediately. The ticket is bound to the browser that started the login by a `HttpOnly` binding cookie that is checked on `/.ngstone/auth/finish` and cleared only after a ticket is accepted, so a ticket pasted into another browser is refused. On the secure scheme the session, state and binding cookies carry the `__Host-` prefix, so a sibling tunnel cannot plant them; under `-insecure` (development only) these protections do not apply. Before proxying, the edge removes every visitor cookie from `Cookie`, every inbound `X-Ngstone-*` header on all tunnels, and every spelling of the headers it asserts upstream (`Forwarded`, `X-Real-IP`, `X-Forwarded-*`, `X-Ngstone-*`, matched after folding case and any non-alphanumeric byte to `-`, so `X_Ngstone_User_Email` and `X.Ngstone.User.Email` cannot shadow the real ones in CGI-style stacks). The login rule is stored in the durable lease record, so it survives an edge restart. It then sets `X-Ngstone-User-Email`, `-Subject`, and `-Name` from the session, so the local app may trust those headers only when it is reachable solely through the tunnel. Order of checks: CIDR → per-IP rate limit → basic auth → visitor login → traffic policy, so policies can match on verified identity. Residual risks: all tunnels share one registrable domain, so `SameSite=Lax` does not separate sibling tunnels and apps still need their own CSRF/`Origin` checks; one IdP client is shared by all tunnel owners, so an owner can learn the email, subject and name of anyone who follows a link to their walled tunnel; the ticket replay cache is per edge process, so with inter-edge forwarding a ticket captured from a URL could be replayed once more within the ticket's one-minute lifetime, but only if tunnel ownership moves between edges or the tunnel has connectors on two edges (each edge keeps its own replay cache), and the browser-binding cookie is still required; sessions are stateless and cannot be revoked before their 8-hour expiry except by rotating the cookie secret; `/.ngstone/auth/finish` and `/.ngstone/auth/logout` are reserved on login-protected tunnels.
 
 Out of scope, accepted for a single-user v1:
 

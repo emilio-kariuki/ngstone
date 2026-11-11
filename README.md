@@ -138,10 +138,53 @@ policies, and custom-domain registrations. Connector leases are renewed by
 heartbeats, so several edge processes can share one database and only the
 process holding a live lease serves a tunnel.
 
-This coordinates ownership; it does not yet proxy public requests between
-edge processes. Put a load balancer or DNS strategy in front that sends a
-tunnel's traffic to the edge holding its live connector, or keep the public
-listener on one edge until inter-edge forwarding is added.
+#### Inter-edge forwarding
+
+With PostgreSQL and `NGSTONE_PEER_ADDR=<private-ip>:<port>` set on every edge,
+an edge that receives a public connection for a tunnel owned by another edge
+forwards it to the owner over a pinned mutual-TLS connection, so any edge can
+sit behind your load balancer or DNS round robin. HTTP, WebSocket, SSE, and TLS
+passthrough tunnels are forwarded; the forwarding is a single hop.
+
+Requirements:
+
+- PostgreSQL storage; `-peer-addr` / `NGSTONE_PEER_ADDR` is rejected with
+  SQLite and with `-insecure`. The address must be an IP address literal and a
+  port, not `0.0.0.0` or port 0; hostnames are rejected.
+- Every edge must reach every other edge's peer address. Bind it to a private
+  interface and firewall the port to the other edges only: the peer port
+  accepts at most 64 concurrent handshakes with a 5 second deadline and has no
+  per-source limit.
+- Each edge needs a distinct `NGSTONE_EDGE_ID`; two edges with the same id
+  overwrite each other's registration.
+- Each edge needs its own certificate for the same domain and wildcard.
+  Issuing a certificate per edge can hit the ACME duplicate-certificate rate
+  limit, so share certificate storage or use one certificate on every edge.
+- Visitor-login settings (`NGSTONE_VISITOR_OIDC_*`), including
+  `NGSTONE_VISITOR_OIDC_COOKIE_SECRET`, must be identical on every edge.
+
+Trust model: edges authenticate each other by the SPKI pins each edge
+publishes in the shared database, so anyone who can write that database can
+add a peer. The owner trusts the forwarded client address only from a pinned
+peer.
+
+Not forwarded: raw TCP tunnels, share links, custom domains, connections with
+no SNI or a ClientHello over 16 KiB, and anything under `-insecure`. A
+request for one of these must reach the owning edge directly.
+
+A forwarded connection holds one of the client address's in-flight slots on
+the ingress edge for its lifetime, and closes after the TCP idle timeout (30
+minutes by default) of silence in both directions. An ingress edge carries at
+most 1024 concurrent forwarded connections. Edge clocks must agree to within
+about two thirds of the lease TTL (30 s with the default TTL); beyond that,
+peer registrations look expired and forwarding fails closed. After the owner
+closes a forwarded connection the ingress closes its side within five seconds. Long-lived WebSocket and
+SSE connections need traffic or keep-alives within that window. With
+forwarding enabled, a database outage closes connections for tunnel hostnames
+not bound on the receiving edge, where a single edge would answer 404.
+
+Edges in Docker bridge networking cannot advertise a reachable peer address;
+use host networking.
 
 For multiple edge servers, point every process at PostgreSQL and give each
 process a stable edge ID:

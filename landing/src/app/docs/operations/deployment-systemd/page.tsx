@@ -100,7 +100,7 @@ WantedBy=multi-user.target`}
         Linux, so a token hash or API token passed as a command-line flag
         is readable by any local user via <code>ps auxww</code>. Put{" "}
         <code>NGSTONE_DATABASE_URL</code>, <code>NGSTONE_EDGE_ID</code>,{" "}
-        <code>NGSTONE_CREDENTIALS_FILE</code>,{" "}
+        <code>NGSTONE_PEER_ADDR</code>, <code>NGSTONE_CREDENTIALS_FILE</code>,{" "}
         <code>NGSTONE_TOKEN_SHA256</code>,{" "}
         <code>NGSTONE_ADMIN_TOKEN_SHA256</code>, and your DNS provider&apos;s
         credentials (for Cloudflare, <code>NGSTONE_CF_API_TOKEN</code>) in
@@ -112,7 +112,11 @@ WantedBy=multi-user.target`}
       <p>
         Configure <code>NGSTONE_DATABASE_URL</code> to SQLite for a single edge
         or to the same PostgreSQL URL on every edge in an active/active group,
-        with a distinct <code>NGSTONE_EDGE_ID</code> per edge. Issue credentials
+        with a distinct <code>NGSTONE_EDGE_ID</code> per edge. For any edge to
+        serve any tunnel, each edge also sets <code>NGSTONE_PEER_ADDR</code>{" "}
+        to a private <code>ip:port</code> that only the other edges can reach;
+        without it, a request is served only by the edge holding the
+        tunnel&apos;s connector. Issue credentials
         with <code>ngstone admin credentials issue</code> through the loopback
         API. Each credential is limited to one subdomain (HTTP or TLS) or TCP port and has a
         bounded TTL; <code>credentials revoke</code> invalidates it

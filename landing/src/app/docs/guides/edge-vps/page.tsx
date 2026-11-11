@@ -427,6 +427,8 @@ $ docker compose logs -f ngstoned`}
         <code>NGSTONE_DATABASE_URL=sqlite:///var/lib/ngstoned/control.db</code>
         in the unit&apos;s environment. For active/active edges, use the same
         PostgreSQL URL on every edge and a different <code>NGSTONE_EDGE_ID</code>.
+        Forwarding a connection between edges also needs{" "}
+        <code>NGSTONE_PEER_ADDR</code>.
       </p>
       <p>
         The edge reads its storage settings, token hash, ACME email, and DNS
@@ -439,6 +441,7 @@ $ docker compose logs -f ngstoned`}
         language="ini"
         code={`NGSTONE_DATABASE_URL=sqlite:///var/lib/ngstoned/control.db
 NGSTONE_EDGE_ID=edge-a
+NGSTONE_PEER_ADDR=10.0.0.11:7443
 NGSTONE_CERT_EMAIL=you@example.com
 NGSTONE_CF_API_TOKEN=cf_fake_token_value_goes_here`}
       />
@@ -449,6 +452,18 @@ NGSTONE_CF_API_TOKEN=cf_fake_token_value_goes_here`}
         </Property>
         <Property name="NGSTONE_EDGE_ID" type="env" required>
           Stable identity for this edge in connector leases and audit events.
+        </Property>
+        <Property name="NGSTONE_PEER_ADDR" type="env">
+          Private <code>&lt;ip&gt;:&lt;port&gt;</code> of this edge, set on
+          every edge that shares the PostgreSQL database. It must be an IP
+          address literal and a port; hostnames and unspecified addresses are
+          rejected. Requires PostgreSQL and is refused with{" "}
+          <code>-insecure</code>. Equivalent flag <code>-peer-addr</code>. With
+          it set, any edge forwards a tunnel&apos;s HTTPS or TLS-passthrough
+          connection once to the edge holding its live connector, and that
+          edge enforces every access rule using the real client address. Keep
+          the port reachable only from the other edges. Empty disables
+          forwarding.
         </Property>
         <Property name="NGSTONE_CREDENTIALS_FILE" type="env">
           Compatibility path to the versioned scoped credential file.
