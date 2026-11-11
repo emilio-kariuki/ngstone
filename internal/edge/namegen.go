@@ -57,6 +57,7 @@ type hostnameOptions struct {
 	Takeover             bool
 	Domain               string
 	Generate             func() string
+	Reserved             func(hostname string) bool
 	Access               *accessControl
 	TrafficPolicy        *policy.Policy
 	HTTP2                bool
@@ -69,6 +70,9 @@ func assignRandomHostname(r *Registry, opts hostnameOptions) (hostname string, e
 	for attempt := 0; attempt < maxRandomAttempts; attempt++ {
 		candidate := opts.Generate()
 		hostname = candidate + "." + opts.Domain
+		if opts.Reserved != nil && opts.Reserved(hostname) {
+			continue
+		}
 		_, evicted, err = r.BindWithOptions(BindOptions{
 			Host:                 hostname,
 			Session:              opts.Session,

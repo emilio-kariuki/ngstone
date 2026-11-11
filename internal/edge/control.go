@@ -838,6 +838,9 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 					continue
 				}
 				hostname := candidate + "." + s.cfg.Domain
+				if s.visitor.servesHost(hostname) {
+					continue
+				}
 				lease, leaseErr := s.acquireDurableLease(as, bind, hostname, 0, trafficPolicy)
 				if leaseErr != nil {
 					if errors.Is(leaseErr, storage.ErrTunnelConflict) {
@@ -882,6 +885,7 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 			Session:        as,
 			Domain:         s.cfg.Domain,
 			Generate:       s.randomName,
+			Reserved:       s.visitor.servesHost,
 			Access:         ac,
 			TrafficPolicy:  trafficPolicy,
 			HTTP2:          bind.HTTP2,
@@ -906,6 +910,10 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 	}
 
 	hostname := subdomain + "." + s.cfg.Domain
+	if s.visitor.servesHost(hostname) {
+		ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInvalidSubdomain, Message: "subdomain is reserved"})
+		return
+	}
 	var lease storage.Lease
 	if s.storage != nil {
 		var leaseErr error

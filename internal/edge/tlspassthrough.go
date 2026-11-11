@@ -367,6 +367,10 @@ func (s *Server) handleBindTLS(as *AgentSession, ctrl *proto.Conn, id uint64, bi
 			return
 		}
 		hostname := subdomain + "." + s.cfg.Domain
+		if s.visitor.servesHost(hostname) {
+			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeInvalidSubdomain, Message: "subdomain is reserved"})
+			return
+		}
 		evicted, bindErr := s.bindTLSHost(as, bind, hostname, ac)
 		if bindErr != nil {
 			ctrl.Write(proto.TypeBindErr, id, *bindErr)
@@ -382,6 +386,9 @@ func (s *Server) handleBindTLS(as *AgentSession, ctrl *proto.Conn, id uint64, bi
 			continue
 		}
 		hostname := candidate + "." + s.cfg.Domain
+		if s.visitor.servesHost(hostname) {
+			continue
+		}
 		evicted, bindErr := s.bindTLSHost(as, bind, hostname, ac)
 		if bindErr == nil {
 			s.finishBindTLS(as, ctrl, id, hostname, evicted)

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"ngstone/internal/oidc"
 	"ngstone/internal/policy"
 	"ngstone/internal/proto"
 	"ngstone/internal/webhook"
@@ -119,5 +120,96 @@ func TestRandomHostnameBindKeepsBasicAuth(t *testing.T) {
 	s.handlePublic(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("authenticated request status = %d body=%q", rec.Code, rec.Body.String())
+	}
+}
+
+func newLoginHostTestServer(t *testing.T) *Server {
+	t.Helper()
+	idp := newFakeVisitorIdP(t)
+	s := newTestServer("tok")
+	v, err := newVisitorLogin(Config{
+		Domain:       "example.com",
+		PublicScheme: "https",
+		VisitorOIDC: &oidc.Config{
+			Issuer:        idp.server.URL,
+			ClientID:      "visitor-client",
+			ClientSecret:  "visitor-secret",
+			CookieSecret:  []byte(strings.Repeat("v", 32)),
+			RedirectURL:   "https://login.example.com/.ngstone/auth/callback",
+			AllowInsecure: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("newVisitorLogin: %v", err)
+	}
+	s.visitor = v
+	return s
+}
+
+func TestHandleBindReservesVisitorLoginHostname(t *testing.T) {
+	for _, kind := range []string{proto.KindTLS, proto.KindHTTP} {
+		t.Run(kind, func(t *testing.T) {
+			client, server, cleanup := newRawSessionPair(t)
+			defer cleanup()
+			s := newLoginHostTestServer(t)
+			as := &AgentSession{ID: "login-sess", InstanceID: "login-inst", Sess: server, IDGen: proto.NewEdgeIDGen(), NegotiatedVersion: proto.ProtoVersion}
+
+			reply := bindOverWire(t, s, as, client, server, proto.Bind{Kind: kind, Subdomain: "login"})
+			e, _ := proto.Decode[proto.BindErr](reply)
+			if reply.Type != proto.TypeBindErr || e.Code != proto.CodeInvalidSubdomain || !strings.Contains(e.Message, "reserved") {
+				t.Fatalf("reply = %s %s", reply.Type, reply.Data)
+			}
+			if _, ok := s.registry.RouteTLS("login.example.com"); ok {
+				t.Fatal("reserved tls bind left a binding behind")
+			}
+			if _, ok := s.registry.Route("login.example.com"); ok {
+				t.Fatal("reserved http bind left a binding behind")
+			}
+
+			reply = bindOverWire(t, s, as, client, server, proto.Bind{Kind: kind, Subdomain: "other"})
+			if reply.Type != proto.TypeBindOK {
+				t.Fatalf("other subdomain reply = %s %s", reply.Type, reply.Data)
+			}
+		})
+	}
+}
+
+func TestHandleBindRandomNameSkipsVisitorLoginHostname(t *testing.T) {
+	for _, kind := range []string{proto.KindTLS, proto.KindHTTP} {
+		t.Run(kind, func(t *testing.T) {
+			client, server, cleanup := newRawSessionPair(t)
+			defer cleanup()
+			s := newLoginHostTestServer(t)
+			names := []string{"login", "open"}
+			i := 0
+			s.randomName = func() string {
+				n := names[i]
+				if i < len(names)-1 {
+					i++
+				}
+				return n
+			}
+			as := &AgentSession{ID: "login-sess", InstanceID: "login-inst", Sess: server, IDGen: proto.NewEdgeIDGen(), NegotiatedVersion: proto.ProtoVersion}
+			reply := bindOverWire(t, s, as, client, server, proto.Bind{Kind: kind})
+			ok, _ := proto.Decode[proto.BindOK](reply)
+			if reply.Type != proto.TypeBindOK || ok.Hostname != "open.example.com" {
+				t.Fatalf("reply = %s %s", reply.Type, reply.Data)
+			}
+		})
+	}
+}
+
+func TestHandleBindAllowsLoginSubdomainWithoutVisitorLogin(t *testing.T) {
+	for _, kind := range []string{proto.KindTLS, proto.KindHTTP} {
+		t.Run(kind, func(t *testing.T) {
+			client, server, cleanup := newRawSessionPair(t)
+			defer cleanup()
+			s := newTestServer("tok")
+			as := &AgentSession{ID: "login-sess", InstanceID: "login-inst", Sess: server, IDGen: proto.NewEdgeIDGen(), NegotiatedVersion: proto.ProtoVersion}
+			reply := bindOverWire(t, s, as, client, server, proto.Bind{Kind: kind, Subdomain: "login"})
+			if reply.Type != proto.TypeBindOK {
+				t.Fatalf("reply = %s %s", reply.Type, reply.Data)
+			}
+		})
 	}
 }
