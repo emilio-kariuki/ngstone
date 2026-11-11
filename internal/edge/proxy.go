@@ -27,6 +27,7 @@ const (
 	ctxKeyReqID
 	ctxKeyReqSlot
 	ctxKeyIdleBody
+	ctxKeyPolicyDecision
 )
 
 // statusRecorder records the response status and size. When idle is set,
@@ -156,20 +157,39 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if header, ok := trafficPolicy.Preflight(r); ok {
+		for name, values := range header {
+			rec.Header()[name] = values
+		}
+		rec.WriteHeader(http.StatusNoContent)
+		return
+	}
+
 	if !ac.checkBasicAuth(r) {
 		metricRejectedUnauthorized.Add(1)
 		rec.Header().Set("WWW-Authenticate", `Basic realm="`+ac.authRealm()+`", charset="UTF-8"`)
 		http.Error(rec, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if trafficPolicy != nil && !trafficPolicy.Decide(r).Allowed {
-		metricRejectedTrafficPolicy.Add(1)
-		http.Error(rec, "forbidden", http.StatusForbidden)
-		return
+	var decision policy.Decision
+	if trafficPolicy != nil {
+		decision = trafficPolicy.Decide(r)
+		if decision.RedirectURL != "" {
+			decision.ApplyCORS(rec.Header())
+			rec.Header().Set("Location", decision.RedirectURL)
+			rec.WriteHeader(decision.RedirectStatus)
+			return
+		}
+		if !decision.Allowed {
+			metricRejectedTrafficPolicy.Add(1)
+			http.Error(rec, "forbidden", http.StatusForbidden)
+			return
+		}
 	}
 	if ac.hasBasicAuth() {
 		r.Header.Del("Authorization")
 	}
+	decision.ApplyRequestHeaders(r.Header)
 
 	releaseIP, ok := s.perIP.acquire(ip)
 	if !ok {
@@ -225,6 +245,9 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	ctx = context.WithValue(ctx, ctxKeyClientAddr, r.RemoteAddr)
 	ctx = context.WithValue(ctx, ctxKeyReqID, reqID)
 	ctx = context.WithValue(ctx, ctxKeyReqSlot, slot)
+	if decision.TransformsResponse() {
+		ctx = context.WithValue(ctx, ctxKeyPolicyDecision, &decision)
+	}
 
 	proxy.ServeHTTP(rec, r.WithContext(ctx))
 }
@@ -312,6 +335,9 @@ var errUpgradeCapExceeded = errors.New("edge: upgrade capacity exceeded")
 func modifyResponse(resp *http.Response) error {
 	if body, ok := resp.Request.Context().Value(ctxKeyIdleBody).(*idleBody); ok && body.stalled.Load() {
 		return errClientIdle
+	}
+	if decision, ok := resp.Request.Context().Value(ctxKeyPolicyDecision).(*policy.Decision); ok && decision != nil {
+		decision.ApplyResponseHeaders(resp.Header)
 	}
 	slot, ok := resp.Request.Context().Value(ctxKeyReqSlot).(*reqSlot)
 	if !ok || slot == nil {

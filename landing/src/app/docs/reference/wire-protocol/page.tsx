@@ -153,9 +153,11 @@ type AuthErr struct {
           <code>kind: &quot;tcp&quot;</code>.
         </Property>
         <Property name="policy" type="object">
-          v2 only and HTTP-only. Ordered method/path/header allow-or-deny
-          rules sent from <code>--policy-file</code>. The edge evaluates the
-          policy before opening a request stream.
+          v2 only and HTTP-only. Ordered method/path/header rules (allow,
+          deny, redirect, header transform) and an optional CORS block sent
+          from <code>--policy-file</code>. The edge evaluates the policy
+          before opening a request stream. An older edge that does not
+          understand these fields rejects the bind instead of ignoring them.
         </Property>
         <Property name="policy_digest" type="string">
           SHA-256 digest of the normalized policy. The agent includes it in

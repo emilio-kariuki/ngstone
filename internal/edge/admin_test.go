@@ -14,6 +14,7 @@ import (
 	"ngstone/internal/adminapi"
 	"ngstone/internal/credentials"
 	"ngstone/internal/oidc"
+	"ngstone/internal/policy"
 	"ngstone/internal/proto"
 	"ngstone/internal/storage"
 )
@@ -269,4 +270,67 @@ func adminRequest(t *testing.T, s *Server, method, path string, body []byte, rem
 	recorder := httptest.NewRecorder()
 	s.opsMux().ServeHTTP(recorder, req)
 	return recorder
+}
+
+func TestAdminAPITrafficPolicyActionsRoundTrip(t *testing.T) {
+	store, err := storage.Open(storage.Config{DSN: filepath.Join(t.TempDir(), "control.db"), EdgeID: "edge-test"})
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	defer store.Close()
+	s := newTestServer("")
+	s.cfg.AdminTokenSHA256 = nil
+	s.storage = store
+	s.credentialStore = store
+
+	body := []byte(`{"name":"actions","policy":{"rules":[
+  {"action":"redirect","path_prefix":"/old","redirect_url":"/new$path","redirect_status":308},
+  {"action":"transform","request_headers":{"set":{"x-env":"prod"},"remove":["x-debug"]},"response_headers":{"add":{"x-edge":"1"}}}
+],"cors":{"allowed_origins":["https://app.example"],"allowed_methods":["GET"],"allow_credentials":true,"max_age":60}}}`)
+	created := adminRequest(t, s, http.MethodPost, "/api/v1/policies", body, "127.0.0.1:4041", "")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create code = %d; body=%s", created.Code, created.Body.String())
+	}
+	var createdEnvelope struct {
+		Data adminapi.TrafficPolicy `json:"data"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &createdEnvelope); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+
+	listed := adminRequest(t, s, http.MethodGet, "/api/v1/policies", nil, "127.0.0.1:4041", "")
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list code = %d; body=%s", listed.Code, listed.Body.String())
+	}
+	var listEnvelope struct {
+		Data []adminapi.TrafficPolicy `json:"data"`
+	}
+	if err := json.Unmarshal(listed.Body.Bytes(), &listEnvelope); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(listEnvelope.Data) != 1 {
+		t.Fatalf("listed %d policies, want 1", len(listEnvelope.Data))
+	}
+	saved := listEnvelope.Data[0]
+	parsed, err := policy.Parse(saved.Policy)
+	if err != nil {
+		t.Fatalf("stored policy does not parse: %v; policy=%s", err, saved.Policy)
+	}
+	if parsed.Digest() != saved.Digest || saved.Digest != createdEnvelope.Data.Digest {
+		t.Fatalf("digest mismatch: parsed=%s saved=%s created=%s", parsed.Digest(), saved.Digest, createdEnvelope.Data.Digest)
+	}
+	if parsed.CORS == nil || !parsed.CORS.AllowCredentials || parsed.CORS.MaxAge != 60 || len(parsed.Rules) != 2 {
+		t.Fatalf("stored policy lost fields: %s", saved.Policy)
+	}
+	if parsed.Rules[0].RedirectURL != "/new$path" || parsed.Rules[0].RedirectStatus != 308 {
+		t.Fatalf("stored redirect = %+v", parsed.Rules[0])
+	}
+	if parsed.Rules[1].RequestHeaders == nil || parsed.Rules[1].RequestHeaders.Set["X-Env"] != "prod" || parsed.Rules[1].ResponseHeaders == nil || parsed.Rules[1].ResponseHeaders.Add["X-Edge"] != "1" {
+		t.Fatalf("stored transform = %s", saved.Policy)
+	}
+
+	rejected := adminRequest(t, s, http.MethodPost, "/api/v1/policies", []byte(`{"name":"bad","policy":{"rules":[{"action":"transform","request_headers":{"set":{"X-Forwarded-For":"1.1.1.1"}}}]}}`), "127.0.0.1:4041", "")
+	if rejected.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("reserved header policy code = %d, want 422", rejected.Code)
+	}
 }

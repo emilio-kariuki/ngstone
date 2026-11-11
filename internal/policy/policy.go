@@ -22,21 +22,40 @@ const (
 	maxPolicyBytes = 48 << 10
 )
 
+const (
+	ActionAllow     = "allow"
+	ActionDeny      = "deny"
+	ActionRedirect  = "redirect"
+	ActionTransform = "transform"
+)
+
 type Policy struct {
 	DefaultAction string `json:"default_action,omitempty"`
 	Rules         []Rule `json:"rules"`
+	CORS          *CORS  `json:"cors,omitempty"`
 }
 
 type Rule struct {
-	Action      string `json:"action"`
-	Method      string `json:"method,omitempty"`
-	PathPrefix  string `json:"path_prefix,omitempty"`
-	Header      string `json:"header,omitempty"`
-	HeaderValue string `json:"header_value,omitempty"`
+	Action          string         `json:"action"`
+	Method          string         `json:"method,omitempty"`
+	PathPrefix      string         `json:"path_prefix,omitempty"`
+	Header          string         `json:"header,omitempty"`
+	HeaderValue     string         `json:"header_value,omitempty"`
+	RedirectURL     string         `json:"redirect_url,omitempty"`
+	RedirectStatus  int            `json:"redirect_status,omitempty"`
+	RequestHeaders  *HeaderActions `json:"request_headers,omitempty"`
+	ResponseHeaders *HeaderActions `json:"response_headers,omitempty"`
 }
 
 type Decision struct {
-	Allowed bool
+	Allowed        bool
+	RedirectURL    string
+	RedirectStatus int
+
+	request  []*HeaderActions
+	response []*HeaderActions
+	cors     *CORS
+	origin   string
 }
 
 func LoadFile(path string) (*Policy, error) {
@@ -90,8 +109,13 @@ func (p *Policy) Validate() error {
 	if p.DefaultAction == "" {
 		p.DefaultAction = "allow"
 	}
-	if !validAction(p.DefaultAction) {
+	if p.DefaultAction != ActionAllow && p.DefaultAction != ActionDeny {
 		return fmt.Errorf("default_action must be allow or deny")
+	}
+	if p.CORS != nil {
+		if err := p.CORS.validate(); err != nil {
+			return fmt.Errorf("cors: %w", err)
+		}
 	}
 	if len(p.Rules) > maxRules {
 		return fmt.Errorf("too many rules (max %d)", maxRules)
@@ -101,7 +125,7 @@ func (p *Policy) Validate() error {
 		rule := &p.Rules[i]
 		rule.Action = strings.ToLower(strings.TrimSpace(rule.Action))
 		if !validAction(rule.Action) {
-			return fmt.Errorf("rule %d action must be allow or deny", i+1)
+			return fmt.Errorf("rule %d action must be allow, deny, redirect or transform", i+1)
 		}
 
 		rule.Method = strings.ToUpper(strings.TrimSpace(rule.Method))
@@ -131,6 +155,12 @@ func (p *Policy) Validate() error {
 		if rule.Header == "" && rule.HeaderValue != "" {
 			return fmt.Errorf("rule %d header_value requires header", i+1)
 		}
+		if err := rule.validateRedirect(); err != nil {
+			return fmt.Errorf("rule %d %w", i+1, err)
+		}
+		if err := rule.validateTransform(p.CORS != nil); err != nil {
+			return fmt.Errorf("rule %d %w", i+1, err)
+		}
 	}
 
 	data, err := json.Marshal(p)
@@ -159,13 +189,70 @@ func (p *Policy) Decide(r *http.Request) Decision {
 	if p == nil {
 		return Decision{Allowed: true}
 	}
-	for _, rule := range p.Rules {
-		if !ruleMatches(rule, r) {
+	decision := Decision{Allowed: p.DefaultAction != ActionDeny}
+	decided := false
+	for i := range p.Rules {
+		rule := &p.Rules[i]
+		if !ruleMatches(*rule, r) {
 			continue
 		}
-		return Decision{Allowed: rule.Action == "allow"}
+		if rule.Action == ActionTransform {
+			if rule.RequestHeaders != nil {
+				decision.request = append(decision.request, rule.RequestHeaders)
+			}
+			if rule.ResponseHeaders != nil {
+				decision.response = append(decision.response, rule.ResponseHeaders)
+			}
+			continue
+		}
+		if decided {
+			continue
+		}
+		decided = true
+		switch rule.Action {
+		case ActionRedirect:
+			decision.Allowed = false
+			decision.RedirectURL = rule.redirectTarget(r)
+			decision.RedirectStatus = rule.RedirectStatus
+			if decision.RedirectStatus == 0 {
+				decision.RedirectStatus = defaultRedirectStatus
+			}
+		default:
+			decision.Allowed = rule.Action == ActionAllow
+		}
 	}
-	return Decision{Allowed: p.DefaultAction != "deny"}
+	if !decision.Allowed {
+		decision.request = nil
+		decision.response = nil
+	}
+	if p.CORS != nil && r != nil {
+		decision.cors = p.CORS
+		decision.origin = r.Header.Get("Origin")
+	}
+	return decision
+}
+
+func (d *Decision) ApplyRequestHeaders(h http.Header) {
+	for _, actions := range d.request {
+		actions.apply(h)
+	}
+}
+
+func (d *Decision) ApplyResponseHeaders(h http.Header) {
+	for _, actions := range d.response {
+		actions.apply(h)
+	}
+	d.ApplyCORS(h)
+}
+
+func (d *Decision) ApplyCORS(h http.Header) {
+	if d.cors != nil {
+		d.cors.applyResponse(h, d.origin)
+	}
+}
+
+func (d *Decision) TransformsResponse() bool {
+	return len(d.response) > 0 || d.cors != nil
 }
 
 func ruleMatches(rule Rule, r *http.Request) bool {
@@ -223,7 +310,11 @@ func normalizePath(value string) string {
 }
 
 func validAction(action string) bool {
-	return action == "allow" || action == "deny"
+	switch action {
+	case ActionAllow, ActionDeny, ActionRedirect, ActionTransform:
+		return true
+	}
+	return false
 }
 
 func validToken(value string) bool {
