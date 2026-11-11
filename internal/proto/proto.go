@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"sync/atomic"
 
 	"ngstone/internal/policy"
@@ -186,6 +187,30 @@ type Bind struct {
 	AllowCIDRs      []string       `json:"allow_cidrs,omitempty"`
 	Policy          *policy.Policy `json:"policy,omitempty"`
 	PolicyDigest    string         `json:"policy_digest,omitempty"`
+
+	Webhook *WebhookVerification `json:"webhook,omitempty"`
+}
+
+type WebhookVerification struct {
+	Provider         string `json:"provider"`
+	Secret           string `json:"secret"`
+	PathPrefix       string `json:"path_prefix,omitempty"`
+	Header           string `json:"header,omitempty"`
+	Encoding         string `json:"encoding,omitempty"`
+	Prefix           string `json:"prefix,omitempty"`
+	ToleranceSeconds int64  `json:"tolerance_seconds,omitempty"`
+}
+
+func (w WebhookVerification) String() string {
+	return "webhook(" + w.Provider + ", secret redacted)"
+}
+
+func (w WebhookVerification) GoString() string {
+	return w.String()
+}
+
+func (w WebhookVerification) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("provider", w.Provider), slog.String("path_prefix", w.PathPrefix), slog.String("secret", "[redacted]"))
 }
 
 type BindOK struct {
@@ -195,6 +220,7 @@ type BindOK struct {
 	HTTP2          bool   `json:"http2,omitempty"`
 	MultiConnector bool   `json:"multi_connector,omitempty"`
 	PolicyDigest   string `json:"policy_digest,omitempty"`
+	Webhook        string `json:"webhook,omitempty"`
 }
 
 type BindErr struct {

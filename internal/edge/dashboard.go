@@ -45,6 +45,7 @@ type dashboardTunnel struct {
 	MultiConnector   bool                    `json:"multi_connector"`
 	AccessRestricted bool                    `json:"access_restricted"`
 	PolicyEnabled    bool                    `json:"policy_enabled"`
+	WebhookProvider  string                  `json:"webhook_provider,omitempty"`
 	Connectors       []registryConnectorInfo `json:"connectors"`
 	RequestCount     int64                   `json:"request_count"`
 	LatencyP95MS     float64                 `json:"latency_p95_ms"`
@@ -157,6 +158,7 @@ func (s *Server) dashboardTunnels() []dashboardTunnel {
 				MultiConnector:   binding.MultiConnector,
 				AccessRestricted: binding.AccessRestricted,
 				PolicyEnabled:    binding.PolicyEnabled,
+				WebhookProvider:  binding.WebhookProvider,
 				Connectors:       binding.Connectors,
 			})
 		}
@@ -353,6 +355,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writePrometheusCounter(w, "ngstoned_rejected_forbidden_cidr_total", "Requests rejected by an IP allowlist.", metrics.RejectedForbiddenCIDR)
 	writePrometheusCounter(w, "ngstoned_rejected_unauthorized_total", "Requests rejected by HTTP basic authentication.", metrics.RejectedUnauthorized)
 	writePrometheusCounter(w, "ngstoned_rejected_traffic_policy_total", "Requests rejected by a traffic policy.", metrics.RejectedTrafficPolicy)
+	writePrometheusCounter(w, "ngstoned_rejected_webhook_signature_total", "Requests rejected by webhook signature verification.", metricRejectedWebhook.Value())
 	writePrometheusCounter(w, "ngstoned_rejected_upgrade_cap_total", "Requests rejected by the upgrade concurrency cap.", metrics.RejectedUpgradeCap)
 	writePrometheusCounter(w, "ngstoned_tcp_rejected_global_cap_total", "TCP connections rejected by the global concurrency cap.", metrics.TCPRejectedGlobalCap)
 	writePrometheusCounter(w, "ngstoned_tcp_rejected_bind_cap_total", "TCP binds rejected by the per-session bind cap.", metrics.TCPRejectedBindCap)

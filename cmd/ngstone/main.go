@@ -413,6 +413,7 @@ type portFlags struct {
 	json                bool
 	harPath             string
 	harIncludeSensitive bool
+	webhook             webhookFlags
 }
 
 func newPortFlagSet() (*flag.FlagSet, *portFlags) {
@@ -444,6 +445,7 @@ func newPortFlagSetWithTTL(defaultTTL time.Duration) (*flag.FlagSet, *portFlags)
 	fs.BoolVar(&pf.json, "json", false, "emit JSON Lines status events instead of the inspector UI")
 	fs.StringVar(&pf.harPath, "har", "", "write captured HTTP exchanges as a HAR file when the tunnel exits")
 	fs.BoolVar(&pf.harIncludeSensitive, "har-include-sensitive", false, "include authorization and cookie headers in the HAR export")
+	pf.webhook.register(fs)
 	return fs, pf
 }
 
@@ -594,6 +596,11 @@ func runPortFlags(positionals []string, pf *portFlags, preview bool) int {
 			return 2
 		}
 	}
+	webhookCfg, err := resolveWebhookFlags(&pf.webhook, os.Getenv(config.DefaultWebhookSecretEnv))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
+		return 2
+	}
 
 	acfg := agent.Config{
 		ControlAddr:    server,
@@ -610,6 +617,7 @@ func runPortFlags(positionals []string, pf *portFlags, preview bool) int {
 		BasicAuthSHA256: basicAuthDigests,
 		AllowCIDRs:      allowCIDRs,
 		Policy:          trafficPolicy,
+		Webhook:         webhookCfg,
 
 		Insecure:   pf.insecure,
 		ServerName: pf.serverName,

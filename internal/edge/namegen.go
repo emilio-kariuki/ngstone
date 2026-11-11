@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"ngstone/internal/policy"
+	"ngstone/internal/webhook"
 )
 
 const maxRandomAttempts = 20
@@ -61,6 +62,7 @@ type hostnameOptions struct {
 	HTTP2                bool
 	MultiConnector       bool
 	ConnectorTokenDigest string
+	Webhook              *webhook.Verifier
 }
 
 func assignRandomHostname(r *Registry, opts hostnameOptions) (hostname string, evicted *AgentSession, err error) {
@@ -76,6 +78,7 @@ func assignRandomHostname(r *Registry, opts hostnameOptions) (hostname string, e
 			HTTP2:                opts.HTTP2,
 			MultiConnector:       opts.MultiConnector,
 			ConnectorTokenDigest: opts.ConnectorTokenDigest,
+			Webhook:              opts.Webhook,
 		})
 		if err == nil {
 			return hostname, evicted, nil

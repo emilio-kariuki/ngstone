@@ -311,6 +311,10 @@ func buildProjectAgent(name string, tunnel config.ProjectTunnel, projectDir stri
 			return agent.Config{}, 0, err
 		}
 	}
+	webhookCfg, err := resolveProjectWebhook(tunnel.Webhook, projectDir)
+	if err != nil {
+		return agent.Config{}, 0, err
+	}
 	ttl, err := tunnel.TTLDuration()
 	if err != nil {
 		return agent.Config{}, 0, err
@@ -332,6 +336,7 @@ func buildProjectAgent(name string, tunnel config.ProjectTunnel, projectDir stri
 		BasicAuthSHA256: basicAuthDigests,
 		AllowCIDRs:      allowCIDRs,
 		Policy:          trafficPolicy,
+		Webhook:         webhookCfg,
 		Insecure:        tunnel.Insecure,
 		ServerName:      tunnel.ServerName,
 		Pin:             tunnel.Pin,

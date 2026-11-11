@@ -461,6 +461,64 @@ rejected when the tunnel starts.
 Policies are HTTP-only and are not access control by themselves: combine
 them with `--basic-auth` or `--allow-cidr` when the tunnel must be private.
 
+### Webhook signature verification
+
+The edge can check webhook signatures before forwarding, so unsigned, tampered
+or replayed deliveries get `401` and never reach the local app:
+
+```bash
+export NGSTONE_WEBHOOK_SECRET=whsec_...
+ngstone port 3000 --verify-webhook stripe --verify-webhook-path /webhooks/stripe
+ngstone port 3000 --verify-webhook github --verify-webhook-secret-file github.secret
+ngstone port 3000 --verify-webhook slack --verify-webhook-tolerance 2m
+ngstone port 3000 --verify-webhook hmac --verify-webhook-header X-Shopify-Hmac-Sha256 --verify-webhook-encoding base64
+```
+
+| Provider | Header | Signed content |
+| --- | --- | --- |
+| `stripe` | `Stripe-Signature` (`t=…,v1=…`) | `timestamp.body`, timestamp within tolerance (default 5m) |
+| `github` | `X-Hub-Signature-256` (`sha256=…`) | body |
+| `slack` | `X-Slack-Signature` + `X-Slack-Request-Timestamp` | `v0:timestamp:body`, timestamp within the replay window (default 5m) |
+| `hmac` | `--verify-webhook-header` | body, `hex` (default) or `base64`, optional `--verify-webhook-prefix` such as `sha256=` |
+
+The secret comes from `--verify-webhook-secret-file` or `NGSTONE_WEBHOOK_SECRET`;
+there is deliberately no flag that takes the secret itself. `--verify-webhook-path`
+limits verification to one path prefix (matched after cleaning `..` and
+duplicate slashes, case-insensitively); without it every request is verified.
+HTTP tunnels only.
+
+In `ngstone.json` or `ngstone.yml`, add a `webhook` block to an HTTP tunnel:
+
+```yaml
+tunnels:
+  payments:
+    port: 3000
+    webhook:
+      provider: stripe
+      secret_file: stripe.secret   # relative to the project file, must be chmod 600
+      path_prefix: /webhooks/stripe
+      tolerance: 5m
+  bot:
+    port: 3001
+    webhook:
+      provider: slack
+      secret_env: SLACK_SIGNING_SECRET   # defaults to NGSTONE_WEBHOOK_SECRET
+```
+
+The edge buffers a matching request body up to the smaller of
+`-max-body-bytes` and 25 MiB (`413` beyond that), compares signatures in
+constant time, then forwards the original body unchanged. Failures return a
+short reason (`missing signature`, `malformed signature`, `invalid signature`,
+`timestamp outside tolerance`) and increment
+`ngstoned_rejected_webhook_signature_total`.
+
+HMAC verification needs the signing secret itself, so the agent sends it to the
+edge in the bind message over the control channel. The edge keeps it in memory
+only: it is not stored durably and never appears in the dashboard, admin API,
+events, `ngstone ps`, `--json` output or HAR exports, which show only the
+provider name. An edge that does not acknowledge webhook verification makes the
+agent refuse to bind rather than open an unverified tunnel.
+
 This assumes you (or someone) already has `ngstoned` running on a VPS with a
 domain pointed at it — see [Self-hosting](#self-hosting) below. `ngstoned` is
 not installed by this script; it's server infrastructure, not something to

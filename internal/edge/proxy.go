@@ -18,6 +18,7 @@ import (
 
 	"ngstone/internal/inspect"
 	"ngstone/internal/policy"
+	"ngstone/internal/webhook"
 )
 
 type ctxKey int
@@ -130,10 +131,12 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	var ac *accessControl
 	var trafficPolicy *policy.Policy
 	var http2Mode bool
+	var webhookVerifier *webhook.Verifier
 	if snapshot != nil {
 		ac = snapshot.access
 		trafficPolicy = snapshot.trafficPolicy
 		http2Mode = snapshot.http2
+		webhookVerifier = snapshot.webhook
 	} else {
 		ac = b.access.Load()
 	}
@@ -239,6 +242,9 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		}
 		r.Body = body
 		ctx = context.WithValue(ctx, ctxKeyIdleBody, body)
+	}
+	if !verifyWebhookRequest(rec, r, webhookVerifier, webhookBodyLimit(limits), time.Now()) {
+		return
 	}
 
 	reqID := randomHex(8)

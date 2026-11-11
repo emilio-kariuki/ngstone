@@ -64,6 +64,11 @@ export const NAV: NavGroup[] = [
         description: "Per-tunnel HTTP basic auth and source-IP allowlisting.",
       },
       {
+        title: "Webhook verification",
+        href: "/docs/guides/webhook-verification",
+        description: "Reject unsigned Stripe, GitHub, Slack and HMAC webhooks at the edge.",
+      },
+      {
         title: "Using the request inspector",
         href: "/docs/guides/request-inspector",
         description: "The terminal dashboard that shows every request live.",
