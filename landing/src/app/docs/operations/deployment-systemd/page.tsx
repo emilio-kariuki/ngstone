@@ -122,8 +122,11 @@ WantedBy=multi-user.target`}
         bounded TTL; <code>credentials revoke</code> invalidates it
         independently. OIDC browser login is available for team access to the
         management API; configure the provider group mappings and keep the
-        client and cookie secrets in <code>EnvironmentFile=</code>. mTLS team
-        authentication remains deferred. The management API uses loopback
+        client and cookie secrets in <code>EnvironmentFile=</code>. Team
+        members and automation can authenticate with client certificates on a
+        dedicated mTLS listener
+        (<code>NGSTONE_ADMIN_MTLS_ADDR</code>
+        and <code>NGSTONE_ADMIN_MTLS_CLIENT_CA</code>). The management API uses loopback
         access by default; configure <code>NGSTONE_ADMIN_TOKEN_SHA256</code> only
         when a private, TLS-protected automation path is required.
       </p>

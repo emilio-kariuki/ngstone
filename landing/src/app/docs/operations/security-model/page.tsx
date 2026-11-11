@@ -160,7 +160,6 @@ export default function SecurityModelPage() {
           Compromise of the VPS itself — it terminates TLS and sees
           plaintext, so it&apos;s treated as trusted infrastructure
         </li>
-        <li>mTLS team authentication</li>
       </ul>
     </DocsArticle>
   )

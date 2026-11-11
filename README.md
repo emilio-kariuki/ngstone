@@ -944,6 +944,16 @@ the OIDC session and team roles instead of the loopback bypass. Keep the ops
 listener private or put it behind HTTPS; the OIDC callback must be reachable by
 the browser and must exactly match the registered provider callback.
 
+Team members and automation can instead authenticate with client certificates
+on a separate mTLS listener, enabled with `NGSTONE_ADMIN_MTLS_ADDR` and
+`NGSTONE_ADMIN_MTLS_CLIENT_CA`. The certificate is the only authentication on
+that listener; its `OU` sets the role and its `CN` the audit principal. The CLI
+presents one with `--client-cert` and `--client-key` (or
+`NGSTONE_ADMIN_CLIENT_CERT` and `NGSTONE_ADMIN_CLIENT_KEY`), with `--ca` and
+`--server-name` available for private server certificates. See
+[mTLS team access](deploy/README.md#mtls-team-access) for the CA and
+certificate recipe.
+
 For lifecycle alerts, set `NGSTONE_ALERT_WEBHOOK_URL` and optionally
 `NGSTONE_ALERT_WEBHOOK_TOKEN` in the edge environment. ngstoned sends
 non-blocking JSON events for connector reconnects, lease loss, and expired or

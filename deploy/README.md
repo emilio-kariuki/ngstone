@@ -267,6 +267,9 @@ NGSTONE_OIDC_VIEWER_GROUPS=ngstone-viewers
 # Optional: restrict login and set an explicit fallback role
 NGSTONE_OIDC_ALLOWED_EMAIL_DOMAINS=example.com
 NGSTONE_OIDC_DEFAULT_ROLE=
+# Optional: management API over mTLS with client certificates
+# NGSTONE_ADMIN_MTLS_ADDR=:4044
+# NGSTONE_ADMIN_MTLS_CLIENT_CA=/etc/ngstoned/admin-ca.pem
 # Optional: lifecycle alert webhook
 NGSTONE_ALERT_WEBHOOK_URL=https://alerts.example.com/ngstone
 NGSTONE_ALERT_WEBHOOK_TOKEN=<webhook secret>
@@ -429,6 +432,50 @@ the session CSRF token. Keep the client secret and cookie secret in the
 root-only environment file; do not put either in `ExecStart` or a shell
 command-line argument. The management bearer token remains useful for CI and
 other non-browser automation.
+
+### mTLS team access
+
+Set `NGSTONE_ADMIN_MTLS_ADDR` and `NGSTONE_ADMIN_MTLS_CLIENT_CA` together to
+open a separate TLS listener for the management API. On that listener a client
+certificate is the only authentication: bearer tokens, OIDC cookies, and the
+loopback bypass do not apply, and nothing changes while both settings are
+unset. The listener serves only the management API and dashboard state, not
+metrics, health, or pprof. Every edge needs the same CA file.
+
+An unauthenticated peer can still complete TCP connections and occupy the 32
+connection slots. Open the port only to the networks your team uses, for
+example with a firewall rule; the loopback ops port remains available as a
+fallback.
+
+Create a CA used only for ngstone management, then issue short-lived client
+certificates from it:
+
+```sh
+openssl req -x509 -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1825 -subj "/CN=ngstone management CA" -keyout admin-ca.key -out admin-ca.pem -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=alice/OU=operator" -keyout alice.key -out alice.csr
+printf 'basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n' > client.ext
+openssl x509 -req -in alice.csr -CA admin-ca.pem -CAkey admin-ca.key -CAcreateserial -days 7 -extfile client.ext -out alice.pem
+chmod 600 alice.key
+ngstone admin status --server https://<apex-domain>:4044 --client-cert alice.pem --client-key alice.key
+```
+
+Copy `admin-ca.pem` (never the key) to `/etc/ngstoned/admin-ca.pem` on every
+edge. Guidance:
+
+- Keep `admin-ca.key` offline and use that CA only for ngstone.
+- The role comes from `OU=admin`, `OU=operator`, or `OU=viewer`; a certificate
+  without one of them is rejected, and the highest role wins if several are set.
+- The `CN` becomes the audit and ownership principal `mtls:<cn>`. It must be
+  lowercase `[a-z0-9._@-]`.
+- Certificates must carry the clientAuth extended key usage and live at most
+  30 days. Prefer 1-7 days, and never request exactly 720 h.
+- There is no revocation list. To cut off every certificate at once, replace
+  the CA file and restart every edge.
+- The server certificate is the edge's apex certificate. To reach one edge by
+  IP, pass `--server-name <apex-domain>`; use `--ca` to verify the server
+  against a private bundle instead of the system roots.
+- The client key must be readable only by its owner (`chmod 600`); the CLI
+  refuses a group- or world-readable key.
 
 Secrets must only ever reach `ngstoned` through `EnvironmentFile=`, never through `ExecStart` flags: `/proc/<pid>/cmdline` is world-readable, so any local user can read a flag value with `ps auxww`, but not the process's environment. `ngstoned` reads `$NGSTONE_CREDENTIALS_FILE`, the legacy `$NGSTONE_TOKEN_SHA256`, and `$NGSTONE_CF_API_TOKEN` in preference to their equivalent flags for exactly this reason, and other providers' credentials have no flags at all — do not add those flags to the unit's `ExecStart`. The agent has the same exposure: prefer `$NGSTONE_TOKEN` over `-token` whenever the agent runs somewhere another local user could run `ps`.
 
