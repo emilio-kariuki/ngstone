@@ -26,7 +26,7 @@ type webhookFlags struct {
 func (wf *webhookFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&wf.provider, "verify-webhook", "", "verify webhook signatures at the edge before forwarding: "+strings.Join(webhook.Providers, ", "))
 	fs.StringVar(&wf.secretFile, "verify-webhook-secret-file", "", "file holding the webhook signing secret (defaults to $"+config.DefaultWebhookSecretEnv+")")
-	fs.StringVar(&wf.pathPrefix, "verify-webhook-path", "", "only verify requests under this path prefix (empty = every request)")
+	fs.StringVar(&wf.pathPrefix, "verify-webhook-path", "", "only verify requests whose path contains this path at a segment boundary (empty = every request)")
 	fs.StringVar(&wf.header, "verify-webhook-header", "", "signature header for --verify-webhook hmac")
 	fs.StringVar(&wf.encoding, "verify-webhook-encoding", "", "signature encoding for --verify-webhook hmac: hex or base64 (default hex)")
 	fs.StringVar(&wf.prefix, "verify-webhook-prefix", "", "signature prefix for --verify-webhook hmac, such as sha256=")
