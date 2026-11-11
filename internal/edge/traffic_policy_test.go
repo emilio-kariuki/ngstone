@@ -135,6 +135,53 @@ func TestHandlePublicAppliesTrafficPolicyTransforms(t *testing.T) {
 	}
 }
 
+func TestHandlePublicRequestHeaderTransformsSurviveConnectionTokens(t *testing.T) {
+	p, err := policy.Parse([]byte(`{
+  "rules": [
+    {"action": "transform", "request_headers": {"set": {"X-Env": "prod", "X-Role": "admin"}, "add": {"X-Tag": "edge"}}}
+  ]
+}`))
+	if err != nil {
+		t.Fatalf("policy.Parse: %v", err)
+	}
+
+	var mu sync.Mutex
+	var seen http.Header
+	s := newServerForTest(LimitsConfig{PerIPRate: 1000, PerIPBurst: 1000})
+	as := newFakeAgentSession(t, "connection-instance", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = r.Header.Clone()
+		mu.Unlock()
+		io.WriteString(w, "ok\n")
+	})
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "svc.example.com", Session: as, Takeover: true, TrafficPolicy: p}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://svc.example.com/", nil)
+	req.Host = "svc.example.com"
+	req.RemoteAddr = "9.9.9.9:5555"
+	req.Header.Set("Connection", "X-Env, X-Role, X-Tag")
+	req.Header.Set("X-Env", "client")
+	req.Header.Set("X-Role", "client")
+	req.Header.Set("X-Tag", "client")
+	rec := httptest.NewRecorder()
+	s.handlePublic(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	mu.Lock()
+	got := seen
+	mu.Unlock()
+	if got.Get("X-Env") != "prod" || got.Get("X-Role") != "admin" {
+		t.Fatalf("agent saw headers %v, want policy-set headers to survive Connection tokens", got)
+	}
+	if tags := got.Values("X-Tag"); len(tags) != 1 || tags[0] != "edge" {
+		t.Fatalf("X-Tag = %q, want the policy-added value", tags)
+	}
+}
+
 func TestHandlePublicAnswersRedirectsAtTheEdge(t *testing.T) {
 	p, err := policy.Parse([]byte(`{"rules":[{"action":"redirect","path_prefix":"/old","redirect_url":"/new$path","redirect_status":301}]}`))
 	if err != nil {

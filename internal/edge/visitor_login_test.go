@@ -593,3 +593,74 @@ func TestVisitorIdentityFeedsTrafficPolicy(t *testing.T) {
 		t.Fatalf("bob on /admin = %d, want 200", rec.Code)
 	}
 }
+
+func bindVisitorH2Tunnel(t *testing.T, s *Server, host string, bind proto.Bind) *capturedRequest {
+	t.Helper()
+	captured := &capturedRequest{}
+	as := newFakeH2AgentSession(t, "visitor-h2-"+host, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		captured.mu.Lock()
+		captured.header = r.Header.Clone()
+		captured.hits++
+		captured.mu.Unlock()
+		io.WriteString(w, "origin-ok")
+	}))
+	ac, err := buildAccessControl(bind)
+	if err != nil {
+		t.Fatalf("buildAccessControl: %v", err)
+	}
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: host, Session: as, Takeover: true, Access: ac, HTTP2: true}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	return captured
+}
+
+func assertAssertedIdentity(t *testing.T, s *Server, idp *fakeVisitorIdP, captured *capturedRequest, host string) {
+	t.Helper()
+	idp.setUser("alice@example.org", true)
+	_, session := visitorLoginFlow(t, s, idp, "http://"+host+"/")
+	if session == nil {
+		t.Fatal("login did not produce a session")
+	}
+	header := http.Header{
+		"Accept":                {"application/json"},
+		"Connection":            {"X-Ngstone-User-Email, X-Ngstone-User-Subject, X-Ngstone-User-Name"},
+		"X_Ngstone_User_Email":  {"ceo@corp.example"},
+		"X-Ngstone-User-Email":  {"mallory@evil.test"},
+		"X_Ngstone_User_Groups": {"admins"},
+	}
+	rec := visitorRequest(t, s, http.MethodGet, "http://"+host+"/api", header, session)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	got, _ := captured.last()
+	if values := got.Values(VisitorEmailHeader); len(values) != 1 || values[0] != "alice@example.org" {
+		t.Fatalf("email header = %q, want exactly the real identity", values)
+	}
+	if values := got.Values(VisitorSubjectHeader); len(values) != 1 || values[0] != "sub-alice@example.org" {
+		t.Fatalf("subject header = %q, want exactly the real identity", values)
+	}
+	if values := got.Values(VisitorNameHeader); len(values) != 1 || values[0] != "VisitorInjected" {
+		t.Fatalf("name header = %q, want exactly the real identity", values)
+	}
+	for name, values := range got {
+		lower := strings.ReplaceAll(strings.ToLower(name), "_", "-")
+		if strings.HasPrefix(lower, "x-ngstone-user-") && name != VisitorEmailHeader && name != VisitorSubjectHeader && name != VisitorNameHeader {
+			t.Fatalf("spoofed identity header %q=%q reached the upstream", name, values)
+		}
+	}
+}
+
+func TestVisitorIdentityHeadersSurviveConnectionTokens(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	captured := bindVisitorTunnel(t, s, "app.example.com", proto.Bind{OIDC: &proto.OIDCLogin{}})
+	assertAssertedIdentity(t, s, idp, captured, "app.example.com")
+}
+
+func TestVisitorIdentityHeadersSurviveConnectionTokensOverHTTP2(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	captured := bindVisitorH2Tunnel(t, s, "h2.example.com", proto.Bind{OIDC: &proto.OIDCLogin{}})
+	assertAssertedIdentity(t, s, idp, captured, "h2.example.com")
+}

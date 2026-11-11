@@ -29,6 +29,7 @@ const (
 	ctxKeyReqSlot
 	ctxKeyIdleBody
 	ctxKeyPolicyDecision
+	ctxKeyVisitorIdentity
 )
 
 // statusRecorder records the response status and size. When idle is set,
@@ -184,10 +185,13 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stripVisitorIdentityHeaders(r.Header)
+	var identity *visitorToken
 	if rule := ac.loginRule(); rule != nil {
-		if !s.authorizeVisitor(rec, r, rule) {
+		session, ok := s.authorizeVisitor(rec, r, rule)
+		if !ok {
 			return
 		}
+		identity = session
 	}
 	stripVisitorSessionCookie(r.Header)
 	var decision policy.Decision
@@ -208,7 +212,6 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	if ac.hasBasicAuth() {
 		r.Header.Del("Authorization")
 	}
-	decision.ApplyRequestHeaders(r.Header)
 
 	releaseIP, ok := s.perIP.acquire(ip)
 	if !ok {
@@ -269,8 +272,11 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	ctx = context.WithValue(ctx, ctxKeyClientAddr, r.RemoteAddr)
 	ctx = context.WithValue(ctx, ctxKeyReqID, reqID)
 	ctx = context.WithValue(ctx, ctxKeyReqSlot, slot)
-	if decision.TransformsResponse() {
+	if trafficPolicy != nil {
 		ctx = context.WithValue(ctx, ctxKeyPolicyDecision, &decision)
+	}
+	if identity != nil {
+		ctx = context.WithValue(ctx, ctxKeyVisitorIdentity, identity)
 	}
 
 	proxy.ServeHTTP(rec, r.WithContext(ctx))
@@ -347,6 +353,14 @@ func newBindingProxyWithMetadata(transport http.RoundTripper, includeMetadata bo
 				if clientAddr, _ := pr.Out.Context().Value(ctxKeyClientAddr).(string); clientAddr != "" {
 					pr.Out.Header.Set(inspect.ClientAddrHeader, clientAddr)
 				}
+			}
+			stripVisitorIdentityHeaders(pr.Out.Header)
+			if decision, _ := pr.Out.Context().Value(ctxKeyPolicyDecision).(*policy.Decision); decision != nil {
+				decision.ApplyRequestHeaders(pr.Out.Header)
+			}
+			stripVisitorIdentityHeaders(pr.Out.Header)
+			if identity, _ := pr.Out.Context().Value(ctxKeyVisitorIdentity).(*visitorToken); identity != nil {
+				setVisitorIdentity(pr.Out.Header, *identity)
 			}
 		},
 		ModifyResponse: modifyResponse,

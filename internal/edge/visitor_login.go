@@ -238,21 +238,21 @@ func (s *Server) visitorRuleForHost(host string) (*visitorLoginRule, bool) {
 	return b.access.Load().loginRule(), true
 }
 
-func (s *Server) authorizeVisitor(w http.ResponseWriter, r *http.Request, rule *visitorLoginRule) bool {
+func (s *Server) authorizeVisitor(w http.ResponseWriter, r *http.Request, rule *visitorLoginRule) (*visitorToken, bool) {
 	v := s.visitor
 	if v == nil {
 		writeVisitorPage(w, http.StatusServiceUnavailable, "Sign-in unavailable", "Visitor login is not configured on this edge.")
-		return false
+		return nil, false
 	}
 	switch r.URL.Path {
 	case visitorFinishPath:
 		s.handleVisitorFinish(w, r, v, rule)
-		return false
+		return nil, false
 	case visitorLogoutPath:
 		v.clearSession(w)
 		w.Header().Set("Cache-Control", "no-store")
 		writeVisitorPage(w, http.StatusOK, "Signed out", "You have been signed out of this tunnel.")
-		return false
+		return nil, false
 	}
 	var session visitorToken
 	cookie, err := r.Cookie(visitorSessionCookie)
@@ -260,10 +260,10 @@ func (s *Server) authorizeVisitor(w http.ResponseWriter, r *http.Request, rule *
 		if !rule.allows(session.Email, session.EmailVerified) {
 			metricRejectedUnauthorized.Add(1)
 			writeVisitorPage(w, http.StatusForbidden, "Access denied", "Your account is not allowed to access this tunnel.")
-			return false
+			return nil, false
 		}
 		setVisitorIdentity(r.Header, session)
-		return true
+		return &session, true
 	}
 	metricRejectedUnauthorized.Add(1)
 	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && acceptsHTML(r) {
@@ -271,12 +271,12 @@ func (s *Server) authorizeVisitor(w http.ResponseWriter, r *http.Request, rule *
 		if err == nil {
 			w.Header().Set("Cache-Control", "no-store")
 			http.Redirect(w, r, start, http.StatusFound)
-			return false
+			return nil, false
 		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	http.Error(w, "login required", http.StatusUnauthorized)
-	return false
+	return nil, false
 }
 
 func (s *Server) handleVisitorFinish(w http.ResponseWriter, r *http.Request, v *visitorLogin, rule *visitorLoginRule) {
@@ -407,7 +407,7 @@ func acceptsHTML(r *http.Request) bool {
 
 func stripVisitorIdentityHeaders(header http.Header) {
 	for name := range header {
-		if len(name) >= len(visitorIdentityPrefix) && strings.EqualFold(name[:len(visitorIdentityPrefix)], visitorIdentityPrefix) {
+		if strings.HasPrefix(strings.ReplaceAll(strings.ToLower(name), "_", "-"), "x-ngstone-user-") {
 			delete(header, name)
 		}
 	}
