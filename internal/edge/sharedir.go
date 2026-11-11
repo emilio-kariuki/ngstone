@@ -47,7 +47,7 @@ func (r *shareRegistry) live() []*share {
 func (s *Server) publishShare(sh *share) error {
 	ctx, cancel := context.WithTimeout(context.Background(), peerDeleteTimeout)
 	defer cancel()
-	return s.peers.store.PublishShare(ctx, shareDirKey(sh.secretHash[:]), sh.id, s.peers.selfID, s.shares.expiry(sh))
+	return s.peers.store.PublishShare(ctx, shareDirKey(sh.secretHash[:]), sh.id, s.peers.selfID, sh.ownerID, s.shares.expiry(sh))
 }
 
 func (s *Server) withdrawShare(sh *share) {
@@ -59,10 +59,10 @@ func (s *Server) withdrawShare(sh *share) {
 	}()
 }
 
-func (s *Server) revokeRemoteShare(shareID string) bool {
+func (s *Server) revokeRemoteShare(shareID, ownerID string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), peerDeleteTimeout)
 	defer cancel()
-	revoked, err := s.peers.store.RevokeShare(ctx, shareID, time.Now())
+	revoked, err := s.peers.store.RevokeShare(ctx, shareID, ownerID, time.Now())
 	slogStorageError("revoke share", err)
 	return err == nil && revoked
 }

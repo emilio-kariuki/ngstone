@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"ngstone/internal/credentials"
 	"ngstone/internal/proto"
 	"ngstone/internal/tunnel"
 )
@@ -406,7 +407,7 @@ func TestControlForwardSkipsLocalShare(t *testing.T) {
 	cl := newShareCluster(t)
 	startShare(t, cl.a, "the-link-secret", nil)
 	exp := time.Now().Add(time.Hour)
-	if err := cl.b.store.PublishShare(context.Background(), shareDirKey(shareSecretHashBytes("the-link-secret")), "sh_elsewhere", "edge-b", exp); err != nil {
+	if err := cl.b.store.PublishShare(context.Background(), shareDirKey(shareSecretHashBytes("the-link-secret")), "sh_elsewhere", "edge-b", "legacy", exp); err != nil {
 		t.Fatal(err)
 	}
 	addr := serveControlOn(t, cl.a)
@@ -685,10 +686,10 @@ func TestRemoteUnshareRevokes(t *testing.T) {
 func TestHeartbeatPurgesOwnDirectoryRowsAtStart(t *testing.T) {
 	cl := newShareCluster(t)
 	exp := time.Now().Add(time.Hour)
-	if err := cl.b.store.PublishShare(context.Background(), shareDirKey([]byte("stale")), "sh_stale", "edge-b", exp); err != nil {
+	if err := cl.b.store.PublishShare(context.Background(), shareDirKey([]byte("stale")), "sh_stale", "edge-b", "legacy", exp); err != nil {
 		t.Fatal(err)
 	}
-	if err := cl.c.store.PublishShare(context.Background(), shareDirKey([]byte("peer")), "sh_peer", "edge-c", exp); err != nil {
+	if err := cl.c.store.PublishShare(context.Background(), shareDirKey([]byte("peer")), "sh_peer", "edge-c", "legacy", exp); err != nil {
 		t.Fatal(err)
 	}
 	has := func(from *peerEdge, digest string) bool {
@@ -756,5 +757,105 @@ func TestShareForwardInertWithoutPeers(t *testing.T) {
 	ok, err := proto.Decode[proto.SharesOK](m)
 	if err != nil || ok.Edge != "" || len(ok.Shares) != 1 {
 		t.Fatalf("list = %+v, %v; want one share and no edge id", ok, err)
+	}
+}
+
+func useShareCredentials(cl *shareCluster) {
+	for _, e := range []*peerEdge{cl.a, cl.b, cl.c} {
+		e.srv.cfg.TokenSHA256 = nil
+		e.srv.credentialStore = e.store
+	}
+}
+
+func issueShareToken(t *testing.T, e *peerEdge, owner string) string {
+	t.Helper()
+	issued, err := e.store.Issue(credentials.Spec{Kind: credentials.KindShare, OwnerID: owner}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return issued.Token
+}
+
+func startCredentialOperator(t *testing.T, e *peerEdge, token, instance string) tunnel.Session {
+	t.Helper()
+	client, server, cleanup := newRawSessionPair(t)
+	t.Cleanup(cleanup)
+	as := authAs(t, e.srv, client, server, proto.Auth{Token: token, InstanceID: instance, ProtoVersions: proto.SupportedVersions}, "")
+	go e.srv.controlLoop(context.Background(), as)
+	return client
+}
+
+func credentialShare(t *testing.T, e *peerEdge, token, instance, secret string) (tunnel.Session, proto.Msg) {
+	t.Helper()
+	client := startCredentialOperator(t, e, token, instance)
+	if err := client.Control().Write(proto.TypeShare, 3, testShareReq(secret, 10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		m := shareReply(t, client.Control())
+		if m.Type != proto.TypeShareEvent {
+			return client, m
+		}
+	}
+}
+
+func TestRemoteUnshareRequiresOwner(t *testing.T) {
+	cl := newShareCluster(t)
+	useShareCredentials(cl)
+	tokenA, tokenB := issueShareToken(t, cl.a, "owner-a"), issueShareToken(t, cl.a, "owner-b")
+
+	sharer, m := credentialShare(t, cl.b, tokenA, "sharer", "the-link-secret")
+	if m.Type != proto.TypeShareOK {
+		t.Fatalf("share reply = %s %s, want share_ok", m.Type, m.Data)
+	}
+	ok, err := proto.Decode[proto.ShareOK](m)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	other := startCredentialOperator(t, cl.a, tokenB, "operator-b")
+	other.Control().Write(proto.TypeUnshare, 11, proto.Unshare{ShareID: ok.ShareID})
+	m = readSession(t, other)
+	if e, _ := proto.Decode[proto.Error](m); m.Type != proto.TypeError || e.Code != proto.CodeShareNotFound {
+		t.Fatalf("other owner's unshare = %s %s, want share_not_found", m.Type, m.Data)
+	}
+	cl.b.srv.peers.syncShares(context.Background(), time.Now())
+	if _, live := cl.b.srv.shares.lookup("the-link-secret"); !live {
+		t.Fatal("another owner's unshare revoked the share")
+	}
+
+	owner := startCredentialOperator(t, cl.a, tokenA, "operator-a")
+	owner.Control().Write(proto.TypeUnshare, 12, proto.Unshare{ShareID: ok.ShareID})
+	if m := readSession(t, owner); m.Type != proto.TypeUnshareOK {
+		t.Fatalf("owner's remote unshare = %s %s, want unshare_ok", m.Type, m.Data)
+	}
+	cl.b.srv.peers.syncShares(context.Background(), time.Now())
+	if _, live := cl.b.srv.shares.lookup("the-link-secret"); live {
+		t.Fatal("the holding edge kept a share its owner revoked")
+	}
+	if ev := readEvent(t, sharer.Control(), proto.ShareEventClosed); ev.Reason != proto.ShareReasonRevoked {
+		t.Fatalf("closed reason = %q, want revoked", ev.Reason)
+	}
+}
+
+func TestCrossEdgeSameSecretOtherOwnerRejected(t *testing.T) {
+	cl := newShareCluster(t)
+	useShareCredentials(cl)
+	tokenA, tokenB := issueShareToken(t, cl.a, "owner-a"), issueShareToken(t, cl.a, "owner-b")
+
+	if _, m := credentialShare(t, cl.b, tokenA, "sharer-a", "the-link-secret"); m.Type != proto.TypeShareOK {
+		t.Fatalf("owner-a share reply = %s %s, want share_ok", m.Type, m.Data)
+	}
+	_, m := credentialShare(t, cl.c, tokenB, "sharer-b", "the-link-secret")
+	e, _ := proto.Decode[proto.ShareErr](m)
+	if m.Type != proto.TypeShareErr || e.Code != proto.CodeShareTaken || e.Message != "this share secret is registered by another agent" {
+		t.Fatalf("owner-b share reply = %s %s, want share_taken", m.Type, m.Data)
+	}
+	if _, live := cl.c.srv.shares.lookup("the-link-secret"); live || cl.c.srv.shares.count() != 0 {
+		t.Fatal("the refused share stayed registered on the second edge")
+	}
+	peer, found, err := cl.a.store.LookupShareEdge(context.Background(), shareDirKey(shareSecretHashBytes("the-link-secret")), cl.a.id, time.Now())
+	if err != nil || !found || peer.EdgeID != cl.b.id {
+		t.Fatalf("directory lookup = %+v, %v, %v, want edge %s", peer, found, err, cl.b.id)
 	}
 }

@@ -8,12 +8,20 @@ import (
 	"time"
 )
 
-func (s *Store) PublishShare(ctx context.Context, dirKey, shareID, edgeID string, expiresAt time.Time) error {
-	if dirKey == "" || shareID == "" || edgeID == "" {
+func (s *Store) PublishShare(ctx context.Context, dirKey, shareID, edgeID, ownerID string, expiresAt time.Time) error {
+	if dirKey == "" || shareID == "" || edgeID == "" || ownerID == "" {
 		return ErrInvalid
 	}
-	if _, err := s.exec(ctx, `INSERT INTO share_directory (dir_key, share_id, edge_id, expires_at, revoked) VALUES ($1, $2, $3, $4, 0) ON CONFLICT(dir_key) DO UPDATE SET share_id = excluded.share_id, edge_id = excluded.edge_id, expires_at = excluded.expires_at, revoked = 0`, dirKey, shareID, edgeID, nowString(expiresAt)); err != nil {
+	res, err := s.exec(ctx, `INSERT INTO share_directory (dir_key, share_id, edge_id, owner_id, expires_at, revoked) VALUES ($1, $2, $3, $4, $5, 0) ON CONFLICT(dir_key) DO UPDATE SET share_id = excluded.share_id, edge_id = excluded.edge_id, expires_at = excluded.expires_at, revoked = CASE WHEN share_directory.share_id = excluded.share_id THEN share_directory.revoked ELSE 0 END WHERE share_directory.owner_id = excluded.owner_id`, dirKey, shareID, edgeID, ownerID, nowString(expiresAt))
+	if err != nil {
 		return fmt.Errorf("storage: publish share: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("storage: publish share: %w", err)
+	}
+	if n == 0 {
+		return ErrShareTaken
 	}
 	return nil
 }
@@ -39,8 +47,11 @@ func (s *Store) DeleteExpiredShares(ctx context.Context, now time.Time) error {
 	return nil
 }
 
-func (s *Store) RevokeShare(ctx context.Context, shareID string, now time.Time) (bool, error) {
-	res, err := s.exec(ctx, `UPDATE share_directory SET revoked = 1 WHERE share_id = $1 AND expires_at > $2`, shareID, nowString(now))
+func (s *Store) RevokeShare(ctx context.Context, shareID, ownerID string, now time.Time) (bool, error) {
+	if shareID == "" || ownerID == "" {
+		return false, ErrInvalid
+	}
+	res, err := s.exec(ctx, `UPDATE share_directory SET revoked = 1 WHERE share_id = $1 AND owner_id = $2 AND expires_at > $3`, shareID, ownerID, nowString(now))
 	if err != nil {
 		return false, fmt.Errorf("storage: revoke share: %w", err)
 	}

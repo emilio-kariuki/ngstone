@@ -24,6 +24,7 @@ import (
 	"unicode"
 
 	"ngstone/internal/proto"
+	"ngstone/internal/storage"
 )
 
 // Sharing (protocol v3). A sharer session registers a share: the SHA-256 of
@@ -130,6 +131,7 @@ type share struct {
 	id         string
 	secretHash [32]byte
 	owner      *AgentSession
+	ownerID    string
 	kind       string
 	label      string
 	targets    []proto.ShareTarget
@@ -359,7 +361,7 @@ func (r *shareRegistry) register(as *AgentSession, sh *share) (replaced *share, 
 	defer r.mu.Unlock()
 
 	if existing, ok := r.byHash[sh.secretHash]; ok {
-		if existing.owner.InstanceID != as.InstanceID {
+		if existing.owner.InstanceID != as.InstanceID || existing.ownerID != durableOwnerID(as) {
 			return nil, errShareTaken
 		}
 		r.removeLocked(existing)
@@ -373,6 +375,7 @@ func (r *shareRegistry) register(as *AgentSession, sh *share) (replaced *share, 
 	}
 
 	sh.owner = as
+	sh.ownerID = durableOwnerID(as)
 	for {
 		sh.id = "sh_" + randomHex(8)
 		if _, taken := r.byID[sh.id]; !taken {
@@ -720,12 +723,16 @@ func (r *shareRegistry) count() int {
 }
 
 // list describes every live share, oldest first.
+func shareVisibleTo(sh *share, as *AgentSession) bool {
+	return sh.ownerID == durableOwnerID(as)
+}
+
 func (r *shareRegistry) list(asker *AgentSession) []proto.ShareInfo {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]proto.ShareInfo, 0, len(r.byID))
 	for _, sh := range r.byID {
-		if sh.closed {
+		if sh.closed || !shareVisibleTo(sh, asker) {
 			continue
 		}
 		info := proto.ShareInfo{
@@ -855,33 +862,37 @@ func (s *Server) handleShare(as *AgentSession, ctrl *proto.Conn, id uint64, req 
 		if err := s.publishShare(sh); err != nil {
 			slogStorageError("publish share", err)
 			s.closeShare(sh, "publish failed")
+			if errors.Is(err, storage.ErrShareTaken) {
+				ctrl.Write(proto.TypeShareErr, id, proto.ShareErr{Code: proto.CodeShareTaken, Message: "this share secret is registered by another agent"})
+				return
+			}
 			ctrl.Write(proto.TypeShareErr, id, proto.ShareErr{Code: proto.CodeInternal, Message: "could not publish share to the edge group"})
 			return
 		}
 	}
-	slog.Info("edge: share registered", "share_id", sh.id, "session_id", as.ID, "label", sh.label, "targets", shareTargetsSummary(sh.targets), "expires_at", sh.expiresAt.UTC().Format(time.RFC3339), "max_conns", sh.policy.maxConns, "max_connectors", sh.policy.maxConnectors, "max_uses", sh.policy.maxUses, "approve", sh.policy.approve, "passphrase", sh.policy.hasPassphrase, "e2e", sh.e2e, "allow_cidrs", len(sh.policy.allow))
+	slog.Info("edge: share registered", "share_id", sh.id, "session_id", as.ID, "owner_id", sh.ownerID, "label", sh.label, "targets", shareTargetsSummary(sh.targets), "expires_at", sh.expiresAt.UTC().Format(time.RFC3339), "max_conns", sh.policy.maxConns, "max_connectors", sh.policy.maxConnectors, "max_uses", sh.policy.maxUses, "approve", sh.policy.approve, "passphrase", sh.policy.hasPassphrase, "e2e", sh.e2e, "allow_cidrs", len(sh.policy.allow))
 	s.notifyWatchers(sh, proto.ShareEvent{ShareID: sh.id, Event: proto.ShareEventRegistered, AtMS: time.Now().UnixMilli(), ExpiresAtMS: sh.expiresAt.UnixMilli(), Label: sh.label})
 	ctrl.Write(proto.TypeShareOK, id, proto.ShareOK{ShareID: sh.id, ExpiresAtMS: sh.expiresAt.UnixMilli()})
 }
 
 func (s *Server) handleUnshare(as *AgentSession, ctrl *proto.Conn, id uint64, req proto.Unshare) {
 	sh, ok := s.shares.byShareID(req.ShareID)
-	if !ok {
-		if s.peers != nil && s.revokeRemoteShare(req.ShareID) {
+	if !ok || !shareVisibleTo(sh, as) {
+		if s.peers != nil && s.revokeRemoteShare(req.ShareID, durableOwnerID(as)) {
 			ctrl.Write(proto.TypeUnshareOK, id, proto.UnshareOK{ShareID: req.ShareID})
 			return
 		}
 		ctrl.Write(proto.TypeError, id, proto.Error{Code: proto.CodeShareNotFound, Message: "no such live share"})
 		return
 	}
-	slog.Info("edge: share revoked", "share_id", sh.id, "by_session", as.ID, "owner_session", sh.owner.ID)
+	slog.Info("edge: share revoked", "share_id", sh.id, "by_session", as.ID, "owner_session", sh.owner.ID, "by_owner", durableOwnerID(as))
 	s.closeShare(sh, proto.ShareReasonRevoked)
 	ctrl.Write(proto.TypeUnshareOK, id, proto.UnshareOK{ShareID: sh.id})
 }
 
 func (s *Server) handleShareUpdate(as *AgentSession, ctrl *proto.Conn, id uint64, req proto.ShareUpdate) {
 	sh, ok := s.shares.byShareID(req.ShareID)
-	if !ok {
+	if !ok || !shareVisibleTo(sh, as) {
 		ctrl.Write(proto.TypeShareErr, id, proto.ShareErr{Code: proto.CodeShareNotFound, Message: s.shareNotFoundMessage()})
 		return
 	}
@@ -898,7 +909,7 @@ func (s *Server) handleShareUpdate(as *AgentSession, ctrl *proto.Conn, id uint64
 		ctrl.Write(proto.TypeShareErr, id, proto.ShareErr{Code: code, Message: err.Error()})
 		return
 	}
-	slog.Info("edge: share extended", "share_id", sh.id, "by_session", as.ID, "expires_at", expiresAt.UTC().Format(time.RFC3339))
+	slog.Info("edge: share extended", "share_id", sh.id, "by_session", as.ID, "by_owner", durableOwnerID(as), "expires_at", expiresAt.UTC().Format(time.RFC3339))
 	if s.peers != nil {
 		if err := s.publishShare(sh); err != nil {
 			slogStorageError("publish share", err)
@@ -914,7 +925,7 @@ func (s *Server) handleShareUpdate(as *AgentSession, ctrl *proto.Conn, id uint64
 
 func (s *Server) handleKick(as *AgentSession, ctrl *proto.Conn, id uint64, req proto.Kick) {
 	sh, ok := s.shares.byShareID(req.ShareID)
-	if !ok {
+	if !ok || !shareVisibleTo(sh, as) {
 		ctrl.Write(proto.TypeError, id, proto.Error{Code: proto.CodeShareNotFound, Message: s.shareNotFoundMessage()})
 		return
 	}
@@ -927,7 +938,7 @@ func (s *Server) handleKick(as *AgentSession, ctrl *proto.Conn, id uint64, req p
 		ctrl.Write(proto.TypeError, id, proto.Error{Code: proto.CodeNoSuchConnector, Message: "no such connector on this share"})
 		return
 	}
-	slog.Info("edge: connector kicked", "share_id", sh.id, "connector_id", ci.id, "by_session", as.ID)
+	slog.Info("edge: connector kicked", "share_id", sh.id, "connector_id", ci.id, "by_session", as.ID, "by_owner", durableOwnerID(as))
 	s.dropConnector(sh, victim, proto.ShareReasonKicked)
 	ctrl.Write(proto.TypeKickOK, id, proto.KickOK{ShareID: sh.id, ConnectorID: ci.id})
 }
@@ -976,7 +987,7 @@ func (s *Server) dropConnector(sh *share, victim *AgentSession, reason string) {
 
 func (s *Server) handleApprove(as *AgentSession, ctrl *proto.Conn, id uint64, req proto.Approve) {
 	sh, ok := s.shares.byShareID(req.ShareID)
-	if !ok {
+	if !ok || !shareVisibleTo(sh, as) {
 		ctrl.Write(proto.TypeError, id, proto.Error{Code: proto.CodeShareNotFound, Message: "no such live share"})
 		return
 	}
@@ -1206,7 +1217,7 @@ func (s *Server) notifyWatchers(sh *share, ev proto.ShareEvent) {
 	ev.Label = sh.label
 	s.shareAudit.write(ev)
 	for _, w := range s.shares.watcherList() {
-		if w == sh.owner {
+		if w == sh.owner || durableOwnerID(w) != sh.ownerID {
 			continue
 		}
 		_ = w.Sess.Control().Write(proto.TypeShareEvent, w.IDGen.Next(), ev)

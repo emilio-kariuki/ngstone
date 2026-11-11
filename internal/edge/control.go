@@ -557,9 +557,15 @@ func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 				slog.Warn("edge: connector sent a forbidden message", "session_id", as.ID, "type", m.Type)
 				return
 			}
-			if as.Credential != nil && !credentialMaySend(m.Type) {
-				ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeForbidden, Message: fmt.Sprintf("%q is not allowed with a scoped tunnel credential", m.Type)})
-				return
+			if as.Credential != nil {
+				allowed := credentialMaySend(m.Type)
+				if as.Credential.Kind == credentials.KindShare {
+					allowed = shareCredentialMaySend(m.Type)
+				}
+				if !allowed {
+					ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeForbidden, Message: fmt.Sprintf("%q is not allowed with a scoped tunnel credential", m.Type)})
+					return
+				}
 			}
 			switch m.Type {
 			case proto.TypeBind:
@@ -715,6 +721,14 @@ func connectorMaySend(typ string) bool {
 func credentialMaySend(typ string) bool {
 	switch typ {
 	case proto.TypeBind, proto.TypeUnbind, proto.TypePing, proto.TypePong, proto.TypeGoodbye:
+		return true
+	}
+	return false
+}
+
+func shareCredentialMaySend(typ string) bool {
+	switch typ {
+	case proto.TypeShare, proto.TypeShareUpdate, proto.TypeUnshare, proto.TypeKick, proto.TypeApprove, proto.TypeListShares, proto.TypeWatchShares, proto.TypePing, proto.TypePong, proto.TypeGoodbye:
 		return true
 	}
 	return false
@@ -984,6 +998,9 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 func (s *Server) validateCredentialBind(ctx context.Context, as *AgentSession, bind proto.Bind) error {
 	if as.Credential == nil {
 		return nil
+	}
+	if as.Credential.Kind == credentials.KindShare {
+		return errors.New("share credentials cannot bind tunnels")
 	}
 	if s.credentialStore == nil {
 		return errors.New("tunnel credential is inactive")

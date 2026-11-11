@@ -41,6 +41,7 @@ var (
 	ErrPolicyConflict          = errors.New("storage: traffic policy conflict")
 	ErrNotFound                = errors.New("storage: record not found")
 	ErrInvalid                 = errors.New("storage: invalid record")
+	ErrShareTaken              = errors.New("storage: share secret is registered by another owner")
 	ErrHostnameKindConflict    = fmt.Errorf("%w: hostname is used by a tunnel of another kind", ErrTunnelConflict)
 	domainRE                   = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
 )
