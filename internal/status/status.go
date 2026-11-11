@@ -22,7 +22,7 @@ import (
 // Snapshot is one process's view of its tunnels.
 type Snapshot struct {
 	PID     int       `json:"pid"`
-	Command string    `json:"command"` // "port", "tcp", "tls", "serve", "start"
+	Command string    `json:"command"` // "port", "tcp", "serve", "start"
 	Started time.Time `json:"started"`
 	Tunnels []Tunnel  `json:"tunnels"`
 }
@@ -30,7 +30,7 @@ type Snapshot struct {
 // Tunnel is one tunnel's current state.
 type Tunnel struct {
 	Name    string `json:"name,omitempty"` // from ngstone.yml; empty for single-tunnel commands
-	Kind    string `json:"kind"`           // "http", "tcp", or "tls"
+	Kind    string `json:"kind"`           // "http" or "tcp"
 	State   string `json:"state"`          // connecting, online, reconnecting, evicted, offline
 	URL     string `json:"url,omitempty"`
 	Target  string `json:"target"`
