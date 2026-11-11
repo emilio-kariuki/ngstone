@@ -3,6 +3,7 @@ package e2e
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"expvar"
 	"fmt"
 	"io"
@@ -25,6 +26,36 @@ type inProc struct {
 	publicAddr string
 	hostname   string
 	store      *inspect.Store
+	tlsConfig  *tls.Config
+}
+
+type inProcStarter func(t *testing.T, subdomain, targetURL string) inProc
+
+func (h inProc) dial(timeout time.Duration) (net.Conn, error) {
+	d := &net.Dialer{Timeout: timeout}
+	if h.tlsConfig != nil {
+		return tls.DialWithDialer(d, "tcp", h.publicAddr, h.tlsConfig)
+	}
+	return d.Dial("tcp", h.publicAddr)
+}
+
+func (h inProc) client() *http.Client {
+	if h.tlsConfig == nil {
+		return &http.Client{}
+	}
+	return &http.Client{Transport: &http.Transport{TLSClientConfig: h.tlsConfig}}
+}
+
+func (h inProc) url(path string) string {
+	if h.tlsConfig != nil {
+		return "https://" + h.publicAddr + path
+	}
+	return "http://" + h.publicAddr + path
+}
+
+func startPlainInProcess(t *testing.T, subdomain, targetURL string) inProc {
+	t.Helper()
+	return startInProcess(t, subdomain, targetURL, 0)
 }
 
 func startInProcess(t *testing.T, subdomain, targetURL string, maxBody int64) inProc {
@@ -99,6 +130,10 @@ func writeReady(w http.ResponseWriter) bool {
 }
 
 func TestWebSocketEchoSession(t *testing.T) {
+	testWebSocketEchoSession(t, startPlainInProcess)
+}
+
+func testWebSocketEchoSession(t *testing.T, startTunnel inProcStarter) {
 	const upgradeProto = "websocket"
 
 	serverGone := make(chan struct{}, 1)
@@ -140,9 +175,9 @@ func TestWebSocketEchoSession(t *testing.T) {
 	origin := httptest.NewServer(mux)
 	defer origin.Close()
 
-	h := startInProcess(t, "ws", origin.URL, 0)
+	h := startTunnel(t, "ws", origin.URL)
 
-	conn, err := net.DialTimeout("tcp", h.publicAddr, 3*time.Second)
+	conn, err := h.dial(3 * time.Second)
 	if err != nil {
 		t.Fatalf("dial edge: %v", err)
 	}
@@ -236,6 +271,10 @@ func TestWebSocketEchoSession(t *testing.T) {
 }
 
 func TestSSEStream(t *testing.T) {
+	testSSEStream(t, startPlainInProcess)
+}
+
+func testSSEStream(t *testing.T, startTunnel inProcStarter) {
 	seconds := 3
 	if testing.Short() {
 		seconds = 2
@@ -283,10 +322,10 @@ func TestSSEStream(t *testing.T) {
 	origin := httptest.NewServer(mux)
 	defer origin.Close()
 
-	h := startInProcess(t, "sse", origin.URL, 0)
+	h := startTunnel(t, "sse", origin.URL)
 
-	client := &http.Client{}
-	req, err := http.NewRequest(http.MethodGet, "http://"+h.publicAddr+"/sse", nil)
+	client := h.client()
+	req, err := http.NewRequest(http.MethodGet, h.url("/sse"), nil)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}

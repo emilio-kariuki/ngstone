@@ -24,7 +24,7 @@ import (
 	"time"
 )
 
-func selfSignedTLSCert(t *testing.T, host string) (tls.Certificate, *x509.CertPool) {
+func selfSignedTLSCert(t *testing.T, host string, extraNames ...string) (tls.Certificate, *x509.CertPool) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -33,7 +33,7 @@ func selfSignedTLSCert(t *testing.T, host string) (tls.Certificate, *x509.CertPo
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(time.Now().UnixNano()),
 		Subject:               pkix.Name{CommonName: host, Organization: []string{"ngstone e2e local app"}},
-		DNSNames:              []string{host},
+		DNSNames:              append([]string{host}, extraNames...),
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
