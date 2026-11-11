@@ -172,9 +172,6 @@ func (tm *tcpManager) reserveLocked(requested int) (int, error) {
 	}
 	for p := tm.lo; p <= tm.hi; p++ {
 		if _, taken := tm.allocated[p]; !taken {
-			if _, remote := tm.remote[p]; remote {
-				continue
-			}
 			tm.allocated[p] = struct{}{}
 			return p, nil
 		}
