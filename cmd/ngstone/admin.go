@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -93,9 +95,13 @@ func cmdAdminLogin(args []string) int {
 }
 
 type adminCLIFlags struct {
-	server string
-	token  string
-	json   bool
+	server     string
+	token      string
+	json       bool
+	clientCert string
+	clientKey  string
+	ca         string
+	serverName string
 }
 
 func newAdminFlagSet(name string) (*flag.FlagSet, *adminCLIFlags) {
@@ -109,11 +115,66 @@ func newAdminFlagSet(name string) (*flag.FlagSet, *adminCLIFlags) {
 	fs.StringVar(&flags.server, "server", serverDefault, "management API URL (defaults to NGSTONE_ADMIN_SERVER or loopback)")
 	fs.StringVar(&flags.token, "token", flags.token, "management bearer token (defaults to NGSTONE_ADMIN_TOKEN; prefer the environment)")
 	fs.BoolVar(&flags.json, "json", false, "print machine-readable JSON")
+	flags.clientCert = os.Getenv("NGSTONE_ADMIN_CLIENT_CERT")
+	flags.clientKey = os.Getenv("NGSTONE_ADMIN_CLIENT_KEY")
+	flags.ca = os.Getenv("NGSTONE_ADMIN_CA")
+	flags.serverName = os.Getenv("NGSTONE_ADMIN_SERVER_NAME")
+	fs.StringVar(&flags.clientCert, "client-cert", flags.clientCert, "management client certificate PEM (defaults to NGSTONE_ADMIN_CLIENT_CERT)")
+	fs.StringVar(&flags.clientKey, "client-key", flags.clientKey, "management client private key PEM, readable only by its owner (defaults to NGSTONE_ADMIN_CLIENT_KEY)")
+	fs.StringVar(&flags.ca, "ca", flags.ca, "PEM bundle that verifies the server instead of the system roots (defaults to NGSTONE_ADMIN_CA)")
+	fs.StringVar(&flags.serverName, "server-name", flags.serverName, "TLS name to verify, for reaching one edge by address (defaults to NGSTONE_ADMIN_SERVER_NAME)")
 	return fs, flags
 }
 
+func adminTLSConfig(flags *adminCLIFlags) (*tls.Config, error) {
+	if flags.clientCert == "" && flags.clientKey == "" && flags.ca == "" && flags.serverName == "" {
+		return nil, nil
+	}
+	if (flags.clientCert == "") != (flags.clientKey == "") {
+		return nil, errors.New("--client-cert and --client-key must be set together")
+	}
+	config := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: flags.serverName}
+	if flags.clientKey != "" {
+		info, err := os.Stat(flags.clientKey)
+		if err != nil {
+			return nil, fmt.Errorf("reading client key: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("client key must be a regular file")
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			return nil, fmt.Errorf("client key %s must be readable only by its owner (chmod 600)", flags.clientKey)
+		}
+		pair, err := tls.LoadX509KeyPair(flags.clientCert, flags.clientKey)
+		if err != nil {
+			return nil, fmt.Errorf("loading client certificate: %w", err)
+		}
+		config.Certificates = []tls.Certificate{pair}
+	}
+	if flags.ca != "" {
+		data, err := os.ReadFile(flags.ca)
+		if err != nil {
+			return nil, fmt.Errorf("reading CA bundle: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(data) {
+			return nil, fmt.Errorf("CA bundle %s contains no certificates", flags.ca)
+		}
+		config.RootCAs = pool
+	}
+	return config, nil
+}
+
 func adminClient(flags *adminCLIFlags) (*adminapi.Client, error) {
-	client, err := adminapi.NewClient(flags.server, flags.token)
+	tlsConfig, err := adminTLSConfig(flags)
+	if err != nil {
+		return nil, err
+	}
+	token := flags.token
+	if flags.clientCert != "" {
+		token = ""
+	}
+	client, err := adminapi.NewClientTLS(flags.server, token, tlsConfig)
 	if err != nil {
 		return nil, err
 	}

@@ -2,6 +2,7 @@ package adminapi
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -206,27 +207,44 @@ type Client struct {
 }
 
 func NewClient(rawURL, token string) (*Client, error) {
+	return NewClientTLS(rawURL, token, nil)
+}
+
+func NewClientTLS(rawURL, token string, tlsConfig *tls.Config) (*Client, error) {
 	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		rawURL = DefaultBaseURL
 	}
 	if !strings.Contains(rawURL, "://") {
-		rawURL = "http://" + rawURL
+		if tlsConfig != nil {
+			rawURL = "https://" + rawURL
+		} else {
+			rawURL = "http://" + rawURL
+		}
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Scheme != "http" && u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("admin API server must be an http(s) URL without credentials, query, or fragment")
 	}
+	if tlsConfig != nil && u.Scheme != "https" {
+		return nil, errors.New("admin API TLS settings require an https server URL")
+	}
 	u.Path = strings.TrimRight(u.Path, "/")
-	return &Client{
-		baseURL: *u,
-		token:   strings.TrimSpace(token),
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
+	httpClient := &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
 		},
+	}
+	if tlsConfig != nil {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = tlsConfig
+		httpClient.Transport = transport
+	}
+	return &Client{
+		baseURL:    *u,
+		token:      strings.TrimSpace(token),
+		httpClient: httpClient,
 	}, nil
 }
 
