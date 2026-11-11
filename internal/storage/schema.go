@@ -161,6 +161,15 @@ func migrate(ctx context.Context, db *sql.DB, driver string) error {
 			return err
 		}
 	}
+	if applied < 5 {
+		statements := []string{
+			`CREATE TABLE IF NOT EXISTS edge_peers (edge_id TEXT PRIMARY KEY, peer_addr TEXT NOT NULL, spki_sha256 TEXT NOT NULL, expires_at TEXT NOT NULL)`,
+			`CREATE INDEX IF NOT EXISTS idx_edge_peers_expiry ON edge_peers(expires_at)`,
+		}
+		if err := applyMigration(ctx, db, driver, 5, statements); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

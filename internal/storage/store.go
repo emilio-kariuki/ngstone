@@ -228,6 +228,11 @@ func (s *Store) EdgeID() string {
 	return s.edgeID
 }
 
+func ResolveDriver(driver, dsn string) (string, error) {
+	resolved, _, err := resolveDatabase(driver, dsn)
+	return resolved, err
+}
+
 func resolveDatabase(driver, dsn string) (string, string, error) {
 	driver = strings.ToLower(strings.TrimSpace(driver))
 	dsn = strings.TrimSpace(dsn)

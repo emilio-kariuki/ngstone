@@ -2,53 +2,19 @@ package storage
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
-	"net/url"
-	"os"
 	"sync"
 	"testing"
 	"time"
 
 	"ngstone/internal/credentials"
+	"ngstone/internal/storage/storagetest"
 )
-
-const postgresTestEnv = "NGSTONE_TEST_POSTGRES_URL"
 
 func postgresSchemaDSN(t *testing.T) string {
 	t.Helper()
-	base := os.Getenv(postgresTestEnv)
-	if base == "" {
-		t.Skipf("%s is not set; skipping PostgreSQL storage test", postgresTestEnv)
-	}
-	suffix, err := randomID()
-	if err != nil {
-		t.Fatalf("random schema suffix: %v", err)
-	}
-	schema := "ngstone_test_" + suffix
-	admin, err := sql.Open("pgx", base)
-	if err != nil {
-		t.Fatalf("open admin connection: %v", err)
-	}
-	if _, err := admin.Exec(`CREATE SCHEMA ` + schema); err != nil {
-		admin.Close()
-		t.Fatalf("create schema: %v", err)
-	}
-	t.Cleanup(func() {
-		defer admin.Close()
-		if _, err := admin.Exec(`DROP SCHEMA ` + schema + ` CASCADE`); err != nil {
-			t.Errorf("drop schema %s: %v", schema, err)
-		}
-	})
-	parsed, err := url.Parse(base)
-	if err != nil {
-		t.Fatalf("parse %s: %v", postgresTestEnv, err)
-	}
-	query := parsed.Query()
-	query.Set("search_path", schema)
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
+	return storagetest.PostgresSchemaDSN(t)
 }
 
 func openPostgresTestStore(t *testing.T, dsn, edgeID string) *Store {
