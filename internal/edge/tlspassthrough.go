@@ -114,6 +114,9 @@ func (c *replayConn) Read(p []byte) (int, error) {
 	if len(c.buf) > 0 {
 		n := copy(p, c.buf)
 		c.buf = c.buf[n:]
+		if len(c.buf) == 0 {
+			c.buf = nil
+		}
 		return n, nil
 	}
 	return c.Conn.Read(p)

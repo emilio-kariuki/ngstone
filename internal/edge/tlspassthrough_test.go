@@ -987,3 +987,27 @@ func TestSpliceClosesClientWithoutCloseWrite(t *testing.T) {
 		t.Fatal("splice did not return after one side finished")
 	}
 }
+
+func TestReplayConnReleasesBufferOnceReplayed(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	rc := &replayConn{Conn: a, buf: []byte("hello")}
+	p := make([]byte, 3)
+	if n, err := rc.Read(p); err != nil || n != 3 {
+		t.Fatalf("first read = %d %v", n, err)
+	}
+	if rc.buf == nil {
+		t.Fatal("buffer released before it was fully replayed")
+	}
+	if n, err := rc.Read(p); err != nil || n != 2 || string(p[:2]) != "lo" {
+		t.Fatalf("second read = %d %v %q", n, err, p[:n])
+	}
+	if rc.buf != nil {
+		t.Fatal("buffer still held after it was fully replayed")
+	}
+	go b.Write([]byte("x"))
+	if n, err := rc.Read(p); err != nil || n != 1 || p[0] != 'x' {
+		t.Fatalf("read after replay = %d %v", n, err)
+	}
+}
