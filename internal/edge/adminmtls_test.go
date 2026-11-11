@@ -725,3 +725,147 @@ func TestOIDCFlowsStillServedOnOpsHandler(t *testing.T) {
 		t.Fatalf("logout = %d Location %q cookies %v, want 302 to / clearing 3 cookies", logout.Code, logout.Header().Get("Location"), logout.Result().Cookies())
 	}
 }
+
+func TestAdminMTLSRequiresTLS13(t *testing.T) {
+	s := newAdminMTLSTestServer(t)
+	h := newAdminMTLSHarness(t, s)
+	if s.cfg.PublicTLSConfig.MinVersion != 0 {
+		t.Fatalf("base config MinVersion = %#x, want unset", s.cfg.PublicTLSConfig.MinVersion)
+	}
+	h.start(t)
+	viewer := h.cert(t, "vera", oidc.RoleViewer)
+	roots := x509.NewCertPool()
+	roots.AddCert(h.serverCA.Cert)
+
+	handshake := func(maxVersion uint16) error {
+		conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", h.srv.Listener.Addr().String(), &tls.Config{
+			RootCAs:    roots,
+			ServerName: "127.0.0.1",
+			MaxVersion: maxVersion,
+			GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+				return &viewer, nil
+			},
+		})
+		if err == nil {
+			conn.Close()
+		}
+		return err
+	}
+	if err := handshake(0); err != nil {
+		t.Fatalf("TLS 1.3 handshake with a valid certificate: %v", err)
+	}
+	if err := handshake(tls.VersionTLS12); err == nil {
+		t.Fatal("handshake limited to TLS 1.2 succeeded, want it refused")
+	}
+}
+
+func TestAdminMTLSDisablesSessionResumption(t *testing.T) {
+	s := newAdminMTLSTestServer(t)
+	h := startAdminMTLS(t, s)
+	viewer := h.cert(t, "vera", oidc.RoleViewer)
+	client := h.client(t, &viewer)
+	transport := client.Transport.(*http.Transport)
+	transport.TLSClientConfig.ClientSessionCache = tls.NewLRUClientSessionCache(4)
+	transport.DisableKeepAlives = true
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		response, err := client.Get(h.srv.URL + "/api/v1/status")
+		if err != nil {
+			t.Fatalf("request %d: %v", attempt, err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("request %d status = %d, want 200", attempt, response.StatusCode)
+		}
+		if response.TLS.DidResume {
+			t.Fatalf("request %d resumed a TLS session, want a full handshake", attempt)
+		}
+	}
+	if !s.adminMTLSTLSConfig().SessionTicketsDisabled {
+		t.Fatal("adminMTLSTLSConfig left session tickets enabled")
+	}
+}
+
+func TestAdminMTLSHandlerVerifiesAtTheCurrentTime(t *testing.T) {
+	s := newAdminMTLSTestServer(t)
+	now := time.Now()
+	ca := adminapitest.NewCAWithValidity(t, now.Add(-24*time.Hour), now.Add(24*time.Hour))
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.Cert)
+	s.adminClientCAs = pool
+	handler := s.adminMTLSHandler()
+
+	expired := ca.Issue(t, adminapitest.CertOptions{CommonName: "alice", OUs: []string{oidc.RoleAdmin}, ExtKeyUsage: clientAuthUsage, NotBefore: now.Add(-2 * time.Hour), NotAfter: now.Add(-time.Hour)})
+	fresh := ca.Issue(t, adminapitest.CertOptions{CommonName: "alice", OUs: []string{oidc.RoleAdmin}, ExtKeyUsage: clientAuthUsage})
+	serve := func(leaf *x509.Certificate) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+		request.TLS = &tls.ConnectionState{HandshakeComplete: true, PeerCertificates: []*x509.Certificate{leaf}}
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	if recorder := serve(fresh.Leaf); recorder.Code != http.StatusOK {
+		t.Fatalf("valid certificate response = %d %s, want 200", recorder.Code, recorder.Body.String())
+	}
+	if recorder := serve(expired.Leaf); recorder.Code != http.StatusForbidden || adminErrorCode(t, recorder.Body.String()) != "certificate_rejected" {
+		t.Fatalf("expired certificate response = %d %s, want 403 certificate_rejected", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestAdminMTLSListenerLimitsConnections(t *testing.T) {
+	s := newAdminMTLSTestServer(t)
+	h := newAdminMTLSHarness(t, s)
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &http.Server{Handler: s.adminMTLSHandler()}
+	go srv.Serve(s.newAdminMTLSListener(raw))
+	t.Cleanup(func() { srv.Close() })
+	addr := raw.Addr().String()
+
+	idle := make([]net.Conn, adminMTLSMaxConns)
+	for i := range idle {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		idle[i] = conn
+	}
+
+	viewer := h.cert(t, "vera", oidc.RoleViewer)
+	roots := x509.NewCertPool()
+	roots.AddCert(h.serverCA.Cert)
+	extra, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial extra connection: %v", err)
+	}
+	t.Cleanup(func() { extra.Close() })
+	done := make(chan error, 1)
+	go func() {
+		done <- tls.Client(extra, &tls.Config{
+			RootCAs:    roots,
+			ServerName: "127.0.0.1",
+			GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+				return &viewer, nil
+			},
+		}).Handshake()
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("connection %d was served while %d idle connections held the limit (handshake error: %v)", adminMTLSMaxConns+1, adminMTLSMaxConns, err)
+	case <-time.After(400 * time.Millisecond):
+	}
+	idle[0].Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("handshake after a slot was released: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("handshake still blocked after a connection was closed")
+	}
+}

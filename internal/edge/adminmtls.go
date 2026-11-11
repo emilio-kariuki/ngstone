@@ -9,11 +9,14 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
 	"slices"
 	"time"
+
+	"golang.org/x/net/netutil"
 
 	"ngstone/internal/credentials"
 	"ngstone/internal/oidc"
@@ -148,6 +151,10 @@ func (s *Server) adminMTLSTLSConfig() *tls.Config {
 		return nil
 	}
 	return cfg
+}
+
+func (s *Server) newAdminMTLSListener(raw net.Listener) net.Listener {
+	return tls.NewListener(netutil.LimitListener(raw, adminMTLSMaxConns), s.adminMTLSTLSConfig())
 }
 
 func (s *Server) adminMTLSHandler() http.Handler {

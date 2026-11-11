@@ -26,7 +26,6 @@ type CA struct {
 type CertOptions struct {
 	CommonName  string
 	OUs         []string
-	DNSNames    []string
 	IPs         []net.IP
 	ExtKeyUsage []x509.ExtKeyUsage
 	IsCA        bool
@@ -45,16 +44,21 @@ func serial(t testing.TB) *big.Int {
 
 func NewCA(t testing.TB) *CA {
 	t.Helper()
+	now := time.Now()
+	return NewCAWithValidity(t, now.Add(-time.Minute), now.Add(24*time.Hour))
+}
+
+func NewCAWithValidity(t testing.TB, notBefore, notAfter time.Time) *CA {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate CA key: %v", err)
 	}
-	now := time.Now()
 	template := &x509.Certificate{
 		SerialNumber:          serial(t),
 		Subject:               pkix.Name{CommonName: "ngstone test CA"},
-		NotBefore:             now.Add(-time.Minute),
-		NotAfter:              now.Add(24 * time.Hour),
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 		IsCA:                  true,
@@ -96,7 +100,6 @@ func (ca *CA) Issue(t testing.TB, opts CertOptions) tls.Certificate {
 		NotAfter:              notAfter,
 		KeyUsage:              keyUsage,
 		ExtKeyUsage:           opts.ExtKeyUsage,
-		DNSNames:              opts.DNSNames,
 		IPAddresses:           opts.IPs,
 		BasicConstraintsValid: true,
 		IsCA:                  opts.IsCA,

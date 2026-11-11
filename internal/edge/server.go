@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
-	"golang.org/x/net/netutil"
 	"golang.org/x/sync/errgroup"
 
 	"ngstone/internal/credentials"
@@ -463,7 +462,7 @@ func (s *Server) Run(ctx context.Context) error {
 			closeAll()
 			return fmt.Errorf("edge: admin mtls listen: %w", listenErr)
 		}
-		adminMTLSLn = tls.NewListener(netutil.LimitListener(rawLn, adminMTLSMaxConns), s.adminMTLSTLSConfig())
+		adminMTLSLn = s.newAdminMTLSListener(rawLn)
 	}
 
 	if s.peers != nil {
