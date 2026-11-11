@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -347,6 +348,53 @@ func TestConcurrentClaimsAcrossStoreConnections(t *testing.T) {
 	}
 	if successes != 1 {
 		t.Fatalf("cross-connection claim successes = %d, want 1", successes)
+	}
+}
+
+func TestConcurrentHTTPAndTLSClaimsAcrossStoreConnections(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.db")
+	first := openTestStore(t, path)
+	second := openTestStore(t, path)
+	for i := 0; i < 20; i++ {
+		hostname := fmt.Sprintf("host-%d.example.com", i)
+		requests := []struct {
+			store *Store
+			kind  string
+		}{
+			{store: first, kind: "http"},
+			{store: second, kind: "tls"},
+		}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		results := make(chan error, len(requests))
+		for _, item := range requests {
+			item := item
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				_, err := item.store.AcquireLease(context.Background(), LeaseRequest{
+					Name: hostname, Hostname: hostname, Kind: item.kind, OwnerID: "owner",
+					InstanceID: "instance-" + item.kind, SessionID: "session-" + item.kind,
+					AccessJSON: `{}`, AllowCIDRsJSON: `[]`,
+				})
+				results <- err
+			}()
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+		successes := 0
+		for err := range results {
+			if err == nil {
+				successes++
+			} else if !errors.Is(err, ErrHostnameKindConflict) {
+				t.Fatalf("iteration %d: cross-kind claim error = %v", i, err)
+			}
+		}
+		if successes != 1 {
+			t.Fatalf("iteration %d: cross-kind claim successes = %d, want 1", i, successes)
+		}
 	}
 }
 

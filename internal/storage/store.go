@@ -32,6 +32,8 @@ const (
 	DefaultLeaseTTL = 45 * time.Second
 )
 
+const hostnameKindLockSpace int32 = 0x6e670001
+
 var (
 	ErrTunnelConflict          = errors.New("storage: tunnel lease conflict")
 	ErrConnectorConfigMismatch = errors.New("storage: connector configuration mismatch")
@@ -749,7 +751,11 @@ func (s *Store) acquireLeaseOnce(ctx context.Context, request LeaseRequest) (Lea
 	if request.Policy != nil {
 		request.PolicyDigest = policyDigest
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
+	var txOptions *sql.TxOptions
+	if s.driver == DriverPostgres {
+		txOptions = &sql.TxOptions{Isolation: sql.LevelReadCommitted}
+	}
+	tx, err := s.db.BeginTx(ctx, txOptions)
 	if err != nil {
 		return Lease{}, fmt.Errorf("storage: begin lease: %w", err)
 	}
@@ -854,6 +860,11 @@ func (s *Store) checkHostnameKindConflict(ctx context.Context, tx *sql.Tx, reque
 		other = "http"
 	default:
 		return nil
+	}
+	if s.driver == DriverPostgres {
+		if _, err := tx.ExecContext(ctx, s.bind(`SELECT pg_advisory_xact_lock($1, hashtext($2))`), hostnameKindLockSpace, request.Hostname); err != nil {
+			return fmt.Errorf("storage: lock hostname: %w", err)
+		}
 	}
 	var active int
 	err := tx.QueryRowContext(ctx, s.bind(`SELECT COUNT(*) FROM connector_leases l JOIN tunnels t ON t.id = l.tunnel_id WHERE t.hostname = $1 AND t.kind = $2 AND l.expires_at > $3`), request.Hostname, other, nowString(now)).Scan(&active)
