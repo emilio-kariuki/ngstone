@@ -182,6 +182,11 @@ func (c *capturedRequest) last() (http.Header, int) {
 
 func bindVisitorTunnel(t *testing.T, s *Server, host string, bind proto.Bind) *capturedRequest {
 	t.Helper()
+	return bindVisitorTunnelWithPolicy(t, s, host, bind, nil)
+}
+
+func bindVisitorTunnelWithPolicy(t *testing.T, s *Server, host string, bind proto.Bind, trafficPolicy *policy.Policy) *capturedRequest {
+	t.Helper()
 	captured := &capturedRequest{}
 	as := newFakeAgentSession(t, "visitor-"+host, func(w http.ResponseWriter, r *http.Request) {
 		io.Copy(io.Discard, r.Body)
@@ -195,7 +200,7 @@ func bindVisitorTunnel(t *testing.T, s *Server, host string, bind proto.Bind) *c
 	if err != nil {
 		t.Fatalf("buildAccessControl: %v", err)
 	}
-	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: host, Session: as, Takeover: true, Access: ac}); err != nil {
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: host, Session: as, Takeover: true, Access: ac, TrafficPolicy: trafficPolicy}); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
 	return captured
@@ -264,7 +269,7 @@ func visitorLoginTicket(t *testing.T, s *Server, idp *fakeVisitorIdP, tunnelURL 
 	}
 	authorizeResp.Body.Close()
 	callbackURL := authorizeResp.Header.Get("Location")
-	if !strings.HasPrefix(callbackURL, "http://example.com"+visitorDefaultCallback+"?") {
+	if !strings.HasPrefix(callbackURL, s.visitor.callback.Scheme+"://example.com"+visitorDefaultCallback+"?") {
 		t.Fatalf("IdP redirect = %q, want apex callback", callbackURL)
 	}
 	callback := visitorRequest(t, s, http.MethodGet, callbackURL, htmlAccept(), stateCookie)
@@ -1045,5 +1050,140 @@ func TestVisitorTicketExpiry(t *testing.T) {
 	expired := finish(time.Now().Add(-time.Minute))
 	if expired.Code != http.StatusBadRequest || responseCookie(expired.Result(), v.cookieName(visitorSessionCookie)) != nil {
 		t.Fatalf("expired ticket = %d, want 400 and no session", expired.Code)
+	}
+}
+
+func newSecureVisitorTestServer(t *testing.T, idp *fakeVisitorIdP) *Server {
+	t.Helper()
+	s := newVisitorTestServer(t, idp)
+	v, err := newVisitorLogin(Config{
+		Domain:       "example.com",
+		PublicScheme: "https",
+		Insecure:     false,
+		VisitorOIDC: &oidc.Config{
+			Issuer:        idp.server.URL,
+			ClientID:      "visitor-client",
+			ClientSecret:  "visitor-secret",
+			CookieSecret:  []byte(strings.Repeat("v", 32)),
+			AllowInsecure: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("newVisitorLogin: %v", err)
+	}
+	s.visitor = v
+	return s
+}
+
+func clearingCookie(rec *httptest.ResponseRecorder, name string) *http.Cookie {
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == name && cookie.MaxAge < 0 {
+			return cookie
+		}
+	}
+	return nil
+}
+
+func assertHostScopedCookie(t *testing.T, label string, cookie *http.Cookie, name string, clearing bool) {
+	t.Helper()
+	if cookie == nil {
+		t.Fatalf("%s: cookie %q missing", label, name)
+	}
+	if cookie.Name != name || !strings.HasPrefix(cookie.Name, "__Host-") || !cookie.Secure || cookie.Path != "/" || cookie.Domain != "" || !cookie.HttpOnly || (clearing && cookie.MaxAge >= 0) || (!clearing && cookie.MaxAge < 0) {
+		t.Fatalf("%s: cookie = %+v, want %s with Secure, Path=/, no Domain, clearing=%v", label, cookie, name, clearing)
+	}
+}
+
+func TestVisitorLoginSecureConstructorIssuesHostPrefixedCookies(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newSecureVisitorTestServer(t, idp)
+	if !s.visitor.secure {
+		t.Fatal("visitor login built with Insecure=false and an https callback is not secure")
+	}
+	bindVisitorTunnel(t, s, "app.example.com", proto.Bind{OIDC: &proto.OIDCLogin{}})
+
+	callback, finishURL, bind := visitorLoginTicket(t, s, idp, "http://app.example.com/")
+	assertHostScopedCookie(t, "binding", bind, "__Host-"+visitorBindCookie, false)
+
+	var stateName string
+	for _, cookie := range callback.Result().Cookies() {
+		if strings.HasPrefix(cookie.Name, "__Host-"+visitorStateCookiePrefix) {
+			stateName = cookie.Name
+		}
+	}
+	assertHostScopedCookie(t, "state clear", clearingCookie(callback, stateName), stateName, true)
+
+	finish := visitorRequest(t, s, http.MethodGet, finishURL, htmlAccept(), bind)
+	session := responseCookie(finish.Result(), "__Host-"+visitorSessionCookie)
+	assertHostScopedCookie(t, "session", session, "__Host-"+visitorSessionCookie, false)
+	assertHostScopedCookie(t, "binding clear", clearingCookie(finish, bind.Name), "__Host-"+visitorBindCookie, true)
+
+	logout := visitorRequest(t, s, http.MethodGet, "https://app.example.com"+visitorLogoutPath, htmlAccept(), session)
+	assertHostScopedCookie(t, "session clear", clearingCookie(logout, session.Name), "__Host-"+visitorSessionCookie, true)
+}
+
+func TestVisitorFinishRefusesEmptyBindingCookie(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	bindVisitorTunnel(t, s, "app.example.com", proto.Bind{OIDC: &proto.OIDCLogin{}})
+	v := s.visitor
+
+	id, err := randomToken(24)
+	if err != nil {
+		t.Fatalf("ticket id: %v", err)
+	}
+	sealed, err := v.codec.Encode(visitorToken{Purpose: visitorPurposeTicket, Host: "app.example.com", Path: "/", ID: id, Subject: "sub-alice", Email: "alice@example.org", EmailVerified: true, ExpiresAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatalf("seal ticket: %v", err)
+	}
+	finishURL := "http://app.example.com" + visitorFinishPath + "?" + url.Values{"ticket": {sealed}}.Encode()
+	empty := &http.Cookie{Name: v.cookieName(visitorBindCookie), Value: ""}
+	rec := visitorRequest(t, s, http.MethodGet, finishURL, htmlAccept(), empty)
+	if rec.Code != http.StatusBadRequest || responseCookie(rec.Result(), v.cookieName(visitorSessionCookie)) != nil {
+		t.Fatalf("ticket with an empty binding cookie = %d, want 400 and no session", rec.Code)
+	}
+}
+
+func TestClientSentIdentityHeaderCannotSatisfyPolicyOnOpenTunnel(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	p, err := policy.Parse([]byte(`{"default_action":"deny","rules":[{"action":"allow","header":"X-Ngstone-User-Email","header_value":"bob@example.org"}]}`))
+	if err != nil {
+		t.Fatalf("policy.Parse: %v", err)
+	}
+	captured := bindVisitorTunnelWithPolicy(t, s, "open.example.com", proto.Bind{}, p)
+	rec := visitorRequest(t, s, http.MethodGet, "http://open.example.com/", http.Header{"X-Ngstone-User-Email": {"bob@example.org"}})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("client-sent identity header against a header policy = %d, want 403", rec.Code)
+	}
+	if _, hits := captured.last(); hits != 0 {
+		t.Fatalf("origin reached %d times", hits)
+	}
+}
+
+func TestPolicyCannotSetIdentityHeaderSpellingsOnWalledTunnel(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	p, err := policy.Parse([]byte(`{"default_action":"allow","rules":[{"action":"transform","request_headers":{"set":{"X_Ngstone_User_Email":"ceo@corp.example","X.Ngstone.User.Email":"ceo@corp.example"}}}]}`))
+	if err != nil {
+		t.Fatalf("policy.Parse: %v", err)
+	}
+	captured := bindVisitorTunnelWithPolicy(t, s, "pol.example.com", proto.Bind{OIDC: &proto.OIDCLogin{}}, p)
+	idp.setUser("alice@example.org", true)
+	_, session := visitorLoginFlow(t, s, idp, "http://pol.example.com/")
+	rec := visitorRequest(t, s, http.MethodGet, "http://pol.example.com/api", http.Header{"Accept": {"application/json"}}, session)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	got, _ := captured.last()
+	if values := got.Values(VisitorEmailHeader); len(values) != 1 || values[0] != "alice@example.org" {
+		t.Fatalf("email header = %q, want exactly the real identity", values)
+	}
+	for name, values := range got {
+		for _, value := range values {
+			if strings.Contains(value, "ceo@corp.example") {
+				t.Fatalf("policy-set value %q reached the upstream in header %q", value, name)
+			}
+		}
 	}
 }
