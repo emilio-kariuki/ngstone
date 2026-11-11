@@ -646,6 +646,10 @@ func assertAssertedIdentity(t *testing.T, s *Server, idp *fakeVisitorIdP, captur
 		"X_Ngstone_User_Email":  {"ceo@corp.example"},
 		"X-Ngstone-User-Email":  {"mallory@evil.test"},
 		"X_Ngstone_User_Groups": {"admins"},
+		"X.Ngstone.User.Email":  {"ceo@corp.example"},
+		"X!Ngstone!User!Email":  {"ceo@corp.example"},
+		"X_Ngstone.User-Email":  {"ceo@corp.example"},
+		"X.Ngstone.User.Groups": {"admins"},
 	}
 	rec := visitorRequest(t, s, http.MethodGet, "http://"+host+"/api", header, session)
 	if rec.Code != http.StatusOK {
@@ -662,10 +666,83 @@ func assertAssertedIdentity(t *testing.T, s *Server, idp *fakeVisitorIdP, captur
 		t.Fatalf("name header = %q, want exactly the real identity", values)
 	}
 	for name, values := range got {
-		lower := strings.ReplaceAll(strings.ToLower(name), "_", "-")
-		if strings.HasPrefix(lower, "x-ngstone-user-") && name != VisitorEmailHeader && name != VisitorSubjectHeader && name != VisitorNameHeader {
+		for _, value := range values {
+			if strings.Contains(value, "ceo@corp.example") || strings.Contains(value, "mallory@evil.test") || value == "admins" {
+				t.Fatalf("spoofed identity value %q reached the upstream in header %q", value, name)
+			}
+		}
+		if strings.HasPrefix(foldHeaderName(name), "x-ngstone-user-") && name != VisitorEmailHeader && name != VisitorSubjectHeader && name != VisitorNameHeader {
 			t.Fatalf("spoofed identity header %q=%q reached the upstream", name, values)
 		}
+	}
+}
+
+func assertOnlyEdgeReservedHeaders(t *testing.T, got http.Header, allowed ...string) {
+	t.Helper()
+	for name, values := range got {
+		for _, value := range values {
+			if strings.Contains(value, "6.6.6.6") || value == "spoof" || value == "6666" {
+				t.Fatalf("header %q carries a client-sent value %q", name, value)
+			}
+		}
+		if !edgeReservedHeader(name) {
+			continue
+		}
+		permitted := false
+		for _, a := range allowed {
+			permitted = permitted || name == a
+		}
+		if !permitted {
+			t.Fatalf("client-sent reserved header %q=%q reached the upstream", name, values)
+		}
+	}
+}
+
+func spoofedReservedHeaders() http.Header {
+	return http.Header{
+		"X_Forwarded_For":       {"6.6.6.6"},
+		"X.Real.Ip":             {"6.6.6.6"},
+		"X_Ngstone_Client_Addr": {"6.6.6.6"},
+		"X-Ngstone-Request-Id":  {"spoof"},
+		"X-Ngstone-Client-Addr": {"6.6.6.6"},
+		"X_Forwarded_Proto":     {"spoof"},
+		"X-Forwarded-Port":      {"6666"},
+	}
+}
+
+func TestEdgeReservedHeadersNeverReachTheUpstreamOverHTTP1(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	captured := bindVisitorTunnel(t, s, "open.example.com", proto.Bind{})
+	rec := visitorRequest(t, s, http.MethodGet, "http://open.example.com/", spoofedReservedHeaders())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	got, _ := captured.last()
+	assertOnlyEdgeReservedHeaders(t, got, "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto")
+	if got.Get("X-Forwarded-For") != "9.9.9.9" || got.Get("X-Forwarded-Host") != "open.example.com" || got.Get("X-Forwarded-Proto") != "http" {
+		t.Fatalf("forwarded headers = %v", got)
+	}
+}
+
+func TestEdgeReservedHeadersNeverReachTheUpstreamOverHTTP2(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	captured := bindVisitorH2Tunnel(t, s, "open.example.com", proto.Bind{})
+	rec := visitorRequest(t, s, http.MethodGet, "http://open.example.com/", spoofedReservedHeaders())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	got, _ := captured.last()
+	assertOnlyEdgeReservedHeaders(t, got, "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Ngstone-Request-Id", "X-Ngstone-Client-Addr")
+	if values := got.Values("X-Ngstone-Client-Addr"); len(values) != 1 || values[0] != "9.9.9.9:4000" {
+		t.Fatalf("client addr = %q, want only the edge's value", values)
+	}
+	if values := got.Values("X-Ngstone-Request-Id"); len(values) != 1 || values[0] == "" || values[0] == "spoof" {
+		t.Fatalf("request id = %q, want only the edge's value", values)
+	}
+	if got.Get("X-Forwarded-For") != "9.9.9.9" {
+		t.Fatalf("X-Forwarded-For = %q", got.Get("X-Forwarded-For"))
 	}
 }
 

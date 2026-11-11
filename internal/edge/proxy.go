@@ -184,7 +184,7 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		http.Error(rec, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	stripVisitorIdentityHeaders(r.Header)
+	stripHeadersWithPrefix(r.Header, edgeHeaderPrefix)
 	var identity *visitorToken
 	if rule := ac.loginRule(); rule != nil {
 		session, ok := s.authorizeVisitor(rec, r, rule)
@@ -344,8 +344,8 @@ func newBindingProxyWithMetadata(transport http.RoundTripper, includeMetadata bo
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(&url.URL{Scheme: "http", Host: "tunnel-agent"})
 			pr.Out.Host = pr.In.Host
+			stripEdgeReservedHeaders(pr.Out.Header)
 			pr.SetXForwarded()
-			pr.Out.Header.Del("X-Real-IP")
 			if includeMetadata {
 				if reqID, _ := pr.Out.Context().Value(ctxKeyReqID).(string); reqID != "" {
 					pr.Out.Header.Set(inspect.RequestIDHeader, reqID)
@@ -354,11 +354,10 @@ func newBindingProxyWithMetadata(transport http.RoundTripper, includeMetadata bo
 					pr.Out.Header.Set(inspect.ClientAddrHeader, clientAddr)
 				}
 			}
-			stripVisitorIdentityHeaders(pr.Out.Header)
 			if decision, _ := pr.Out.Context().Value(ctxKeyPolicyDecision).(*policy.Decision); decision != nil {
 				decision.ApplyRequestHeaders(pr.Out.Header)
 			}
-			stripVisitorIdentityHeaders(pr.Out.Header)
+			stripHeadersWithPrefix(pr.Out.Header, visitorIdentityPrefix)
 			if identity, _ := pr.Out.Context().Value(ctxKeyVisitorIdentity).(*visitorToken); identity != nil {
 				setVisitorIdentity(pr.Out.Header, *identity)
 			}

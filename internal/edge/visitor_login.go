@@ -27,7 +27,8 @@ const (
 	visitorFinishPath         = "/.ngstone/auth/finish"
 	visitorLogoutPath         = "/.ngstone/auth/logout"
 	visitorDefaultCallback    = "/.ngstone/auth/callback"
-	visitorIdentityPrefix     = "X-Ngstone-User-"
+	visitorIdentityPrefix     = "x-ngstone-user-"
+	edgeHeaderPrefix          = "x-ngstone-"
 	VisitorEmailHeader        = "X-Ngstone-User-Email"
 	VisitorSubjectHeader      = "X-Ngstone-User-Subject"
 	VisitorNameHeader         = "X-Ngstone-User-Name"
@@ -447,9 +448,32 @@ func acceptsHTML(r *http.Request) bool {
 	return false
 }
 
-func stripVisitorIdentityHeaders(header http.Header) {
+func foldHeaderName(name string) string {
+	folded := []byte(strings.ToLower(name))
+	for i, c := range folded {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') {
+			folded[i] = '-'
+		}
+	}
+	return string(folded)
+}
+
+func edgeReservedHeader(name string) bool {
+	folded := foldHeaderName(name)
+	return folded == "forwarded" || folded == "x-real-ip" || strings.HasPrefix(folded, "x-forwarded-") || strings.HasPrefix(folded, edgeHeaderPrefix)
+}
+
+func stripEdgeReservedHeaders(header http.Header) {
 	for name := range header {
-		if strings.HasPrefix(strings.ReplaceAll(strings.ToLower(name), "_", "-"), "x-ngstone-user-") {
+		if edgeReservedHeader(name) {
+			delete(header, name)
+		}
+	}
+}
+
+func stripHeadersWithPrefix(header http.Header, prefix string) {
+	for name := range header {
+		if strings.HasPrefix(foldHeaderName(name), prefix) {
 			delete(header, name)
 		}
 	}
