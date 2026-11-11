@@ -2,6 +2,7 @@ package policy
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
@@ -426,5 +427,81 @@ func TestValidationRejectsCORSValuesThatCanNeverMatch(t *testing.T) {
 	}
 	if _, err := Parse([]byte(`{"rules":[],"cors":{"allowed_origins":["*"],"allowed_headers":["*"]}}`)); err != nil {
 		t.Fatalf("bare wildcard origin rejected: %v", err)
+	}
+}
+
+func TestValidationLimits(t *testing.T) {
+	removeList := func(n int) string {
+		names := make([]string, n)
+		for i := range names {
+			names[i] = fmt.Sprintf(`"X-H%d"`, i)
+		}
+		return strings.Join(names, ",")
+	}
+	originList := func(n int) string {
+		origins := make([]string, n)
+		for i := range origins {
+			origins[i] = fmt.Sprintf(`"https://a%d.example"`, i)
+		}
+		return strings.Join(origins, ",")
+	}
+	headerList := func(n int) string {
+		names := make([]string, n)
+		for i := range names {
+			names[i] = fmt.Sprintf(`"X-E%d"`, i)
+		}
+		return strings.Join(names, ",")
+	}
+	redirectURL := func(n int) string {
+		prefix := "https://example.com/"
+		return prefix + strings.Repeat("a", n-len(prefix))
+	}
+	cases := []struct {
+		name  string
+		build func(over bool) string
+	}{
+		{"header actions", func(over bool) string {
+			n := maxHeaderActions
+			if over {
+				n++
+			}
+			return `{"rules":[{"action":"transform","request_headers":{"remove":[` + removeList(n) + `]}}]}`
+		}},
+		{"cors origins", func(over bool) string {
+			n := maxCORSEntries
+			if over {
+				n++
+			}
+			return `{"rules":[],"cors":{"allowed_origins":[` + originList(n) + `]}}`
+		}},
+		{"cors exposed headers", func(over bool) string {
+			n := maxCORSEntries
+			if over {
+				n++
+			}
+			return `{"rules":[],"cors":{"allowed_origins":["https://a.example"],"exposed_headers":[` + headerList(n) + `]}}`
+		}},
+		{"redirect url", func(over bool) string {
+			n := maxRedirectURL
+			if over {
+				n++
+			}
+			return `{"rules":[{"action":"redirect","redirect_url":"` + redirectURL(n) + `"}]}`
+		}},
+		{"header value", func(over bool) string {
+			n := maxHeaderValue
+			if over {
+				n++
+			}
+			return `{"rules":[{"action":"transform","request_headers":{"set":{"X-A":"` + strings.Repeat("a", n) + `"}}}]}`
+		}},
+	}
+	for _, tc := range cases {
+		if _, err := Parse([]byte(tc.build(false))); err != nil {
+			t.Fatalf("%s: value at the limit rejected: %v", tc.name, err)
+		}
+		if _, err := Parse([]byte(tc.build(true))); err == nil {
+			t.Fatalf("%s: value over the limit accepted", tc.name)
+		}
 	}
 }

@@ -1,14 +1,19 @@
 package edge
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"ngstone/internal/policy"
 	"ngstone/internal/proto"
@@ -118,8 +123,8 @@ func TestHandlePublicAppliesTrafficPolicyTransforms(t *testing.T) {
 	if tags := got.Values("X-Tag"); len(tags) != 2 || tags[0] != "client" || tags[1] != "edge" {
 		t.Fatalf("X-Tag = %q", tags)
 	}
-	if xff := got.Get("X-Forwarded-For"); xff != "6.6.6.6, 9.9.9.9" && xff != "9.9.9.9" {
-		t.Fatalf("X-Forwarded-For = %q", xff)
+	if xff := got.Get("X-Forwarded-For"); xff != "9.9.9.9" {
+		t.Fatalf("X-Forwarded-For = %q, want 9.9.9.9", xff)
 	}
 	if rec.Header().Get("Server") != "" || rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("X-Edge") != "1" {
 		t.Fatalf("response headers = %v", rec.Header())
@@ -282,6 +287,294 @@ func TestHandlePublicCORSPreflightAndResponses(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("agent calls = %d, want 1", calls.Load())
+	}
+}
+
+func corsPreflightRequest(remoteAddr string) *http.Request {
+	req := httptest.NewRequest(http.MethodOptions, "http://svc.example.com/api/items", nil)
+	req.Host = "svc.example.com"
+	req.RemoteAddr = remoteAddr
+	req.Header.Set("Origin", "https://app.example")
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	return req
+}
+
+func TestHandlePublicCORSPreflightHonoursCIDRAllowList(t *testing.T) {
+	p, err := policy.Parse([]byte(`{"rules":[],"cors":{"allowed_origins":["https://app.example"]}}`))
+	if err != nil {
+		t.Fatalf("policy.Parse: %v", err)
+	}
+	ac, err := buildAccessControl(proto.Bind{AllowCIDRs: []string{"10.0.0.0/8"}})
+	if err != nil {
+		t.Fatalf("buildAccessControl: %v", err)
+	}
+	var calls atomic.Int64
+	s := newServerForTest(LimitsConfig{PerIPRate: 1000, PerIPBurst: 1000})
+	as := newFakeAgentSession(t, "cors-cidr-instance", func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+	})
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "svc.example.com", Session: as, Takeover: true, Access: ac, TrafficPolicy: p}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	s.handlePublic(rec, corsPreflightRequest("10.1.2.3:5555"))
+	if rec.Code != http.StatusNoContent || rec.Header().Get("Access-Control-Allow-Origin") != "https://app.example" {
+		t.Fatalf("allowed client preflight = %d %v, want 204 with CORS headers", rec.Code, rec.Header())
+	}
+
+	rec = httptest.NewRecorder()
+	s.handlePublic(rec, corsPreflightRequest("9.9.9.9:5555"))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("preflight from outside allow_cidrs = %d, want 403", rec.Code)
+	}
+	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("forbidden preflight carried CORS headers: %v", rec.Header())
+	}
+	if calls.Load() != 0 {
+		t.Fatal("preflight reached the agent")
+	}
+}
+
+func TestHandlePublicCORSPreflightHonoursRateLimit(t *testing.T) {
+	p, err := policy.Parse([]byte(`{"rules":[],"cors":{"allowed_origins":["https://app.example"]}}`))
+	if err != nil {
+		t.Fatalf("policy.Parse: %v", err)
+	}
+	s := newServerForTest(LimitsConfig{PerIPRate: 0.01, PerIPBurst: 2})
+	as := newEchoAgentSession(t, "cors-rate-instance")
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "svc.example.com", Session: as, Takeover: true, TrafficPolicy: p}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		s.handlePublic(rec, corsPreflightRequest("9.9.9.9:5555"))
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("preflight %d within burst = %d, want 204", i+1, rec.Code)
+		}
+	}
+	rec := httptest.NewRecorder()
+	s.handlePublic(rec, corsPreflightRequest("9.9.9.9:5555"))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("preflight past burst = %d, want 429", rec.Code)
+	}
+	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("rate-limited preflight carried CORS headers: %v", rec.Header())
+	}
+}
+
+func TestHandlePublicRedirectDoesNotBypassBasicAuth(t *testing.T) {
+	p, err := policy.Parse([]byte(`{"rules":[{"action":"redirect","path_prefix":"/old","redirect_url":"/new$path"}]}`))
+	if err != nil {
+		t.Fatalf("policy.Parse: %v", err)
+	}
+	ac, err := buildAccessControl(proto.Bind{BasicAuthSHA256: []string{policyTestDigest("alice:secret")}})
+	if err != nil {
+		t.Fatalf("buildAccessControl: %v", err)
+	}
+	s := newServerForTest(LimitsConfig{PerIPRate: 1000, PerIPBurst: 1000})
+	as := newEchoAgentSession(t, "redirect-auth-instance")
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "svc.example.com", Session: as, Takeover: true, Access: ac, TrafficPolicy: p}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://svc.example.com/old/page", nil)
+	req.Host = "svc.example.com"
+	req.RemoteAddr = "9.9.9.9:5555"
+	rec := httptest.NewRecorder()
+	s.handlePublic(rec, req)
+	if rec.Code != http.StatusUnauthorized || rec.Header().Get("Location") != "" {
+		t.Fatalf("unauthenticated redirect request = %d Location=%q, want 401 without Location", rec.Code, rec.Header().Get("Location"))
+	}
+
+	authed := httptest.NewRequest(http.MethodGet, "http://svc.example.com/old/page", nil)
+	authed.Host = "svc.example.com"
+	authed.RemoteAddr = "9.9.9.9:5555"
+	authed.SetBasicAuth("alice", "secret")
+	rec = httptest.NewRecorder()
+	s.handlePublic(rec, authed)
+	if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/new/page" {
+		t.Fatalf("authenticated redirect request = %d %q, want 302 /new/page", rec.Code, rec.Header().Get("Location"))
+	}
+}
+
+func TestHandlePublicRedirectDoesNotBypassVisitorLogin(t *testing.T) {
+	p, err := policy.Parse([]byte(`{"rules":[{"action":"redirect","path_prefix":"/old","redirect_url":"https://elsewhere.example/new$path"}]}`))
+	if err != nil {
+		t.Fatalf("policy.Parse: %v", err)
+	}
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	ac, err := buildAccessControl(proto.Bind{OIDC: &proto.OIDCLogin{}})
+	if err != nil {
+		t.Fatalf("buildAccessControl: %v", err)
+	}
+	as := newEchoAgentSession(t, "redirect-login-instance")
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "app.example.com", Session: as, Takeover: true, Access: ac, TrafficPolicy: p}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+
+	browser := visitorRequest(t, s, http.MethodGet, "http://app.example.com/old/page", htmlAccept())
+	location, _ := url.Parse(browser.Header().Get("Location"))
+	if browser.Code != http.StatusFound || location.Host != "example.com" || location.Path != visitorStartPath {
+		t.Fatalf("browser = %d Location=%q, want the login wall redirect", browser.Code, browser.Header().Get("Location"))
+	}
+	api := visitorRequest(t, s, http.MethodGet, "http://app.example.com/old/page", http.Header{"Accept": {"application/json"}})
+	if api.Code != http.StatusUnauthorized || api.Header().Get("Location") != "" {
+		t.Fatalf("API client = %d Location=%q, want 401 without Location", api.Code, api.Header().Get("Location"))
+	}
+}
+
+func TestHandlePublicPolicyResponseHeadersOnUpgrade(t *testing.T) {
+	p, err := policy.Parse([]byte(`{
+  "rules": [{"action": "transform", "response_headers": {"set": {"X-Edge": "1"}, "remove": ["Server"]}}],
+  "cors": {"allowed_origins": ["https://app.example"]}
+}`))
+	if err != nil {
+		t.Fatalf("policy.Parse: %v", err)
+	}
+	s := newServerForTest(LimitsConfig{PerIPRate: 1000, PerIPBurst: 1000})
+	as := newFakeAgentSession(t, "upgrade-policy-instance", func(w http.ResponseWriter, r *http.Request) {
+		conn, rw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		io.WriteString(rw, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: test\r\nConnection: Upgrade\r\nServer: local-app\r\n\r\n")
+		rw.Flush()
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(rw, buf); err != nil {
+			return
+		}
+		rw.Write(buf)
+		rw.Flush()
+	})
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "svc.example.com", Session: as, Takeover: true, TrafficPolicy: p}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	public := httptest.NewServer(http.HandlerFunc(s.handlePublic))
+	t.Cleanup(public.Close)
+
+	conn, err := net.Dial("tcp", public.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	io.WriteString(conn, "GET / HTTP/1.1\r\nHost: svc.example.com\r\nOrigin: https://app.example\r\nConnection: Upgrade\r\nUpgrade: test\r\n\r\n")
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101", resp.StatusCode)
+	}
+	if resp.Header.Get("X-Edge") != "1" || resp.Header.Get("Server") != "" || resp.Header.Get("Access-Control-Allow-Origin") != "https://app.example" {
+		t.Fatalf("upgrade response headers = %v", resp.Header)
+	}
+	io.WriteString(conn, "ping")
+	echo := make([]byte, 4)
+	if _, err := io.ReadFull(br, echo); err != nil || string(echo) != "ping" {
+		t.Fatalf("echo = %q err=%v, want ping", echo, err)
+	}
+}
+
+func TestHandlePublicPolicyResponseHeadersOnEventStream(t *testing.T) {
+	p, err := policy.Parse([]byte(`{
+  "rules": [{"action": "transform", "response_headers": {"set": {"X-Edge": "1"}, "remove": ["Server"]}}],
+  "cors": {"allowed_origins": ["https://app.example"]}
+}`))
+	if err != nil {
+		t.Fatalf("policy.Parse: %v", err)
+	}
+	release := make(chan struct{})
+	s := newServerForTest(LimitsConfig{PerIPRate: 1000, PerIPBurst: 1000})
+	as := newFakeAgentSession(t, "sse-policy-instance", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Server", "local-app")
+		io.WriteString(w, "data: one\n\n")
+		http.NewResponseController(w).Flush()
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
+		}
+		io.WriteString(w, "data: two\n\n")
+	})
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "svc.example.com", Session: as, Takeover: true, TrafficPolicy: p}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	public := httptest.NewServer(http.HandlerFunc(s.handlePublic))
+	t.Cleanup(public.Close)
+
+	req, err := http.NewRequest(http.MethodGet, public.URL+"/events", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Host = "svc.example.com"
+	req.Header.Set("Origin", "https://app.example")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.Header.Get("X-Edge") != "1" || resp.Header.Get("Server") != "" || resp.Header.Get("Access-Control-Allow-Origin") != "https://app.example" {
+		t.Fatalf("event stream response headers = %v", resp.Header)
+	}
+	br := bufio.NewReader(resp.Body)
+	if line, err := br.ReadString('\n'); err != nil || line != "data: one\n" {
+		t.Fatalf("first event = %q err=%v", line, err)
+	}
+	close(release)
+	rest, err := io.ReadAll(br)
+	if err != nil || !strings.Contains(string(rest), "data: two") {
+		t.Fatalf("rest of stream = %q err=%v", rest, err)
+	}
+}
+
+func TestHandlePublicPolicyResponseHeadersWithHTTP2Trailers(t *testing.T) {
+	p, err := policy.Parse([]byte(`{
+  "rules": [{"action": "transform", "response_headers": {"set": {"X-Edge": "1"}, "remove": ["Server"]}}],
+  "cors": {"allowed_origins": ["https://app.example"]}
+}`))
+	if err != nil {
+		t.Fatalf("policy.Parse: %v", err)
+	}
+	as := newFakeH2AgentSession(t, "h2-policy-instance", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Server", "local-app")
+		w.Header().Set("Trailer", "Grpc-Status")
+		w.WriteHeader(http.StatusOK)
+		w.Write(body)
+		w.Header().Set("Grpc-Status", "0")
+	}))
+	s := newServerForTest(LimitsConfig{PerIPRate: 1000, PerIPBurst: 1000})
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "grpc.example.com", Session: as, Takeover: true, HTTP2: true, TrafficPolicy: p}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	t.Cleanup(func() { s.registry.ReleaseSession(as) })
+
+	req := httptest.NewRequest(http.MethodPost, "http://grpc.example.com/test.Service/Call", strings.NewReader("request"))
+	req.Host = "grpc.example.com"
+	req.Proto = "HTTP/2.0"
+	req.ProtoMajor = 2
+	req.RemoteAddr = "203.0.113.20:4321"
+	req.Header.Set("Origin", "https://app.example")
+	rec := httptest.NewRecorder()
+	s.handlePublic(rec, req)
+
+	if rec.Code != http.StatusOK || rec.Body.String() != "request" {
+		t.Fatalf("response = %d %q, want 200 request", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("X-Edge") != "1" || rec.Header().Get("Server") != "" || rec.Header().Get("Access-Control-Allow-Origin") != "https://app.example" {
+		t.Fatalf("response headers = %v", rec.Header())
+	}
+	if got := rec.Result().Trailer.Get("Grpc-Status"); got != "0" {
+		t.Fatalf("Grpc-Status trailer = %q, want 0; trailer=%v", got, rec.Result().Trailer)
 	}
 }
 
