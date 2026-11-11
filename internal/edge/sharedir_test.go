@@ -8,12 +8,16 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/net/websocket"
 
 	"ngstone/internal/credentials"
 	"ngstone/internal/proto"
@@ -1208,4 +1212,127 @@ func TestControlSniffReadErrorIsLogged(t *testing.T) {
 	peerEventually(t, "the sniff failure to be logged", func() bool {
 		return strings.Contains(logs.String(), `"result":"no_auth_message"`)
 	})
+}
+
+func TestForwardedControlThroughWebSocketFallback(t *testing.T) {
+	cl := newShareCluster(t)
+	sharer, shareID := startShare(t, cl.b, "the-link-secret", nil)
+	forwarded := metricDelta(metricPeerControlForwarded)
+	cl.a.srv.fallbackSem = newGlobalSemaphore(4)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cl.a.srv.handleWebSocketControl(r.Context(), w, r)
+	}))
+	defer ts.Close()
+
+	config, err := websocket.NewConfig("ws://"+ts.Listener.Addr().String()+controlWebSocketPath, "http://"+ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Protocol = []string{controlWebSocketSubprotocol}
+	ws, err := websocket.DialConfig(config)
+	if err != nil {
+		t.Fatalf("websocket dial: %v", err)
+	}
+	sess, err := tunnel.Client(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close("test done")
+	if err := sess.Control().Write(proto.TypeAuth, 1, proto.Auth{ShareSecret: "the-link-secret", InstanceID: "ws-conn", ProtoVersions: proto.SupportedVersions}); err != nil {
+		t.Fatal(err)
+	}
+	if m := readSession(t, sess); m.Type != proto.TypeAuthOK {
+		t.Fatalf("auth reply = %s %s, want auth_ok", m.Type, m.Data)
+	}
+	if err := sess.Control().Write(proto.TypeConnect, 5, proto.Connect{}); err != nil {
+		t.Fatal(err)
+	}
+	if m := readSession(t, sess); m.Type != proto.TypeConnectOK {
+		t.Fatalf("connect reply = %s %s", m.Type, m.Data)
+	}
+	readEvent(t, sharer.Control(), proto.ShareEventConnectorJoined)
+
+	stream, err := sess.OpenStream(context.Background(), proto.StreamOpen{Kind: proto.KindShare, Host: shareID, ShareID: shareID, ReqID: "r1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	msg := []byte("select 1\n")
+	if _, err := stream.Write(msg); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, len(msg))
+	stream.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(stream, buf); err != nil || string(buf) != string(msg) {
+		t.Fatalf("echo = %q, %v", buf, err)
+	}
+	if forwarded() != 1 {
+		t.Fatalf("forwarded = %d, want 1", forwarded())
+	}
+	if cl.a.srv.shares.count() != 0 {
+		t.Fatal("the fallback edge registered a connector session locally")
+	}
+}
+
+func TestInactiveShareCredentialClosesSessionAndWithdrawsRow(t *testing.T) {
+	originalHeartbeat := heartbeatInterval
+	heartbeatInterval = 20 * time.Millisecond
+	defer func() { heartbeatInterval = originalHeartbeat }()
+
+	for _, tc := range []struct {
+		name string
+		end  func(t *testing.T, e *peerEdge, id string)
+	}{
+		{"revoked", func(t *testing.T, e *peerEdge, id string) {
+			if err := e.store.Revoke(id); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"expired", func(t *testing.T, e *peerEdge, id string) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cl := newShareCluster(t)
+			useShareCredentials(cl)
+			ttl := time.Hour
+			now := time.Now()
+			if tc.name == "expired" {
+				ttl = time.Minute
+				now = now.Add(-ttl + time.Second)
+			}
+			issued, err := cl.b.store.IssueAt(credentials.Spec{Kind: credentials.KindShare, OwnerID: "owner-a"}, ttl, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sharer, m := credentialShare(t, cl.b, issued.Token, "sharer", "the-link-secret")
+			if m.Type != proto.TypeShareOK {
+				t.Fatalf("share reply = %s %s, want share_ok", m.Type, m.Data)
+			}
+			if !shareDirHas(t, cl.a, "the-link-secret") {
+				t.Fatal("the share was not published")
+			}
+			tc.end(t, cl.b, issued.Credential.ID)
+
+			deadline := time.Now().Add(5 * time.Second)
+			gotGoodbye := false
+			for !gotGoodbye && time.Now().Before(deadline) {
+				sharer.Control().SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+				msg, err := sharer.Control().Read()
+				if err != nil {
+					if ne, ok := err.(interface{ Timeout() bool }); ok && ne.Timeout() {
+						continue
+					}
+					break
+				}
+				if msg.Type == proto.TypePing {
+					sharer.Control().Write(proto.TypePong, msg.ID, proto.Pong{})
+				}
+				gotGoodbye = msg.Type == proto.TypeGoodbye
+			}
+			if !gotGoodbye {
+				t.Fatal("the session was not told to go away")
+			}
+			peerEventually(t, "the share to close", func() bool { return cl.b.srv.shares.count() == 0 })
+			peerEventually(t, "the directory row to be withdrawn", func() bool { return !shareDirHas(t, cl.a, "the-link-secret") })
+		})
+	}
 }
