@@ -75,6 +75,41 @@ func TestServeRejectsWebhookFlags(t *testing.T) {
 	}
 }
 
+func TestServeRejectsFlagsItDoesNotApply(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("NGSTONE_TOKEN", "")
+	dir := t.TempDir()
+	policyPath := filepath.Join(dir, "deny.json")
+	for _, args := range [][]string{
+		{"--transport", "raw"},
+		{"--http2"},
+		{"--multi-connector"},
+		{"--connector-token", "x"},
+		{"--policy-file", policyPath},
+		{"--ttl", "1h"},
+		{"--json"},
+		{"--har", filepath.Join(dir, "out.har")},
+		{"--har-include-sensitive"},
+	} {
+		if code := cmdServe(append(args, dir)); code != 2 {
+			t.Errorf("cmdServe(%v) = %d, want 2", args, code)
+		}
+	}
+	for _, args := range [][]string{
+		{"--oidc"},
+		{"--oidc", "--oidc-allow-email", "a@example.com", "--oidc-allow-domain", "example.com"},
+		{"--basic-auth", "user:pass"},
+		{"--basic-auth-file", filepath.Join(dir, "creds")},
+		{"--allow-cidr", "10.0.0.0/8"},
+		{"--subdomain", "docs", "--host-header", "localhost", "--no-tui"},
+		{"--server", "127.0.0.1:1", "--insecure", "--server-name", "x", "--pin", "sha256/AAAA", "--instance-id", "i"},
+	} {
+		if code := cmdServe(append(args, dir)); code != 1 {
+			t.Errorf("cmdServe(%v) = %d, want 1 (flags accepted, token missing)", args, code)
+		}
+	}
+}
+
 func TestResolveWebhookFlags(t *testing.T) {
 	if cfg, err := resolveWebhookFlags(&webhookFlags{}, "env"); err != nil || cfg != nil {
 		t.Fatalf("no flags = %v, %v", cfg, err)

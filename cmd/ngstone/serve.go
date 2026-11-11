@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,11 +11,14 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"slices"
 	"syscall"
 
 	"ngstone/internal/agent"
 	"ngstone/internal/config"
 )
+
+var serveUnsupportedFlags = []string{"transport", "http2", "multi-connector", "connector-token", "policy-file", "ttl", "json", "har", "har-include-sensitive"}
 
 // cmdServe shares a directory of files: it starts a file server on a
 // loopback port and runs the same tunnel as `ngstone port` against it.
@@ -24,6 +28,16 @@ func cmdServe(args []string) int {
 	spa := fs.Bool("spa", false, "single-page app mode: serve index.html for paths that have no file and no extension")
 	positionals, err := parsePermissive(fs, args)
 	if err != nil {
+		return 2
+	}
+	unsupported := ""
+	fs.Visit(func(f *flag.Flag) {
+		if unsupported == "" && slices.Contains(serveUnsupportedFlags, f.Name) {
+			unsupported = f.Name
+		}
+	})
+	if unsupported != "" {
+		fmt.Fprintf(os.Stderr, "ngstone: serve does not support --%s; use ngstone port instead\n", unsupported)
 		return 2
 	}
 	if pf.webhook.provider != "" || pf.webhook.set() {
