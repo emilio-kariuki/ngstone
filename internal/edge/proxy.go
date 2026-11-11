@@ -193,7 +193,7 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		}
 		identity = session
 	}
-	stripVisitorSessionCookie(r.Header)
+	stripVisitorCookies(r.Header)
 	var decision policy.Decision
 	if trafficPolicy != nil {
 		decision = trafficPolicy.Decide(r)

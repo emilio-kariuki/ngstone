@@ -578,9 +578,9 @@ func TestSafeReturnPathRejectsOffsiteTargets(t *testing.T) {
 	}
 }
 
-func TestStripVisitorSessionCookieKeepsOtherCookies(t *testing.T) {
+func TestStripVisitorCookiesKeepsOtherCookies(t *testing.T) {
 	header := http.Header{"Cookie": {"a=1; " + visitorSessionCookie + "=secret", visitorSessionCookie + "=other", "b=2"}}
-	stripVisitorSessionCookie(header)
+	stripVisitorCookies(header)
 	if got := header.Values("Cookie"); len(got) != 1 || got[0] != "a=1; b=2" {
 		t.Fatalf("Cookie = %q", got)
 	}
@@ -945,9 +945,9 @@ func TestVisitorEdgeCookiesNeverReachTheUpstream(t *testing.T) {
 	}
 }
 
-func TestStripVisitorSessionCookieStripsEveryEdgeCookie(t *testing.T) {
+func TestStripVisitorCookiesStripsEveryEdgeCookie(t *testing.T) {
 	header := http.Header{"Cookie": {"a=1; __Host-" + visitorSessionCookie + "=s; " + visitorBindCookie + "=b", "__Host-" + visitorStateCookiePrefix + "x=st; ngstone_visitorx=keep; b=2"}}
-	stripVisitorSessionCookie(header)
+	stripVisitorCookies(header)
 	if got := header.Values("Cookie"); len(got) != 1 || got[0] != "a=1; ngstone_visitorx=keep; b=2" {
 		t.Fatalf("Cookie = %q", got)
 	}

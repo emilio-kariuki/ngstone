@@ -498,7 +498,7 @@ func sanitizeHeaderValue(value string) string {
 	}, value)
 }
 
-func stripVisitorSessionCookie(header http.Header) {
+func stripVisitorCookies(header http.Header) {
 	values := header.Values("Cookie")
 	if len(values) == 0 {
 		return
