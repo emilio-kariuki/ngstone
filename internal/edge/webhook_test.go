@@ -306,10 +306,15 @@ func TestHandlePublicWebhookHoldsBudgetWhileProxying(t *testing.T) {
 
 func bindOverControl(t *testing.T, s *Server, bind proto.Bind) proto.Msg {
 	t.Helper()
-	client, server, cleanup := newRawSessionPair(t)
-	t.Cleanup(cleanup)
 	as := newFakeAgentSession(t, "bind-webhook", func(w http.ResponseWriter, r *http.Request) {})
 	as.NegotiatedVersion = proto.ProtoVersion
+	return bindSessionOverControl(t, s, as, bind)
+}
+
+func bindSessionOverControl(t *testing.T, s *Server, as *AgentSession, bind proto.Bind) proto.Msg {
+	t.Helper()
+	client, server, cleanup := newRawSessionPair(t)
+	t.Cleanup(cleanup)
 	t.Cleanup(func() { s.registry.ReleaseSession(as) })
 	go s.handleBind(context.Background(), as, server.Control(), 7, bind)
 	reply, err := client.Control().Read()
@@ -432,6 +437,76 @@ func TestHandleBindRejectsWebhookWithVisitorLogin(t *testing.T) {
 	e, _ := proto.Decode[proto.BindErr](reply)
 	if e.Code != proto.CodeInvalidAccess || !strings.Contains(e.Message, "visitor login") {
 		t.Fatalf("error = %+v", e)
+	}
+}
+
+func TestHandleBindRejectsWebhookBelowProtocolV2(t *testing.T) {
+	s := newTestServer("tok")
+	as := newFakeAgentSession(t, "bind-webhook-v1", func(w http.ResponseWriter, r *http.Request) {})
+	as.NegotiatedVersion = 1
+	reply := bindSessionOverControl(t, s, as, proto.Bind{Kind: proto.KindHTTP, Subdomain: "v1hook", Webhook: &proto.WebhookVerification{Provider: "github", Secret: testWebhookSecret}})
+	if reply.Type != proto.TypeBindErr {
+		t.Fatalf("webhook bind on protocol v1 accepted: %s", reply.Data)
+	}
+	e, _ := proto.Decode[proto.BindErr](reply)
+	if e.Code != proto.CodeInvalidAccess || !strings.Contains(e.Message, "require protocol v2") || !strings.Contains(e.Message, "webhook verification") {
+		t.Fatalf("error = %+v", e)
+	}
+	if _, ok := s.registry.Route("v1hook.example.com"); ok {
+		t.Fatal("rejected bind left a binding behind")
+	}
+}
+
+func TestHandleBindKeepsWebhookVerifierAcrossRebinds(t *testing.T) {
+	s := newServerForTest(LimitsConfig{PerIPRate: 1000, PerIPBurst: 1000})
+	want, err := webhook.New(webhook.Config{Provider: webhook.ProviderGitHub, Secret: testWebhookSecret})
+	if err != nil {
+		t.Fatalf("webhook.New: %v", err)
+	}
+	bind := proto.Bind{Kind: proto.KindHTTP, Subdomain: "hooks", Webhook: &proto.WebhookVerification{Provider: "github", Secret: testWebhookSecret}}
+	session := func(instanceID string) *AgentSession {
+		as := newFakeAgentSession(t, instanceID, func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok") })
+		as.NegotiatedVersion = proto.ProtoVersion
+		return as
+	}
+	first := session("instance-a")
+	reconnect := session("instance-a")
+	takeover := session("instance-b")
+	takeoverBind := bind
+	takeoverBind.Takeover = true
+
+	steps := []struct {
+		name string
+		as   *AgentSession
+		bind proto.Bind
+	}{
+		{name: "initial bind", as: first, bind: bind},
+		{name: "same-session rebind", as: first, bind: bind},
+		{name: "same-instance reconnect", as: reconnect, bind: bind},
+		{name: "takeover", as: takeover, bind: takeoverBind},
+	}
+	for _, step := range steps {
+		if step.as == takeover {
+			reconnect.Sess.Close("simulate crash")
+			<-reconnect.Done()
+		}
+		reply := bindSessionOverControl(t, s, step.as, step.bind)
+		if reply.Type != proto.TypeBindOK {
+			t.Fatalf("%s: reply = %s %s", step.name, reply.Type, reply.Data)
+		}
+		b, ok := s.registry.Route("hooks.example.com")
+		if !ok {
+			t.Fatalf("%s: no binding", step.name)
+		}
+		if b.Sess != step.as {
+			t.Fatalf("%s: binding is not owned by the rebinding session", step.name)
+		}
+		if got := b.snapshot.Load().webhook; got == nil || !got.Equal(want) {
+			t.Fatalf("%s: webhook verifier was not kept", step.name)
+		}
+		if rec := webhookRequest(s, "/", `{"zen":"x"}`, false, nil); rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s: unsigned request status = %d body=%q", step.name, rec.Code, rec.Body.String())
+		}
 	}
 }
 
