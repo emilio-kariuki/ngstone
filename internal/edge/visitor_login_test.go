@@ -222,7 +222,7 @@ func htmlAccept() http.Header {
 	return http.Header{"Accept": {"text/html,application/xhtml+xml"}}
 }
 
-func visitorLoginFlow(t *testing.T, s *Server, idp *fakeVisitorIdP, tunnelURL string) (*httptest.ResponseRecorder, *http.Cookie) {
+func visitorLoginTicket(t *testing.T, s *Server, idp *fakeVisitorIdP, tunnelURL string) (*httptest.ResponseRecorder, string, *http.Cookie) {
 	t.Helper()
 	first := visitorRequest(t, s, http.MethodGet, tunnelURL, htmlAccept())
 	if first.Code != http.StatusFound {
@@ -231,6 +231,10 @@ func visitorLoginFlow(t *testing.T, s *Server, idp *fakeVisitorIdP, tunnelURL st
 	start, err := url.Parse(first.Header().Get("Location"))
 	if err != nil || start.Host != "example.com" || start.Path != visitorStartPath {
 		t.Fatalf("login redirect = %q, want apex start URL", first.Header().Get("Location"))
+	}
+	bind := responseCookie(first.Result(), visitorBindCookie)
+	if bind == nil || bind.Value == "" || bind.Path != "/" || bind.Domain != "" || !bind.HttpOnly || bind.SameSite != http.SameSiteLaxMode || bind.MaxAge != int(oidc.StateLifetime/time.Second) {
+		t.Fatalf("binding cookie = %+v, want host-only HttpOnly Lax cookie with the state lifetime", bind)
 	}
 	startRec := visitorRequest(t, s, http.MethodGet, start.String(), htmlAccept())
 	if startRec.Code != http.StatusFound {
@@ -261,7 +265,7 @@ func visitorLoginFlow(t *testing.T, s *Server, idp *fakeVisitorIdP, tunnelURL st
 	}
 	callback := visitorRequest(t, s, http.MethodGet, callbackURL, htmlAccept(), stateCookie)
 	if callback.Code != http.StatusFound {
-		return callback, nil
+		return callback, "", bind
 	}
 	finishURL, err := url.Parse(callback.Header().Get("Location"))
 	if err != nil {
@@ -271,7 +275,16 @@ func visitorLoginFlow(t *testing.T, s *Server, idp *fakeVisitorIdP, tunnelURL st
 	if finishURL.Host != tunnel.Host || finishURL.Path != visitorFinishPath {
 		t.Fatalf("callback redirect = %q, want finish on %s", finishURL, tunnel.Host)
 	}
-	finish := visitorRequest(t, s, http.MethodGet, finishURL.String(), htmlAccept())
+	return callback, finishURL.String(), bind
+}
+
+func visitorLoginFlow(t *testing.T, s *Server, idp *fakeVisitorIdP, tunnelURL string) (*httptest.ResponseRecorder, *http.Cookie) {
+	t.Helper()
+	callback, finishURL, bind := visitorLoginTicket(t, s, idp, tunnelURL)
+	if finishURL == "" {
+		return callback, nil
+	}
+	finish := visitorRequest(t, s, http.MethodGet, finishURL, htmlAccept(), bind)
 	return finish, responseCookie(finish.Result(), visitorSessionCookie)
 }
 
@@ -396,6 +409,7 @@ func TestVisitorSessionIsBoundToTunnelHostAndTicketIsSingleUse(t *testing.T) {
 	other := bindVisitorTunnel(t, s, "two.example.com", proto.Bind{OIDC: &proto.OIDCLogin{}})
 
 	first := visitorRequest(t, s, http.MethodGet, "http://one.example.com/", htmlAccept())
+	bind := responseCookie(first.Result(), visitorBindCookie)
 	start := visitorRequest(t, s, http.MethodGet, first.Header().Get("Location"), htmlAccept())
 	var stateCookie *http.Cookie
 	for _, cookie := range start.Result().Cookies() {
@@ -414,15 +428,15 @@ func TestVisitorSessionIsBoundToTunnelHostAndTicketIsSingleUse(t *testing.T) {
 
 	crossHost := *finishURL
 	crossHost.Host = "two.example.com"
-	if rec := visitorRequest(t, s, http.MethodGet, crossHost.String(), htmlAccept()); rec.Code != http.StatusBadRequest {
+	if rec := visitorRequest(t, s, http.MethodGet, crossHost.String(), htmlAccept(), bind); rec.Code != http.StatusBadRequest {
 		t.Fatalf("ticket on another host status = %d, want 400", rec.Code)
 	}
-	finish := visitorRequest(t, s, http.MethodGet, finishURL.String(), htmlAccept())
+	finish := visitorRequest(t, s, http.MethodGet, finishURL.String(), htmlAccept(), bind)
 	session := responseCookie(finish.Result(), visitorSessionCookie)
 	if session == nil {
 		t.Fatalf("finish did not set a session: %d %s", finish.Code, finish.Body.String())
 	}
-	if rec := visitorRequest(t, s, http.MethodGet, finishURL.String(), htmlAccept()); rec.Code != http.StatusBadRequest {
+	if rec := visitorRequest(t, s, http.MethodGet, finishURL.String(), htmlAccept(), bind); rec.Code != http.StatusBadRequest {
 		t.Fatalf("replayed ticket status = %d, want 400", rec.Code)
 	}
 	if rec := visitorRequest(t, s, http.MethodGet, "http://two.example.com/", http.Header{"Accept": {"*/*"}}, session); rec.Code != http.StatusUnauthorized {
@@ -663,4 +677,44 @@ func TestVisitorIdentityHeadersSurviveConnectionTokensOverHTTP2(t *testing.T) {
 	s := newVisitorTestServer(t, idp)
 	captured := bindVisitorH2Tunnel(t, s, "h2.example.com", proto.Bind{OIDC: &proto.OIDCLogin{}})
 	assertAssertedIdentity(t, s, idp, captured, "h2.example.com")
+}
+
+func TestVisitorLoginTicketRequiresInitiatingBrowser(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	bindVisitorTunnel(t, s, "app.example.com", proto.Bind{OIDC: &proto.OIDCLogin{}})
+
+	_, finishURL, bind := visitorLoginTicket(t, s, idp, "http://app.example.com/")
+	noCookie := visitorRequest(t, s, http.MethodGet, finishURL, htmlAccept())
+	if noCookie.Code != http.StatusBadRequest || responseCookie(noCookie.Result(), visitorSessionCookie) != nil {
+		t.Fatalf("ticket without binding cookie = %d, session=%v; want 400 and no session", noCookie.Code, responseCookie(noCookie.Result(), visitorSessionCookie))
+	}
+
+	_, finishURL, bind = visitorLoginTicket(t, s, idp, "http://app.example.com/")
+	other := &http.Cookie{Name: bind.Name, Value: "attacker-chosen"}
+	mismatch := visitorRequest(t, s, http.MethodGet, finishURL, htmlAccept(), other)
+	if mismatch.Code != http.StatusBadRequest || responseCookie(mismatch.Result(), visitorSessionCookie) != nil {
+		t.Fatalf("ticket with another browser's cookie = %d; want 400 and no session", mismatch.Code)
+	}
+	cleared := false
+	for _, cookie := range mismatch.Result().Cookies() {
+		if cookie.Name == bind.Name && cookie.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	if !cleared {
+		t.Fatal("binding cookie was not cleared on a refused ticket")
+	}
+
+	_, finishURL, bind = visitorLoginTicket(t, s, idp, "http://app.example.com/")
+	twice := visitorRequest(t, s, http.MethodGet, finishURL, htmlAccept(), bind, &http.Cookie{Name: bind.Name, Value: "second"})
+	if twice.Code != http.StatusBadRequest {
+		t.Fatalf("ticket with two binding cookies = %d, want 400", twice.Code)
+	}
+
+	_, finishURL, bind = visitorLoginTicket(t, s, idp, "http://app.example.com/")
+	ok := visitorRequest(t, s, http.MethodGet, finishURL, htmlAccept(), bind)
+	if ok.Code != http.StatusFound || responseCookie(ok.Result(), visitorSessionCookie) == nil {
+		t.Fatalf("legitimate flow = %d, want 302 with a session", ok.Code)
+	}
 }

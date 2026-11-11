@@ -19,6 +19,8 @@ import (
 const (
 	visitorSessionCookie      = "ngstone_visitor_session"
 	visitorStateCookiePrefix  = "ngstone_visitor_state_"
+	visitorBindCookie         = "ngstone_visitor_bind"
+	visitorCookieHostPrefix   = "__Host-"
 	visitorStartPath          = "/.ngstone/auth/start"
 	visitorFinishPath         = "/.ngstone/auth/finish"
 	visitorLogoutPath         = "/.ngstone/auth/logout"
@@ -58,6 +60,7 @@ type visitorToken struct {
 	EmailVerified bool        `json:"v,omitempty"`
 	Name          string      `json:"n,omitempty"`
 	State         *oidc.State `json:"st,omitempty"`
+	Binding       string      `json:"b,omitempty"`
 	ExpiresAt     time.Time   `json:"x"`
 }
 
@@ -141,7 +144,7 @@ func (s *Server) handleVisitorStart(w http.ResponseWriter, r *http.Request, v *v
 		writeVisitorPage(w, http.StatusBadGateway, "Sign-in unavailable", "The identity provider could not be reached.")
 		return
 	}
-	sealed, err := v.codec.Encode(visitorToken{Purpose: visitorPurposeState, Host: ret.Host, Path: ret.Path, State: &state, ExpiresAt: state.ExpiresAt})
+	sealed, err := v.codec.Encode(visitorToken{Purpose: visitorPurposeState, Host: ret.Host, Path: ret.Path, State: &state, Binding: ret.Binding, ExpiresAt: state.ExpiresAt})
 	if err != nil {
 		writeVisitorPage(w, http.StatusInternalServerError, "Sign-in failed", "Could not create sign-in state.")
 		return
@@ -207,6 +210,7 @@ func (s *Server) handleVisitorCallback(w http.ResponseWriter, r *http.Request, v
 		Purpose:       visitorPurposeTicket,
 		Host:          st.Host,
 		Path:          st.Path,
+		Binding:       st.Binding,
 		ID:            ticketID,
 		Subject:       principal.Subject,
 		Email:         principal.Email,
@@ -267,11 +271,16 @@ func (s *Server) authorizeVisitor(w http.ResponseWriter, r *http.Request, rule *
 	}
 	metricRejectedUnauthorized.Add(1)
 	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && acceptsHTML(r) {
-		start, err := v.startURL(r)
+		binding, err := randomToken(24)
 		if err == nil {
-			w.Header().Set("Cache-Control", "no-store")
-			http.Redirect(w, r, start, http.StatusFound)
-			return nil, false
+			var start string
+			start, err = v.startURL(r, binding)
+			if err == nil {
+				http.SetCookie(w, v.bindCookie(binding, int(oidc.StateLifetime/time.Second)))
+				w.Header().Set("Cache-Control", "no-store")
+				http.Redirect(w, r, start, http.StatusFound)
+				return nil, false
+			}
 		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -281,8 +290,10 @@ func (s *Server) authorizeVisitor(w http.ResponseWriter, r *http.Request, rule *
 
 func (s *Server) handleVisitorFinish(w http.ResponseWriter, r *http.Request, v *visitorLogin, rule *visitorLoginRule) {
 	w.Header().Set("Cache-Control", "no-store")
+	bound := r.CookiesNamed(v.cookieName(visitorBindCookie))
+	http.SetCookie(w, v.bindCookie("", -1))
 	var ticket visitorToken
-	if !v.open(r.URL.Query().Get("ticket"), visitorPurposeTicket, &ticket) || !strings.EqualFold(stripPort(ticket.Host), stripPort(r.Host)) || ticket.ID == "" || ticket.Subject == "" || !v.consumeTicket(ticket.ID, ticket.ExpiresAt) {
+	if !v.open(r.URL.Query().Get("ticket"), visitorPurposeTicket, &ticket) || !strings.EqualFold(stripPort(ticket.Host), stripPort(r.Host)) || ticket.ID == "" || ticket.Subject == "" || len(bound) != 1 || bound[0].Value == "" || subtle.ConstantTimeCompare([]byte(bound[0].Value), []byte(ticket.Binding)) != 1 || !v.consumeTicket(ticket.ID, ticket.ExpiresAt) {
 		writeVisitorPage(w, http.StatusBadRequest, "Sign-in expired", "Reload the page you were visiting to sign in again.")
 		return
 	}
@@ -318,7 +329,7 @@ func (s *Server) handleVisitorFinish(w http.ResponseWriter, r *http.Request, v *
 	http.Redirect(w, r, safeReturnPath(ticket.Path), http.StatusFound)
 }
 
-func (v *visitorLogin) startURL(r *http.Request) (string, error) {
+func (v *visitorLogin) startURL(r *http.Request, binding string) (string, error) {
 	path := r.URL.RequestURI()
 	if len(path) > visitorMaxReturnPathBytes {
 		path = r.URL.EscapedPath()
@@ -326,12 +337,23 @@ func (v *visitorLogin) startURL(r *http.Request) (string, error) {
 			path = "/"
 		}
 	}
-	sealed, err := v.codec.Encode(visitorToken{Purpose: visitorPurposeReturn, Host: r.Host, Path: path, ExpiresAt: time.Now().Add(oidc.StateLifetime)})
+	sealed, err := v.codec.Encode(visitorToken{Purpose: visitorPurposeReturn, Host: r.Host, Path: path, Binding: binding, ExpiresAt: time.Now().Add(oidc.StateLifetime)})
 	if err != nil {
 		return "", err
 	}
 	start := url.URL{Scheme: v.callback.Scheme, Host: v.callback.Host, Path: visitorStartPath, RawQuery: url.Values{"return": {sealed}}.Encode()}
 	return start.String(), nil
+}
+
+func (v *visitorLogin) cookieName(base string) string {
+	if v.secure {
+		return visitorCookieHostPrefix + base
+	}
+	return base
+}
+
+func (v *visitorLogin) bindCookie(value string, maxAge int) *http.Cookie {
+	return &http.Cookie{Name: v.cookieName(visitorBindCookie), Value: value, Path: "/", MaxAge: maxAge, HttpOnly: true, Secure: v.secure, SameSite: http.SameSiteLaxMode}
 }
 
 func (v *visitorLogin) open(value, purpose string, token *visitorToken) bool {
