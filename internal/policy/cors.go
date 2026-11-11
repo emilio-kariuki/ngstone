@@ -69,12 +69,18 @@ func (c *CORS) validate() error {
 			}
 			continue
 		}
+		if strings.Contains(name, corsWildcard) {
+			return fmt.Errorf("allowed_headers entry %q cannot contain \"*\"; use \"*\" alone or exact header names", name)
+		}
 		if !validToken(name) {
 			return fmt.Errorf("allowed_headers entry %q is invalid", name)
 		}
 		c.AllowedHeaders[i] = http.CanonicalHeaderKey(name)
 	}
 	for i, name := range c.ExposedHeaders {
+		if name != corsWildcard && strings.Contains(name, corsWildcard) {
+			return fmt.Errorf("exposed_headers entry %q cannot contain \"*\"; use \"*\" alone or exact header names", name)
+		}
 		if !validToken(name) {
 			return fmt.Errorf("exposed_headers entry %q is invalid", name)
 		}

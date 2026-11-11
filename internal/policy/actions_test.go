@@ -425,6 +425,9 @@ func TestValidationRejectsCORSValuesThatCanNeverMatch(t *testing.T) {
 		`{"rules":[],"cors":{"allowed_origins":["https://a.example"],"allowed_methods":["GET","P*"]}}`,
 		`{"rules":[],"cors":{"allowed_origins":["https://*.example.com"]}}`,
 		`{"rules":[],"cors":{"allowed_origins":["https://a.example","*.example.com"]}}`,
+		`{"rules":[],"cors":{"allowed_origins":["https://a.example"],"allowed_headers":["X-*"]}}`,
+		`{"rules":[],"cors":{"allowed_origins":["https://a.example"],"allowed_headers":["Content-Type","*-Id"]}}`,
+		`{"rules":[],"cors":{"allowed_origins":["https://a.example"],"exposed_headers":["X-*"]}}`,
 	}
 	for _, input := range invalid {
 		if _, err := Parse([]byte(input)); err == nil {
