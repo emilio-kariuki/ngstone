@@ -365,6 +365,53 @@ func TestCORSResponseHeadersReplaceUpstreamValues(t *testing.T) {
 	}
 }
 
+func TestCORSWildcardResponseIsCacheSafe(t *testing.T) {
+	p, err := Parse([]byte(`{"rules":[],"cors":{"allowed_origins":["*"]}}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, origin := range []string{"", "https://any.example"} {
+		r := httptestRequest(http.MethodGet, "/")
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		d := p.Decide(r)
+		resp := http.Header{"Access-Control-Allow-Origin": {"https://other.example"}}
+		d.ApplyResponseHeaders(resp)
+		if got := resp.Values("Access-Control-Allow-Origin"); !reflect.DeepEqual(got, []string{"*"}) {
+			t.Fatalf("origin %q: Access-Control-Allow-Origin = %q, want *", origin, got)
+		}
+		if len(resp.Values("Vary")) != 0 {
+			t.Fatalf("origin %q: wildcard response varies: %q", origin, resp.Values("Vary"))
+		}
+	}
+}
+
+func TestCORSStripsEveryUpstreamAccessControlHeader(t *testing.T) {
+	p, err := Parse([]byte(`{"rules":[],"cors":{"allowed_origins":["https://app.example"]}}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	r := httptestRequest(http.MethodGet, "/")
+	r.Header.Set("Origin", "https://evil.example")
+	d := p.Decide(r)
+	resp := http.Header{
+		"Access-Control-Allow-Private-Network": {"true"},
+		"Access-Control-Allow-Origin":          {"*"},
+		"Access-Control-Custom":                {"x"},
+		"Content-Type":                         {"text/plain"},
+	}
+	d.ApplyResponseHeaders(resp)
+	for name := range resp {
+		if strings.HasPrefix(name, "Access-Control-") {
+			t.Fatalf("upstream %s survived: %v", name, resp)
+		}
+	}
+	if resp.Get("Content-Type") != "text/plain" {
+		t.Fatalf("response headers = %v", resp)
+	}
+}
+
 func TestValidationRejectsCORSValuesThatCanNeverMatch(t *testing.T) {
 	invalid := []string{
 		`{"rules":[],"cors":{"allowed_origins":["https://a.example"],"allowed_methods":["*"]}}`,

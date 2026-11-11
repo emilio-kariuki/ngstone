@@ -17,15 +17,6 @@ const (
 
 var defaultCORSMethods = []string{http.MethodGet, http.MethodHead, http.MethodPost}
 
-var corsResponseHeaders = []string{
-	"Access-Control-Allow-Origin",
-	"Access-Control-Allow-Credentials",
-	"Access-Control-Allow-Methods",
-	"Access-Control-Allow-Headers",
-	"Access-Control-Expose-Headers",
-	"Access-Control-Max-Age",
-}
-
 type CORS struct {
 	AllowedOrigins   []string `json:"allowed_origins"`
 	AllowedMethods   []string `json:"allowed_methods,omitempty"`
@@ -228,13 +219,15 @@ func (c *CORS) setOrigin(h http.Header, origin string) {
 }
 
 func (c *CORS) applyResponse(h http.Header, origin string) {
-	for _, name := range corsResponseHeaders {
-		h.Del(name)
+	for name := range h {
+		if strings.HasPrefix(http.CanonicalHeaderKey(name), "Access-Control-") {
+			delete(h, name)
+		}
 	}
 	if !c.wildcard() && !varyContains(h, "Origin") {
 		h.Add("Vary", "Origin")
 	}
-	if !c.originAllowed(origin) {
+	if !c.wildcard() && !c.originAllowed(origin) {
 		return
 	}
 	c.setOrigin(h, origin)
