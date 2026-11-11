@@ -470,11 +470,20 @@ NGSTONE_PEER_ADDR=10.0.0.11:4043`}
           address literal and a port; hostnames and unspecified addresses are
           rejected. Requires PostgreSQL and is refused with{" "}
           <code>-insecure</code>. Equivalent flag <code>-peer-addr</code>. With
-          it set, any edge forwards a tunnel&apos;s HTTPS or TLS-passthrough
-          connection once to the edge holding its live connector, and that
+          it set, any edge forwards a tunnel&apos;s HTTPS, TLS-passthrough or
+          raw TCP connection once to the edge holding its live connector, and that
           edge enforces every access rule using the real client address. Keep
           the port reachable only from the other edges. Empty disables
           forwarding.
+        </Property>
+        <Property name="NGSTONE_PEER_LISTEN" type="env">
+          Address (<code>&lt;ip&gt;:&lt;port&gt;</code> or{" "}
+          <code>:&lt;port&gt;</code>) on which this edge accepts peer
+          connections when that differs from <code>NGSTONE_PEER_ADDR</code>,
+          for example inside a container. Requires{" "}
+          <code>NGSTONE_PEER_ADDR</code>, which stays the address the other
+          edges dial. Equivalent flag <code>-peer-listen</code>. Defaults to{" "}
+          <code>NGSTONE_PEER_ADDR</code>.
         </Property>
         <Property name="NGSTONE_CREDENTIALS_FILE" type="env">
           Compatibility path to the versioned scoped credential file.

@@ -187,8 +187,9 @@ peer registrations look expired and forwarding fails closed. Long-lived
 WebSocket and SSE connections that stay silent need traffic or keep-alives
 within that 30-minute idle timeout. Once the owner side closes or half-closes
 its sending direction, the ingress closes the client's side five seconds later;
-a TLS-passthrough backend that half-closes while still reading sees the
-client's upload cut after five seconds when reached through another edge. With
+a TLS-passthrough backend or a raw TCP tunnel that half-closes while still
+reading sees the client's upload cut after five seconds when reached through
+another edge. With
 forwarding enabled, a database outage closes connections for tunnel hostnames
 not bound on the receiving edge, where a single edge would answer 404.
 

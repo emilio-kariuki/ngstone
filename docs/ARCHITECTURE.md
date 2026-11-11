@@ -403,9 +403,9 @@ edge carries at most 1024 concurrent forwarded connections. Edge clocks must
 agree to within about two thirds of the lease TTL (30 s with the default TTL);
 beyond that, peer registrations look expired and forwarding fails closed. Once
 the owner side closes or half-closes its sending direction, the ingress closes
-the client's side five seconds later; a TLS-passthrough backend that half-closes
-while still reading sees the client's upload cut after five seconds when reached
-through another edge. Each edge
+the client's side five seconds later; a TLS-passthrough backend or a raw TCP
+tunnel that half-closes while still reading sees the client's upload cut after
+five seconds when reached through another edge. Each edge
 needs a distinct `NGSTONE_EDGE_ID`; two edges with the same id overwrite each
 other's registration. Pins carry the registration expiry, so a pin whose row
 expired or was deleted stops being accepted once its cached expiry passes,

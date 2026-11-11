@@ -111,10 +111,30 @@ How the container differs from the systemd unit:
 - **Inter-edge forwarding.** Under Docker's bridge network the host's address
   cannot be bound inside the container. Set `NGSTONE_DATABASE_URL`,
   `NGSTONE_EDGE_ID` and `NGSTONE_PEER_ADDR` (the host's `ip:port` as the other
-  edges reach it) in `.env`, then uncomment the `-peer-listen=:4043` line and
-  the `"4043:4043"` port in `compose.yaml`. The edge listens on
-  `NGSTONE_PEER_LISTEN` and still advertises `NGSTONE_PEER_ADDR`. Firewall
-  the peer port to the other edges.
+  edges reach it) in `.env`, and leave `NGSTONE_TOKEN_SHA256` empty: the
+  legacy token cannot be combined with a database, so agents use scoped
+  credentials (see the next bullet). Then uncomment the `-peer-listen=:4043`
+  line and the `"4043:4043"` port in `compose.yaml`. The Compose file sets the
+  `-peer-listen` flag, so the edge listens on `:4043` and still advertises
+  `NGSTONE_PEER_ADDR`. Firewall the peer port to the other edges.
+- **Management API.** The image has no `ngstone` CLI, so issue credentials from
+  a machine that has it. The API is served on the ops endpoint, which stays on
+  the container's loopback and is not reachable through a published port, and
+  without `NGSTONE_ADMIN_TOKEN_SHA256` the API accepts loopback clients only.
+  To reach it, set `NGSTONE_ADMIN_TOKEN_SHA256` in `.env` (generate the pair as
+  in [Management API and CLI](#management-api-and-cli)), change `-ops` in
+  `compose.yaml` to `-ops=:4041` (the health check still reaches it on the
+  container's loopback), and publish `"127.0.0.1:4041:4041"`. Then, on the
+  Docker host or through `ssh -L 4041:127.0.0.1:4041`:
+
+  ```
+  NGSTONE_ADMIN_TOKEN=<admin token> ngstone admin credentials issue \
+    --server http://127.0.0.1:4041 --subdomain demo --ttl 24h
+  ```
+
+  The ops endpoint also serves pprof, expvar and metrics without
+  authentication, so publish it on the host's loopback only, never on a public
+  interface.
 
 To build the image from a checkout instead of pulling it, replace `image:`
 with the commented `build: ../..` in `compose.yaml`, or run
