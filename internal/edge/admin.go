@@ -396,7 +396,20 @@ func (s *Server) handleAdminDomains(w http.ResponseWriter, r *http.Request) {
 			writeAdminError(w, http.StatusBadRequest, "invalid_json", err.Error())
 			return
 		}
-		domain, err := s.storage.CreateCustomDomain(r.Context(), storage.CustomDomainSpec{Domain: request.Domain, TunnelID: request.TunnelID, OwnerID: ownerID, Status: request.Status})
+		if status := strings.TrimSpace(request.Status); status != "" && status != "pending" {
+			if ownerID != credentials.GlobalOwnerID {
+				s.recordAdminEventLevel(r, "warn", "management custom domain status rejected", map[string]string{"domain": truncateField(strings.TrimSpace(request.Domain), 253)})
+				writeAdminError(w, http.StatusForbidden, "forbidden", "your role cannot perform this operation")
+				return
+			}
+			writeAdminError(w, http.StatusUnprocessableEntity, "validation_error", "set status with POST /api/v1/domains/{id}/status")
+			return
+		}
+		if name, ok := storage.NormalizeCustomDomain(request.Domain); ok && s.customDomainReserved(name) {
+			writeAdminError(w, http.StatusUnprocessableEntity, "validation_error", "custom domain is reserved")
+			return
+		}
+		domain, err := s.storage.CreateCustomDomain(r.Context(), storage.CustomDomainSpec{Domain: request.Domain, TunnelID: request.TunnelID, OwnerID: ownerID})
 		if err != nil {
 			if errors.Is(err, storage.ErrTunnelConflict) {
 				writeAdminError(w, http.StatusConflict, "domain_taken", "custom domain is already registered")
@@ -444,6 +457,17 @@ func (s *Server) handleAdminDomain(w http.ResponseWriter, r *http.Request, rawID
 	}
 	s.recordAdminEvent(r, "management custom domain deleted", map[string]string{"domain_id": id})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) customDomainReserved(domain string) bool {
+	return hostMatchesDomain(domain, strings.ToLower(s.cfg.Domain)) || s.visitor.servesHost(domain)
+}
+
+func truncateField(value string, max int) string {
+	if len(value) > max {
+		return value[:max]
+	}
+	return value
 }
 
 func adminOwnerID(r *http.Request) string {

@@ -103,6 +103,10 @@ func (s *Server) recordEvent(level, message string, fields map[string]string) {
 }
 
 func (s *Server) recordAdminEvent(r *http.Request, message string, fields map[string]string) {
+	s.recordAdminEventLevel(r, "info", message, fields)
+}
+
+func (s *Server) recordAdminEventLevel(r *http.Request, level, message string, fields map[string]string) {
 	recorded := make(map[string]string, len(fields)+3)
 	for key, value := range fields {
 		recorded[key] = value
@@ -114,7 +118,7 @@ func (s *Server) recordAdminEvent(r *http.Request, message string, fields map[st
 			recorded["cert_sha256"] = auth.CertSHA256
 		}
 	}
-	s.recordEvent("info", message, recorded)
+	s.recordEvent(level, message, recorded)
 }
 
 func (s *Server) auditLoop() {

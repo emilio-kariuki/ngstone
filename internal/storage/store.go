@@ -153,7 +153,6 @@ type CustomDomainSpec struct {
 	Domain   string
 	TunnelID string
 	OwnerID  string
-	Status   string
 }
 
 type TrafficPolicy struct {
@@ -1321,8 +1320,8 @@ func (s *Store) DeleteTrafficPolicy(ctx context.Context, id, ownerID string) err
 }
 
 func (s *Store) CreateCustomDomain(ctx context.Context, spec CustomDomainSpec) (CustomDomain, error) {
-	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(spec.Domain), "."))
-	if !validCustomDomain(domain) {
+	domain, ok := NormalizeCustomDomain(spec.Domain)
+	if !ok {
 		return CustomDomain{}, ErrInvalid
 	}
 	ownerID := strings.TrimSpace(spec.OwnerID)
@@ -1331,26 +1330,26 @@ func (s *Store) CreateCustomDomain(ctx context.Context, spec CustomDomainSpec) (
 	}
 	tunnelID := strings.TrimSpace(spec.TunnelID)
 	if tunnelID != "" {
-		var exists int
-		ownerID = strings.TrimSpace(spec.OwnerID)
-		query := `SELECT 1 FROM tunnels WHERE id = $1`
+		var kind string
+		var remotePort int
+		query := `SELECT kind, remote_port FROM tunnels WHERE id = $1`
 		args := []any{tunnelID}
 		if ownerID != credentials.GlobalOwnerID {
 			query += ` AND owner_id = $2`
 			args = append(args, ownerID)
 		}
-		err := s.db.QueryRowContext(ctx, s.bind(query), args...).Scan(&exists)
+		err := s.db.QueryRowContext(ctx, s.bind(query), args...).Scan(&kind, &remotePort)
 		if errors.Is(err, sql.ErrNoRows) {
 			return CustomDomain{}, ErrNotFound
 		}
 		if err != nil {
 			return CustomDomain{}, fmt.Errorf("storage: inspect custom-domain tunnel: %w", err)
 		}
+		if (kind != "http" && kind != "tls") || remotePort != 0 {
+			return CustomDomain{}, ErrInvalid
+		}
 	}
-	status := strings.TrimSpace(spec.Status)
-	if status == "" {
-		status = "pending"
-	}
+	status := "pending"
 	now := time.Now().UTC()
 	id, err := randomID()
 	if err != nil {
@@ -1366,11 +1365,23 @@ func (s *Store) CreateCustomDomain(ctx context.Context, spec CustomDomainSpec) (
 	return CustomDomain{ID: id, Domain: domain, TunnelID: tunnelID, OwnerID: ownerID, Status: status, CreatedAt: now, UpdatedAt: now}, nil
 }
 
+func NormalizeCustomDomain(raw string) (string, bool) {
+	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
+	if !validCustomDomain(domain) {
+		return "", false
+	}
+	return domain, true
+}
+
 func validCustomDomain(domain string) bool {
-	if domain == "" || len(domain) > 253 || strings.Contains(domain, "..") || net.ParseIP(domain) != nil {
+	if domain == "" || len(domain) > 253 || strings.Contains(domain, "..") || net.ParseIP(domain) != nil || net.ParseIP(strings.Trim(domain, "[]")) != nil {
 		return false
 	}
-	return domainRE.MatchString(domain)
+	if !domainRE.MatchString(domain) {
+		return false
+	}
+	last := domain[strings.LastIndexByte(domain, '.')+1:]
+	return strings.Trim(last, "0123456789") != ""
 }
 
 func (s *Store) ListCustomDomains(ctx context.Context, ownerID string) ([]CustomDomain, error) {

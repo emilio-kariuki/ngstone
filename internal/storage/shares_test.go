@@ -267,8 +267,8 @@ func TestShareDirectoryColumns(t *testing.T) {
 func TestMigrationCreatesShareDirectoryFresh(t *testing.T) {
 	forEachPeerStore(t, func(t *testing.T, s *Store) {
 		var applied int
-		if err := s.db.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&applied); err != nil || applied != 6 {
-			t.Fatalf("applied migrations = %d, %v, want 6", applied, err)
+		if err := s.db.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&applied); err != nil || applied != 7 {
+			t.Fatalf("applied migrations = %d, %v, want 7", applied, err)
 		}
 		seedPeer(t, s, "edge-b", time.Now().Add(time.Hour))
 		seedLiveShare(t, s, "key-1", "share-1", "edge-b", "owner-a")
@@ -294,8 +294,8 @@ func TestMigrationUpgradesFromVersion5(t *testing.T) {
 	check := func(t *testing.T, s *Store) {
 		t.Helper()
 		var applied int
-		if err := s.db.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&applied); err != nil || applied != 6 {
-			t.Fatalf("applied migrations = %d, %v, want 6", applied, err)
+		if err := s.db.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&applied); err != nil || applied != 7 {
+			t.Fatalf("applied migrations = %d, %v, want 7", applied, err)
 		}
 		seedLiveShare(t, s, "key-1", "share-1", "edge-b", "owner-a")
 		if _, ok, err := s.LookupShareEdge(context.Background(), "key-1", "edge-a", time.Now()); err != nil || !ok {

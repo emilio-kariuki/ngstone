@@ -235,7 +235,7 @@ func TestAuditPoliciesAndCustomDomains(t *testing.T) {
 	if policyID == "" || digest != p.Digest() {
 		t.Fatalf("policy identity = %q %q", policyID, digest)
 	}
-	if _, err := store.CreateCustomDomain(context.Background(), CustomDomainSpec{Domain: "demo.example.org", OwnerID: "owner-1", Status: "active"}); err != nil {
+	if _, err := store.CreateCustomDomain(context.Background(), CustomDomainSpec{Domain: "demo.example.org", OwnerID: "owner-1"}); err != nil {
 		t.Fatalf("create custom domain: %v", err)
 	}
 	if err := store.RecordAudit(context.Background(), AuditEvent{Action: "created", ResourceType: "policy", ResourceID: policyID, Metadata: map[string]string{"source": "test"}}); err != nil {
