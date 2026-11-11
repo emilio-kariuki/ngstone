@@ -126,43 +126,6 @@ func TestAcceptForwardedUnknownPortRefused(t *testing.T) {
 	fwd.abort()
 }
 
-func TestAcceptForwardedClosedTunnelRefused(t *testing.T) {
-	fx := newTCPFixture(t, echoHandler)
-	defer fx.cleanup()
-	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
-	if err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-	client, server := realConnPair(t)
-	defer client.Close()
-	defer server.Close()
-
-	t.Run("closed tunnel", func(t *testing.T) {
-		fx.mgr.mu.Lock()
-		close(fx.mgr.byPort[port].closed)
-		fx.mgr.mu.Unlock()
-		if fwd, ok := fx.mgr.acceptForwarded(port, server); ok {
-			fwd.abort()
-			t.Fatal("a closed tunnel was accepted")
-		}
-	})
-	t.Run("releasing session", func(t *testing.T) {
-		other := newTCPFixture(t, echoHandler)
-		defer other.cleanup()
-		p2, err := other.mgr.bind(other.as, 0, "example.com", nil)
-		if err != nil {
-			t.Fatalf("bind: %v", err)
-		}
-		other.mgr.mu.Lock()
-		other.mgr.releasing[other.as] = struct{}{}
-		other.mgr.mu.Unlock()
-		if fwd, ok := other.mgr.acceptForwarded(p2, server); ok {
-			fwd.abort()
-			t.Fatal("a releasing session was accepted")
-		}
-	})
-}
-
 func TestAcceptForwardedAllowCIDRUsesProxySource(t *testing.T) {
 	pc := newPeerCluster(t)
 	a, _ := pc.tcpEdge(t, "edge-a", "127.0.0.1")

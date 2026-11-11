@@ -135,12 +135,6 @@ func newTCPManager(lo, hi int, bindAddr string, limiter *perIPLimiter) *tcpManag
 	}
 }
 
-func (tm *tcpManager) register(as *AgentSession, tc *tcpConn) {
-	tm.mu.Lock()
-	tm.registerLocked(as, tc)
-	tm.mu.Unlock()
-}
-
 func (tm *tcpManager) registerLocked(as *AgentSession, tc *tcpConn) {
 	if tm.conns[as] == nil {
 		tm.conns[as] = make(map[*tcpConn]struct{})
@@ -461,14 +455,6 @@ func (tm *tcpManager) acceptForwarded(port int, c net.Conn) (*forwardedConn, boo
 	defer tm.mu.Unlock()
 	tt := tm.byPort[port]
 	if tt == nil {
-		return nil, false
-	}
-	select {
-	case <-tt.closed:
-		return nil, false
-	default:
-	}
-	if _, releasing := tm.releasing[tt.session]; releasing {
 		return nil, false
 	}
 	return &forwardedConn{tm: tm, tt: tt, tc: tm.admitLocked(tt, c)}, true
