@@ -227,7 +227,7 @@ func (s *Server) handleAdminCredentials(w http.ResponseWriter, r *http.Request) 
 			writeAdminError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
 			return
 		}
-		s.recordEvent("info", "management credential issued", map[string]string{
+		s.recordAdminEvent(r, "management credential issued", map[string]string{
 			"credential_id": issued.Credential.ID,
 			"kind":          issued.Credential.Kind,
 		})
@@ -263,7 +263,7 @@ func (s *Server) handleAdminCredential(w http.ResponseWriter, r *http.Request, r
 		return
 	}
 	s.recordCredentialEventForID(id, "credential_revoked")
-	s.recordEvent("info", "management credential revoked", map[string]string{"credential_id": id})
+	s.recordAdminEvent(r, "management credential revoked", map[string]string{"credential_id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -331,7 +331,7 @@ func (s *Server) handleAdminPolicies(w http.ResponseWriter, r *http.Request) {
 			if saved.ID != id {
 				continue
 			}
-			s.recordEvent("info", "management traffic policy saved", map[string]string{"policy_id": saved.ID, "policy_name": saved.Name})
+			s.recordAdminEvent(r, "management traffic policy saved", map[string]string{"policy_id": saved.ID, "policy_name": saved.Name})
 			writeAdminData(w, http.StatusCreated, adminapi.TrafficPolicy{ID: saved.ID, Name: saved.Name, OwnerID: saved.OwnerID, Digest: digest, Policy: json.RawMessage(saved.PolicyJSON), CreatedAt: saved.CreatedAt, UpdatedAt: saved.UpdatedAt})
 			return
 		}
@@ -367,7 +367,7 @@ func (s *Server) handleAdminPolicy(w http.ResponseWriter, r *http.Request, rawID
 		writeAdminError(w, http.StatusInternalServerError, "internal_error", "could not delete traffic policy")
 		return
 	}
-	s.recordEvent("info", "management traffic policy deleted", map[string]string{"policy_id": id})
+	s.recordAdminEvent(r, "management traffic policy deleted", map[string]string{"policy_id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -408,7 +408,7 @@ func (s *Server) handleAdminDomains(w http.ResponseWriter, r *http.Request) {
 			writeAdminError(w, http.StatusUnprocessableEntity, "validation_error", "custom domain is invalid")
 			return
 		}
-		s.recordEvent("info", "management custom domain registered", map[string]string{"domain_id": domain.ID, "domain": domain.Domain})
+		s.recordAdminEvent(r, "management custom domain registered", map[string]string{"domain_id": domain.ID, "domain": domain.Domain})
 		writeAdminData(w, http.StatusCreated, domain)
 	default:
 		writeAdminMethodNotAllowed(w, http.MethodGet, http.MethodPost)
@@ -437,7 +437,7 @@ func (s *Server) handleAdminDomain(w http.ResponseWriter, r *http.Request, rawID
 		writeAdminError(w, http.StatusInternalServerError, "internal_error", "could not delete custom domain")
 		return
 	}
-	s.recordEvent("info", "management custom domain deleted", map[string]string{"domain_id": id})
+	s.recordAdminEvent(r, "management custom domain deleted", map[string]string{"domain_id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -484,7 +484,7 @@ func (s *Server) handleAdminDrain(w http.ResponseWriter, r *http.Request, rawHos
 		}
 		go s.drainSession(session, session.Sess.Control(), "management drain")
 	}
-	s.recordEvent("info", "management tunnel drain", map[string]string{
+	s.recordAdminEvent(r, "management tunnel drain", map[string]string{
 		"hostname":   host,
 		"connectors": fmt.Sprintf("%d", len(sessions)),
 	})

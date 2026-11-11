@@ -2,6 +2,7 @@ package edge
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"time"
 
@@ -81,6 +82,7 @@ func (s *Server) recordEvent(level, message string, fields map[string]string) {
 	if s.storage != nil {
 		event := storage.AuditEvent{
 			EdgeID:       s.storage.EdgeID(),
+			ActorID:      fields["actor_id"],
 			Action:       message,
 			ResourceType: "edge_event",
 			ResourceID:   fields["hostname"],
@@ -98,6 +100,21 @@ func (s *Server) recordEvent(level, message string, fields map[string]string) {
 		_ = s.storage.RecordAudit(ctx, event)
 		cancel()
 	}
+}
+
+func (s *Server) recordAdminEvent(r *http.Request, message string, fields map[string]string) {
+	recorded := make(map[string]string, len(fields)+3)
+	for key, value := range fields {
+		recorded[key] = value
+	}
+	if auth, ok := adminAuthFromContext(r.Context()); ok {
+		recorded["actor_id"] = auth.Principal.Subject
+		recorded["auth_type"] = auth.AuthType
+		if auth.CertSHA256 != "" {
+			recorded["cert_sha256"] = auth.CertSHA256
+		}
+	}
+	s.recordEvent("info", message, recorded)
 }
 
 func (s *Server) auditLoop() {

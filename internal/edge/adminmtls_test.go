@@ -20,9 +20,11 @@ import (
 	"testing"
 	"time"
 
+	"ngstone/internal/adminapi"
 	"ngstone/internal/adminapi/adminapitest"
 	"ngstone/internal/credentials"
 	"ngstone/internal/oidc"
+	"ngstone/internal/storage"
 )
 
 var clientAuthUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
@@ -526,5 +528,107 @@ func TestNewRejectsAdminMTLSMisconfiguration(t *testing.T) {
 	}
 	if disabled.adminClientCAs != nil {
 		t.Fatal("admin mTLS is enabled without being configured")
+	}
+}
+
+func TestAdminMTLSOwnershipScoping(t *testing.T) {
+	s := newAdminMTLSTestServer(t)
+	h := startAdminMTLS(t, s)
+	alice := h.cert(t, "alice", oidc.RoleOperator)
+	bob := h.cert(t, "bob", oidc.RoleOperator)
+	root := h.cert(t, "root", oidc.RoleAdmin)
+
+	status, body := h.do(t, h.client(t, &alice), http.MethodPost, "/api/v1/credentials", `{"subdomain":"alice-demo","ttl":"1h"}`, nil)
+	if status != http.StatusCreated {
+		t.Fatalf("alice issue = %d %s, want 201", status, body)
+	}
+	var issued struct {
+		Data adminapi.CredentialIssueResponse `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(body), &issued); err != nil {
+		t.Fatalf("decode issue: %v", err)
+	}
+	if issued.Data.Credential.OwnerID != "mtls:alice" {
+		t.Fatalf("credential owner = %q, want mtls:alice", issued.Data.Credential.OwnerID)
+	}
+	id := issued.Data.Credential.ID
+
+	listed := func(cert tls.Certificate) []credentials.Credential {
+		status, body := h.do(t, h.client(t, &cert), http.MethodGet, "/api/v1/credentials", "", nil)
+		if status != http.StatusOK {
+			t.Fatalf("list = %d %s, want 200", status, body)
+		}
+		var envelope struct {
+			Data []credentials.Credential `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+			t.Fatalf("decode list: %v", err)
+		}
+		return envelope.Data
+	}
+	if got := listed(alice); len(got) != 1 || got[0].ID != id {
+		t.Fatalf("alice sees %+v, want her own credential %s", got, id)
+	}
+	if got := listed(bob); len(got) != 0 {
+		t.Fatalf("bob sees %+v, want nothing", got)
+	}
+	if got := listed(root); len(got) != 1 || got[0].ID != id {
+		t.Fatalf("admin certificate sees %+v, want every credential", got)
+	}
+}
+
+func TestAdminMTLSAuditRecordsActorAndFingerprint(t *testing.T) {
+	store, err := storage.Open(storage.Config{DSN: filepath.Join(t.TempDir(), "control.db"), EdgeID: "edge-test"})
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	defer store.Close()
+	s := newAdminMTLSTestServer(t)
+	s.storage = store
+	s.credentialStore = store
+	h := startAdminMTLS(t, s)
+	alice := h.cert(t, "alice", oidc.RoleOperator)
+
+	findEvent := func(message string) opsEvent {
+		t.Helper()
+		events := s.events.snapshot()
+		for i := len(events) - 1; i >= 0; i-- {
+			if events[i].Message == message {
+				return events[i]
+			}
+		}
+		t.Fatalf("no %q event in %+v", message, events)
+		return opsEvent{}
+	}
+
+	if status, body := h.do(t, h.client(t, &alice), http.MethodPost, "/api/v1/credentials", `{"subdomain":"alice-demo","ttl":"1h"}`, nil); status != http.StatusCreated {
+		t.Fatalf("alice issue = %d %s, want 201", status, body)
+	}
+	sum := sha256.Sum256(alice.Leaf.Raw)
+	event := findEvent("management credential issued")
+	if event.Fields["actor_id"] != "mtls:alice" || event.Fields["auth_type"] != "mtls" || event.Fields["cert_sha256"] != hex.EncodeToString(sum[:]) {
+		t.Fatalf("mTLS event fields = %+v, want actor mtls:alice, auth_type mtls, certificate fingerprint", event.Fields)
+	}
+	audit, err := store.ListAudit(t.Context(), 50)
+	if err != nil {
+		t.Fatalf("ListAudit: %v", err)
+	}
+	var durable *storage.AuditEvent
+	for i := range audit {
+		if audit[i].Action == "management credential issued" {
+			durable = &audit[i]
+		}
+	}
+	if durable == nil || durable.ActorID != "mtls:alice" || durable.Metadata["cert_sha256"] != hex.EncodeToString(sum[:]) {
+		t.Fatalf("durable audit event = %+v, want actor mtls:alice and the certificate fingerprint", durable)
+	}
+
+	response := adminRequest(t, s, http.MethodPost, "/api/v1/credentials", []byte(`{"subdomain":"loopback-demo","ttl":"1h"}`), "127.0.0.1:4041", "")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("loopback issue = %d %s, want 201", response.Code, response.Body.String())
+	}
+	event = findEvent("management credential issued")
+	if event.Fields["actor_id"] != "admin" || event.Fields["auth_type"] != "loopback" || event.Fields["cert_sha256"] != "" {
+		t.Fatalf("loopback event fields = %+v, want actor admin, auth_type loopback, no fingerprint", event.Fields)
 	}
 }
