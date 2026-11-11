@@ -777,14 +777,10 @@ func TestVisitorLoginTicketRequiresInitiatingBrowser(t *testing.T) {
 	if mismatch.Code != http.StatusBadRequest || responseCookie(mismatch.Result(), visitorSessionCookie) != nil {
 		t.Fatalf("ticket with another browser's cookie = %d; want 400 and no session", mismatch.Code)
 	}
-	cleared := false
 	for _, cookie := range mismatch.Result().Cookies() {
-		if cookie.Name == bind.Name && cookie.MaxAge < 0 {
-			cleared = true
+		if cookie.Name == bind.Name {
+			t.Fatalf("a refused ticket touched the binding cookie: %+v", cookie)
 		}
-	}
-	if !cleared {
-		t.Fatal("binding cookie was not cleared on a refused ticket")
 	}
 
 	_, finishURL, bind = visitorLoginTicket(t, s, idp, "http://app.example.com/")
@@ -797,6 +793,53 @@ func TestVisitorLoginTicketRequiresInitiatingBrowser(t *testing.T) {
 	ok := visitorRequest(t, s, http.MethodGet, finishURL, htmlAccept(), bind)
 	if ok.Code != http.StatusFound || responseCookie(ok.Result(), visitorSessionCookie) == nil {
 		t.Fatalf("legitimate flow = %d, want 302 with a session", ok.Code)
+	}
+	clearedOnAccept := false
+	for _, cookie := range ok.Result().Cookies() {
+		if cookie.Name == bind.Name && cookie.MaxAge < 0 {
+			clearedOnAccept = true
+		}
+	}
+	if !clearedOnAccept {
+		t.Fatal("binding cookie was not cleared after an accepted ticket")
+	}
+}
+
+func bindingCookieTouched(rec *httptest.ResponseRecorder, name string) bool {
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestVisitorBindingCookieSurvivesRefusedFinishes(t *testing.T) {
+	idp := newFakeVisitorIdP(t)
+	s := newVisitorTestServer(t, idp)
+	bindVisitorTunnel(t, s, "app.example.com", proto.Bind{OIDC: &proto.OIDCLogin{}})
+	name := s.visitor.cookieName(visitorBindCookie)
+
+	_, finishA, bindA := visitorLoginTicket(t, s, idp, "http://app.example.com/a")
+	_, finishB, bindB := visitorLoginTicket(t, s, idp, "http://app.example.com/b")
+	if bindA.Value == bindB.Value {
+		t.Fatal("expected distinct binding values for two logins")
+	}
+
+	refused := visitorRequest(t, s, http.MethodGet, finishA, htmlAccept(), bindB)
+	if refused.Code != http.StatusBadRequest || bindingCookieTouched(refused, name) {
+		t.Fatalf("tab A finish = %d, binding cookie touched=%v; want 400 and untouched", refused.Code, bindingCookieTouched(refused, name))
+	}
+	bogus := visitorRequest(t, s, http.MethodGet, "http://app.example.com"+visitorFinishPath+"?ticket=x", htmlAccept(), bindB)
+	if bogus.Code != http.StatusBadRequest || bindingCookieTouched(bogus, name) {
+		t.Fatalf("bogus finish = %d, binding cookie touched=%v; want 400 and untouched", bogus.Code, bindingCookieTouched(bogus, name))
+	}
+	accepted := visitorRequest(t, s, http.MethodGet, finishB, htmlAccept(), bindB)
+	if accepted.Code != http.StatusFound || responseCookie(accepted.Result(), s.visitor.cookieName(visitorSessionCookie)) == nil {
+		t.Fatalf("tab B finish = %d, want 302 with a session", accepted.Code)
+	}
+	if !bindingCookieTouched(accepted, name) {
+		t.Fatal("binding cookie was not cleared after tab B's accepted ticket")
 	}
 }
 

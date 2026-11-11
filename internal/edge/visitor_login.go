@@ -305,7 +305,6 @@ func (s *Server) authorizeVisitor(w http.ResponseWriter, r *http.Request, rule *
 func (s *Server) handleVisitorFinish(w http.ResponseWriter, r *http.Request, v *visitorLogin, rule *visitorLoginRule) {
 	w.Header().Set("Cache-Control", "no-store")
 	bound := r.CookiesNamed(v.cookieName(visitorBindCookie))
-	http.SetCookie(w, v.bindCookie("", -1))
 	var ticket visitorToken
 	if !v.open(r.URL.Query().Get("ticket"), visitorPurposeTicket, &ticket) || !strings.EqualFold(stripPort(ticket.Host), stripPort(r.Host)) || ticket.ID == "" || ticket.Subject == "" || len(bound) != 1 || bound[0].Value == "" || subtle.ConstantTimeCompare([]byte(bound[0].Value), []byte(ticket.Binding)) != 1 || !v.consumeTicket(ticket.ID, ticket.ExpiresAt) {
 		writeVisitorPage(w, http.StatusBadRequest, "Sign-in expired", "Reload the page you were visiting to sign in again.")
@@ -339,6 +338,7 @@ func (s *Server) handleVisitorFinish(w http.ResponseWriter, r *http.Request, v *
 		Secure:   v.secure,
 		SameSite: http.SameSiteLaxMode,
 	})
+	http.SetCookie(w, v.bindCookie("", -1))
 	s.recordEvent("info", "visitor login", map[string]string{"hostname": stripPort(r.Host), "subject": ticket.Subject})
 	http.Redirect(w, r, safeReturnPath(ticket.Path), http.StatusFound)
 }
