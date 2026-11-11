@@ -421,35 +421,8 @@ func (p *peerForwarder) serveConn(ctx context.Context, c net.Conn) {
 		c.Close()
 		return
 	}
-	kind := peerFrameSNI
-	var tcpPort int
-	if tc.ConnectionState().NegotiatedProtocol == peerALPN2 {
-		var head [1]byte
-		if _, err := io.ReadFull(tc, head[:]); err != nil {
-			slog.Debug("edge: peer frame header unreadable", "remote", c.RemoteAddr().String(), "err", err)
-			tc.Close()
-			return
-		}
-		kind = head[0]
-		switch kind {
-		case peerFrameSNI, peerFrameControl:
-		case peerFrameTCP:
-			var port [2]byte
-			if _, err := io.ReadFull(tc, port[:]); err != nil {
-				slog.Debug("edge: peer frame port unreadable", "remote", c.RemoteAddr().String(), "err", err)
-				tc.Close()
-				return
-			}
-			tcpPort = int(binary.BigEndian.Uint16(port[:]))
-		default:
-			slog.Debug("edge: peer frame of unknown type", "remote", c.RemoteAddr().String(), "type", kind)
-			tc.Close()
-			return
-		}
-	}
-	remote, err := readProxyProtoHeader(tc, nil)
-	if err != nil || remote == nil {
-		slog.Debug("edge: peer connection without a client address", "remote", c.RemoteAddr().String(), "err", err)
+	kind, tcpPort, remote, ok := readPeerFrameHeader(tc)
+	if !ok {
 		tc.Close()
 		return
 	}
@@ -474,6 +447,37 @@ func (p *peerForwarder) serveConn(ctx context.Context, c net.Conn) {
 	p.handshakeSem.release()
 	metricPeerAcceptedConns.Add(1)
 	p.public.classifyForwarded(&peerConn{Conn: tc, remote: remote})
+}
+
+func readPeerFrameHeader(tc *tls.Conn) (kind byte, port int, remote net.Addr, ok bool) {
+	kind = peerFrameSNI
+	if tc.ConnectionState().NegotiatedProtocol == peerALPN2 {
+		var head [1]byte
+		if _, err := io.ReadFull(tc, head[:]); err != nil {
+			slog.Debug("edge: peer frame header unreadable", "remote", tc.RemoteAddr().String(), "err", err)
+			return 0, 0, nil, false
+		}
+		kind = head[0]
+		switch kind {
+		case peerFrameSNI, peerFrameControl:
+		case peerFrameTCP:
+			var raw [2]byte
+			if _, err := io.ReadFull(tc, raw[:]); err != nil {
+				slog.Debug("edge: peer frame port unreadable", "remote", tc.RemoteAddr().String(), "err", err)
+				return 0, 0, nil, false
+			}
+			port = int(binary.BigEndian.Uint16(raw[:]))
+		default:
+			slog.Debug("edge: peer frame of unknown type", "remote", tc.RemoteAddr().String(), "type", kind)
+			return 0, 0, nil, false
+		}
+	}
+	remote, err := readProxyProtoHeader(tc, nil)
+	if err != nil || remote == nil {
+		slog.Debug("edge: peer connection without a client address", "remote", tc.RemoteAddr().String(), "err", err)
+		return 0, 0, nil, false
+	}
+	return kind, port, remote, true
 }
 
 func (p *peerForwarder) serveTCP(tc *tls.Conn, port int, remote net.Addr, releaseHandshake func()) {
