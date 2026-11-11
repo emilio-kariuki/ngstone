@@ -87,6 +87,7 @@ type dashboardMetrics struct {
 	PeerLookups              int64 `json:"peer_lookups"`
 	PeerLookupErrors         int64 `json:"peer_lookup_errors"`
 	PeerRejectedLookupCap    int64 `json:"peer_rejected_lookup_cap"`
+	PeerRejectedForwardCap   int64 `json:"peer_rejected_forward_cap"`
 	PeerAcceptedConns        int64 `json:"peer_accepted_conns"`
 	PeerRejectedAuth         int64 `json:"peer_rejected_auth"`
 	PeerVersionSkew          int64 `json:"peer_version_skew"`
@@ -348,6 +349,7 @@ func dashboardMetricsSnapshot() dashboardMetrics {
 		PeerLookups:              metricPeerLookups.Value(),
 		PeerLookupErrors:         metricPeerLookupErrors.Value(),
 		PeerRejectedLookupCap:    metricPeerRejectedLookupCap.Value(),
+		PeerRejectedForwardCap:   metricPeerRejectedForwardCap.Value(),
 		PeerAcceptedConns:        metricPeerAcceptedConns.Value(),
 		PeerRejectedAuth:         metricPeerRejectedAuth.Value(),
 		PeerVersionSkew:          metricPeerVersionSkew.Value(),
@@ -406,6 +408,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writePrometheusCounter(w, "ngstoned_peer_lookups_total", "Tunnel owner lookups issued for forwarding.", metrics.PeerLookups)
 	writePrometheusCounter(w, "ngstoned_peer_lookup_errors_total", "Tunnel owner lookups that failed.", metrics.PeerLookupErrors)
 	writePrometheusCounter(w, "ngstoned_peer_rejected_lookup_cap_total", "Forwards rejected by the owner lookup concurrency cap.", metrics.PeerRejectedLookupCap)
+	writePrometheusCounter(w, "ngstoned_peer_rejected_forward_cap_total", "Forwards rejected by the forwarded connection concurrency cap.", metrics.PeerRejectedForwardCap)
 	writePrometheusCounter(w, "ngstoned_peer_accepted_conns_total", "Forwarded connections accepted from peer edges.", metrics.PeerAcceptedConns)
 	writePrometheusCounter(w, "ngstoned_peer_rejected_auth_total", "Peer connections rejected during authentication.", metrics.PeerRejectedAuth)
 	writePrometheusCounter(w, "ngstoned_peer_version_skew_total", "Forwards skipped because the owner edge only speaks an older peer protocol.", metrics.PeerVersionSkew)

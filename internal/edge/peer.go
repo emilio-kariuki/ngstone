@@ -758,7 +758,7 @@ func (p *peerForwarder) connect(key string, entry *ownerEntry, frame peerFrame) 
 
 func (p *peerForwarder) reserve(ip string) (func(), bool) {
 	if !p.forwardSem.tryAcquire() {
-		metricTLSRejectedGlobalCap.Add(1)
+		metricPeerRejectedForwardCap.Add(1)
 		return nil, false
 	}
 	releaseIP, ok := p.srv.perIP.acquire(ip)

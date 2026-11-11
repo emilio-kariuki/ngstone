@@ -1726,12 +1726,13 @@ func TestPeerForwardCapsRejectWithoutDialing(t *testing.T) {
 				t.Fatalf("forward slot %d not free", i)
 			}
 		}
-		rejected := metricDelta(metricTLSRejectedGlobalCap)
+		rejected := metricDelta(metricPeerRejectedForwardCap)
+		tlsRejected := metricDelta(metricTLSRejectedGlobalCap)
 
 		c := sendRawHello(t, a.addr, helloFor(t, peerTestHost))
 		expectClosed(t, c)
-		if rejected() != 1 || b.accepts.Load() != 0 {
-			t.Fatalf("global cap rejections=%d dials=%d, want 1 and 0", rejected(), b.accepts.Load())
+		if rejected() != 1 || tlsRejected() != 0 || b.accepts.Load() != 0 {
+			t.Fatalf("forward cap rejections=%d tls global cap rejections=%d dials=%d, want 1, 0 and 0", rejected(), tlsRejected(), b.accepts.Load())
 		}
 		for i := 0; i < maxPeerForwards; i++ {
 			p.forwardSem.release()
