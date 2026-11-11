@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -171,6 +172,7 @@ func (p *peerForwarder) routeControl(ctx context.Context, conn net.Conn, ip stri
 	tracker := &readErrTracker{r: conn}
 	captured, secret, ok := sniffShareSecret(tracker)
 	if !ok && tracker.err != nil {
+		slog.Warn("edge: auth attempt", "ip", ip, "result", "no_auth_message", "err", tracker.err)
 		conn.Close()
 		return nil, true
 	}
@@ -200,7 +202,7 @@ func (p *peerForwarder) routeControl(ctx context.Context, conn net.Conn, ip stri
 	}
 	if !p.lookupSem.tryAcquire() {
 		metricPeerRejectedLookupCap.Add(1)
-		return local, false
+		return p.forwardFailed(conn)
 	}
 	metricPeerLookups.Add(1)
 	lctx, cancel := context.WithTimeout(ctx, peerLookupTimeout)
@@ -210,7 +212,7 @@ func (p *peerForwarder) routeControl(ctx context.Context, conn net.Conn, ip stri
 	if err != nil {
 		metricPeerLookupErrors.Add(1)
 		slogStorageError("lookup share edge", err)
-		return local, false
+		return p.forwardFailed(conn)
 	}
 	if !found {
 		p.misses.Add(missKey, struct{}{})
@@ -218,17 +220,17 @@ func (p *peerForwarder) routeControl(ctx context.Context, conn net.Conn, ip stri
 	}
 	release, ok := p.reserve(ip)
 	if !ok {
-		return local, false
+		return p.forwardFailed(conn)
 	}
 	defer release()
 	if !p.beginSplice() {
-		return local, false
+		return p.forwardFailed(conn)
 	}
 	defer p.splices.Done()
 	upstream, _ := p.connect("", &ownerEntry{peers: []storage.EdgePeer{owner}}, peerFrame{kind: peerFrameControl, src: src, payload: captured})
 	if upstream == nil {
 		metricPeerForwardFailed.Add(1)
-		return local, false
+		return p.forwardFailed(conn)
 	}
 	defer upstream.Close()
 	defer conn.Close()
@@ -241,6 +243,12 @@ func (p *peerForwarder) routeControl(ctx context.Context, conn net.Conn, ip stri
 	defer metricActivePeerForwards.Add(-1)
 	metricPeerControlForwarded.Add(1)
 	p.spliceUntilDone(ctx, conn, upstream)
+	return nil, true
+}
+
+func (p *peerForwarder) forwardFailed(conn net.Conn) (net.Conn, bool) {
+	metricControlForwardFailed.Add(1)
+	conn.Close()
 	return nil, true
 }
 

@@ -49,6 +49,7 @@ var (
 	metricActivePeerForwards     = expvar.NewInt("ngstoned_active_peer_forwards")
 	metricPeerTCPForwarded       = expvar.NewInt("ngstoned_peer_tcp_forwarded_total")
 	metricPeerControlForwarded   = expvar.NewInt("ngstoned_peer_control_forwarded_total")
+	metricControlForwardFailed   = expvar.NewInt("ngstoned_peer_control_forward_failed_total")
 	metricShareDirectoryErrors   = expvar.NewInt("ngstoned_share_directory_errors_total")
 	metricPeerTCPBindFailed      = expvar.NewInt("ngstoned_peer_tcp_bind_failed_total")
 	metricPeerTCPListeners       = expvar.NewInt("ngstoned_peer_tcp_listeners")

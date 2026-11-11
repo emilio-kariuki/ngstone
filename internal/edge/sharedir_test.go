@@ -6,8 +6,10 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -323,11 +325,19 @@ func TestControlForwardLookupSemFullTakesLocalPath(t *testing.T) {
 		}
 	}
 	capped := metricDelta(metricPeerRejectedLookupCap)
-	if d := dialConnector(t, addr, "the-link-secret"); d.reply.Type == proto.TypeAuthOK {
-		t.Fatal("forwarded while the lookup semaphore was full")
+	failed := metricDelta(metricControlForwardFailed)
+	d := dialConnector(t, addr, "the-link-secret")
+	if d.reply.Type != "" {
+		t.Fatalf("reply = %s %s, want the connection closed without an answer", d.reply.Type, d.reply.Data)
 	}
-	if capped() != 1 {
-		t.Fatalf("lookup cap rejections = %d, want 1", capped())
+	if capped() != 1 || failed() != 1 {
+		t.Fatalf("lookup cap rejections = %d forward failures = %d, want 1 and 1", capped(), failed())
+	}
+	if n := authFailures(cl.a.srv, "127.0.0.1"); n != 0 {
+		t.Fatalf("auth failures charged = %d, want 0", n)
+	}
+	if _, cached := cl.a.srv.peers.misses.Get("share:" + shareDirKey(shareSecretHashBytes("the-link-secret"))); cached {
+		t.Fatal("a full lookup semaphore was cached as a miss")
 	}
 	for i := 0; i < maxPeerLookups; i++ {
 		cl.a.srv.peers.lookupSem.release()
@@ -343,13 +353,20 @@ func TestControlForwardStoreErrorFailsClosed(t *testing.T) {
 	addr := serveControlOn(t, cl.a)
 	cl.a.store.Close()
 	errs, forwarded := metricDelta(metricPeerLookupErrors), metricDelta(metricPeerControlForwarded)
+	failed, dials, accepted := metricDelta(metricControlForwardFailed), metricDelta(metricPeerForwardFailed), metricDelta(metricPeerAcceptedConns)
 
 	d := dialConnector(t, addr, "the-link-secret")
-	if d.reply.Type != proto.TypeAuthErr {
-		t.Fatalf("reply = %s %s, want the local bad_share answer", d.reply.Type, d.reply.Data)
+	if d.reply.Type != "" {
+		t.Fatalf("reply = %s %s, want the connection closed without an answer", d.reply.Type, d.reply.Data)
 	}
-	if errs() != 1 || forwarded() != 0 {
-		t.Fatalf("lookup errors = %d forwarded = %d, want 1 and 0", errs(), forwarded())
+	if errs() != 1 || forwarded() != 0 || failed() != 1 {
+		t.Fatalf("lookup errors = %d forwarded = %d forward failures = %d, want 1, 0 and 1", errs(), forwarded(), failed())
+	}
+	if dials() != 0 || accepted() != 0 {
+		t.Fatalf("dial failures = %d accepted = %d, want no dial after a failed lookup", dials(), accepted())
+	}
+	if n := authFailures(cl.a.srv, "127.0.0.1"); n != 0 {
+		t.Fatalf("auth failures charged = %d, want 0", n)
 	}
 	if _, cached := cl.a.srv.peers.misses.Get("share:" + shareDirKey(shareSecretHashBytes("the-link-secret"))); cached {
 		t.Fatal("a storage error was cached as a miss")
@@ -1115,4 +1132,80 @@ func TestQuickReRegisterKeepsDirectoryRow(t *testing.T) {
 			t.Fatalf("round %d: the old registration's withdraw removed the new row", i)
 		}
 	}
+}
+
+func authFailures(s *Server, ip string) int {
+	l := s.authLimiter
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	times, _ := l.attempts.Get(rateLimitKey(ip))
+	return len(times)
+}
+
+func TestControlForwardHolderUnreachableClosesConnection(t *testing.T) {
+	cl := newShareCluster(t)
+	startShare(t, cl.b, "the-link-secret", nil)
+	addr := serveControlOn(t, cl.a)
+	cl.b.srv.peers.ln.Close()
+	failed, forwarded := metricDelta(metricControlForwardFailed), metricDelta(metricPeerControlForwarded)
+
+	d := dialConnector(t, addr, "the-link-secret")
+	if d.reply.Type != "" {
+		t.Fatalf("reply = %s %s, want the connection closed without an answer", d.reply.Type, d.reply.Data)
+	}
+	if failed() != 1 || forwarded() != 0 {
+		t.Fatalf("forward failures = %d forwarded = %d, want 1 and 0", failed(), forwarded())
+	}
+	if n := authFailures(cl.a.srv, "127.0.0.1"); n != 0 {
+		t.Fatalf("auth failures charged = %d, want 0", n)
+	}
+	if _, cached := cl.a.srv.peers.misses.Get("share:" + shareDirKey(shareSecretHashBytes("the-link-secret"))); cached {
+		t.Fatal("an unreachable holder was cached as a miss")
+	}
+}
+
+func TestControlForwardCapClosesConnection(t *testing.T) {
+	cl := newShareCluster(t)
+	startShare(t, cl.b, "the-link-secret", nil)
+	addr := serveControlOn(t, cl.a)
+	for i := 0; i < maxPeerForwards; i++ {
+		if !cl.a.srv.peers.forwardSem.tryAcquire() {
+			t.Fatal("forward semaphore smaller than expected")
+		}
+	}
+	t.Cleanup(func() {
+		for i := 0; i < maxPeerForwards; i++ {
+			cl.a.srv.peers.forwardSem.release()
+		}
+	})
+	failed := metricDelta(metricControlForwardFailed)
+
+	d := dialConnector(t, addr, "the-link-secret")
+	if d.reply.Type != "" {
+		t.Fatalf("reply = %s %s, want the connection closed without an answer", d.reply.Type, d.reply.Data)
+	}
+	if failed() != 1 {
+		t.Fatalf("forward failures = %d, want 1", failed())
+	}
+	if n := authFailures(cl.a.srv, "127.0.0.1"); n != 0 {
+		t.Fatalf("auth failures charged = %d, want 0", n)
+	}
+}
+
+func TestControlSniffReadErrorIsLogged(t *testing.T) {
+	cl := newShareCluster(t)
+	addr := serveControlOn(t, cl.a)
+	logs := &lockedBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	nc, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nc.Close()
+	peerEventually(t, "the sniff failure to be logged", func() bool {
+		return strings.Contains(logs.String(), `"result":"no_auth_message"`)
+	})
 }

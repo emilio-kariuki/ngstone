@@ -96,6 +96,7 @@ type dashboardMetrics struct {
 	ActivePeerForwards       int64 `json:"active_peer_forwards"`
 	PeerTCPForwarded         int64 `json:"peer_tcp_forwarded"`
 	PeerControlForwarded     int64 `json:"peer_control_forwarded"`
+	PeerControlForwardFailed int64 `json:"peer_control_forward_failed"`
 	ShareDirectoryErrors     int64 `json:"share_directory_errors"`
 	PeerTCPBindFailed        int64 `json:"peer_tcp_bind_failed"`
 	PeerTCPListeners         int64 `json:"peer_tcp_listeners"`
@@ -361,6 +362,7 @@ func dashboardMetricsSnapshot() dashboardMetrics {
 		ActivePeerForwards:       metricActivePeerForwards.Value(),
 		PeerTCPForwarded:         metricPeerTCPForwarded.Value(),
 		PeerControlForwarded:     metricPeerControlForwarded.Value(),
+		PeerControlForwardFailed: metricControlForwardFailed.Value(),
 		ShareDirectoryErrors:     metricShareDirectoryErrors.Value(),
 		PeerTCPBindFailed:        metricPeerTCPBindFailed.Value(),
 		PeerTCPListeners:         metricPeerTCPListeners.Value(),
@@ -423,6 +425,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writePrometheusGauge(w, "ngstoned_active_peer_forwards", "Currently spliced forwarded connections.", metrics.ActivePeerForwards)
 	writePrometheusCounter(w, "ngstoned_peer_tcp_forwarded_total", "Raw TCP connections forwarded to the edge that owns the tunnel.", metrics.PeerTCPForwarded)
 	writePrometheusCounter(w, "ngstoned_peer_control_forwarded_total", "Share-link connector sessions forwarded to the edge that holds the share.", metrics.PeerControlForwarded)
+	writePrometheusCounter(w, "ngstoned_peer_control_forward_failed_total", "Share-link connector sessions closed because the share's holding edge could not be looked up or reached.", metrics.PeerControlForwardFailed)
 	writePrometheusCounter(w, "ngstoned_share_directory_errors_total", "Share directory writes that failed after the share was accepted.", metrics.ShareDirectoryErrors)
 	writePrometheusCounter(w, "ngstoned_peer_tcp_bind_failed_total", "Ports of TCP tunnels on other edges that this edge could not bind.", metrics.PeerTCPBindFailed)
 	writePrometheusGauge(w, "ngstoned_peer_tcp_listeners", "Ports currently open to forward raw TCP tunnels owned by other edges.", metrics.PeerTCPListeners)
