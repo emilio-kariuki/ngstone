@@ -187,8 +187,8 @@ func TestTLSPassthroughEndToEnd(t *testing.T) {
 			t.Fatalf("http through shared listener = %d %q %v", status, body, err)
 		}
 		status, _, err = doGet(publicAddr, hostname, "/")
-		if err != nil || status != http.StatusNotFound {
-			t.Fatalf("plain http to the tls hostname = %d %v, want 404", status, err)
+		if err != nil || status != http.StatusMisdirectedRequest {
+			t.Fatalf("plain http to the tls hostname = %d %v, want 421", status, err)
 		}
 	})
 

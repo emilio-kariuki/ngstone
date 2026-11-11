@@ -128,7 +128,7 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	}
 	b, ok := s.registry.Route(host)
 	if !ok {
-		writeError(rec, http.StatusNotFound)
+		writeError(rec, s.routeMissStatus(host))
 		return
 	}
 	var requestBytes countingReadCloser
@@ -447,6 +447,13 @@ func proxyErrorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	}
 
 	writeError(w, http.StatusBadGateway)
+}
+
+func (s *Server) routeMissStatus(host string) int {
+	if _, ok := s.registry.RouteTLS(host); ok {
+		return http.StatusMisdirectedRequest
+	}
+	return http.StatusNotFound
 }
 
 func writeError(w http.ResponseWriter, status int) {

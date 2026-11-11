@@ -30,9 +30,12 @@ export default function TlsPassthroughPage() {
         <code>ngstone port</code> ends TLS at the edge with the edge&apos;s
         wildcard certificate, then forwards plain HTTP to your app.{" "}
         <code>ngstone tls</code> does the opposite: the edge never decrypts
-        anything. It reads only the hostname the client asked for, then
-        hands the encrypted connection to your local service, which runs the
-        TLS handshake with its own certificate.
+        traffic for a passthrough connection. It reads only the hostname the
+        client asked for, then hands the encrypted connection to your local
+        service, which runs the TLS handshake with its own certificate. An
+        HTTPS request that reaches the edge&apos;s own TLS for that hostname
+        (for example on a reused or domain-fronted connection) gets 421 and
+        is never forwarded.
       </p>
 
       <Anchor id="when-to-use-it">When to use it</Anchor>

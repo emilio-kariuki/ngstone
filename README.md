@@ -387,9 +387,11 @@ tunnels and the `/_ngstone/control` WebSocket fallback on the apex keep
 working on the same port. The peek is bounded to 16 KiB and the edge's
 `-read-header-timeout`.
 
-Because the edge never decrypts the stream, `--basic-auth`, `--host-header`,
-`--policy-file`, `--http2`, and `--multi-connector` are rejected for `tls`
-tunnels; `--allow-cidr`, per-IP rate and in-flight limits, PROXY protocol
+The edge never decrypts traffic for a passthrough connection; an HTTPS request
+that reaches the edge's own TLS for that hostname (for example on a reused or
+domain-fronted connection) gets 421 and is never forwarded. Because of that,
+`--basic-auth`, `--host-header`, `--policy-file`, `--http2`, and
+`--multi-connector` are rejected for `tls` tunnels; `--allow-cidr`, per-IP rate and in-flight limits, PROXY protocol
 client addresses, and `--ttl` all apply. The local service needs a certificate
 for the public hostname (`secure.example.com`) that clients trust; the edge's
 own certificate is never involved. A hostname is either an HTTP or a `tls`

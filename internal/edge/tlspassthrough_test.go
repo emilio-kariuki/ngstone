@@ -676,3 +676,36 @@ func TestSNIListenerKeepsWebSocketControlFallbackOverTLS(t *testing.T) {
 		t.Fatal("passthrough client did not see the agent certificate")
 	}
 }
+
+func TestHandlePublicMisdirectsTLSPassthroughHost(t *testing.T) {
+	agentCert, _ := passthroughTestCert(t, "secure.example.com")
+	h := newSNIHarness(t, agentCert, nil)
+	ac, _ := buildAccessControl(proto.Bind{AllowCIDRs: []string{"10.0.0.0/8"}})
+	h.bindTLS(t, "secure.example.com", ac)
+
+	cases := []struct {
+		host string
+		want int
+	}{
+		{"secure.example.com", http.StatusMisdirectedRequest},
+		{"unbound.example.com", http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.host, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.srv.handlePublic(rec, httptest.NewRequest("GET", "https://"+tc.host+"/x", nil))
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.want)
+			}
+			if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+				t.Fatalf("content-type = %q, want text/html", ct)
+			}
+			if c := rec.Header().Get("Connection"); c != "" {
+				t.Fatalf("Connection header = %q, want none", c)
+			}
+			if h.agentHit.Load() != 0 {
+				t.Fatal("agent saw a stream")
+			}
+		})
+	}
+}

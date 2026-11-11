@@ -748,8 +748,11 @@ $ ngstone tcp db.local:5432 --remote-port 15432`}
       <Anchor id="ngstone-tls">ngstone tls</Anchor>
       <p>
         Starts a TLS passthrough tunnel: the edge routes connections by
-        ClientHello SNI and never decrypts them, so the local service
-        presents its own certificate. See{" "}
+        ClientHello SNI. The edge never decrypts traffic for a passthrough
+        connection, so the local service presents its own certificate; an
+        HTTPS request that reaches the edge&apos;s own TLS for that hostname
+        (for example on a reused or domain-fronted connection) gets 421 and
+        is never forwarded. See{" "}
         <a href="/docs/guides/tls-passthrough">TLS passthrough</a>.
       </p>
       <CodeBlock
