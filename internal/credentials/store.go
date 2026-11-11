@@ -27,6 +27,7 @@ const (
 	KindTCP        = "tcp"
 	KindTLS        = "tls"
 	KindPreview    = "preview"
+	KindShare      = "share"
 	MaxTTL         = 30 * 24 * time.Hour
 	GlobalOwnerID  = "__ngstone_global_admin__"
 	InvalidOwnerID = "__ngstone_invalid_owner__"
@@ -405,6 +406,10 @@ func normalizeSpec(spec Spec) (Spec, error) {
 		if spec.RemotePort != 0 {
 			return Spec{}, errors.New("credentials: remote port is only valid for TCP credentials")
 		}
+	case KindShare:
+		if spec.Subdomain != "" || spec.RemotePort != 0 {
+			return Spec{}, errors.New("credentials: share credentials do not take a subdomain or remote port")
+		}
 	case KindTCP:
 		if spec.Subdomain != "" {
 			return Spec{}, errors.New("credentials: subdomain is only valid for HTTP or TLS credentials")
@@ -413,7 +418,7 @@ func normalizeSpec(spec Spec) (Spec, error) {
 			return Spec{}, errors.New("credentials: TCP credentials require a remote port between 1 and 65535")
 		}
 	default:
-		return Spec{}, fmt.Errorf("credentials: kind must be %q, %q, %q, or %q", KindHTTP, KindTCP, KindTLS, KindPreview)
+		return Spec{}, fmt.Errorf("credentials: kind must be %q, %q, %q, %q, or %q", KindHTTP, KindTCP, KindTLS, KindPreview, KindShare)
 	}
 	return spec, nil
 }
