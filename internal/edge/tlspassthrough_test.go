@@ -743,3 +743,50 @@ func TestTLSPassthroughReleasesSlotsWhenSessionCloses(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+func TestSNIListenerClosesOversizedClientHello(t *testing.T) {
+	agentCert, _ := passthroughTestCert(t, "secure.example.com")
+	h := newSNIHarness(t, agentCert, nil)
+	h.bindTLS(t, "secure.example.com", nil)
+
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		if c, err := h.ln.Accept(); err == nil {
+			accepted <- c
+		}
+	}()
+
+	declared := 20000
+	msg := make([]byte, 4+declared)
+	msg[0] = 0x01
+	msg[1], msg[2], msg[3] = byte(declared>>16), byte(declared>>8), byte(declared)
+	record := append([]byte{0x16, 0x03, 0x01, 0, 0}, msg...)
+	input := fragmentClientHello(record, 16384, 16384)
+
+	raw, err := net.DialTimeout("tcp", h.addr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer raw.Close()
+	go raw.Write(input)
+
+	_ = raw.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, err = raw.Read(make([]byte, 1))
+	if err == nil {
+		t.Fatal("read returned data instead of a close")
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		t.Fatalf("connection was not closed within 3s: %v", err)
+	}
+
+	select {
+	case c := <-accepted:
+		c.Close()
+		t.Fatal("oversized ClientHello was handed to the terminating path")
+	case <-time.After(500 * time.Millisecond):
+	}
+	if h.agentHit.Load() != 0 {
+		t.Fatal("agent saw a stream for an oversized ClientHello")
+	}
+}

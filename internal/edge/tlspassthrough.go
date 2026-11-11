@@ -219,7 +219,7 @@ func (l *sniListener) classify(c net.Conn) {
 		return
 	}
 	serverName, peeked, err := peekClientHello(c, l.maxPeek)
-	if err != nil && !errors.Is(err, errNotClientHello) && !errors.Is(err, errClientHelloTooLarge) {
+	if err != nil && !errors.Is(err, errNotClientHello) {
 		c.Close()
 		return
 	}

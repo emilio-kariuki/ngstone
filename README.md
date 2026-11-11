@@ -388,7 +388,7 @@ Connections whose SNI is not a `tls` tunnel, that carry no SNI, or that are not
 TLS at all continue to the normal TLS-terminating path unchanged, so HTTP
 tunnels and the `/_ngstone/control` WebSocket fallback on the apex keep
 working on the same port. The peek is bounded to 16 KiB and the edge's
-`-read-header-timeout`.
+`-read-header-timeout`; a larger ClientHello is closed.
 
 The edge never decrypts traffic for a passthrough connection; an HTTPS request
 that reaches the edge's own TLS for that hostname (for example on a reused or

@@ -92,7 +92,7 @@ $ curl https://secure.example.com/`}
         Every connection to the edge&apos;s public port starts with a peek
         at the TLS ClientHello. The peek is limited to 16 KiB and to the
         edge&apos;s read-header timeout, and it doesn&apos;t consume the
-        bytes. If the SNI hostname belongs to a <code>tls</code> tunnel, the
+        bytes. A ClientHello larger than that is closed. If the SNI hostname belongs to a <code>tls</code> tunnel, the
         edge opens a stream to your agent, replays the ClientHello, and
         copies bytes both ways. The agent dials your local service and does
         the same.
