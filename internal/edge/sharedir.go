@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"io"
 	"net"
 	"sync"
 	"time"
 
+	"ngstone/internal/proto"
 	"ngstone/internal/storage"
 )
 
@@ -59,19 +61,37 @@ func (r *shareRegistry) live() []*share {
 
 func (s *Server) publishShare(sh *share) error {
 	if f := s.peers.beforePublish; f != nil {
-		f()
+		if err := f(); err != nil {
+			return err
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), peerDeleteTimeout)
 	defer cancel()
 	return s.peers.store.PublishShare(ctx, shareDirKey(sh.secretHash[:]), sh.id, s.peers.selfID, sh.ownerID, s.shares.expiry(sh))
 }
 
+func (s *Server) reassertShare(sh *share) error {
+	if f := s.peers.beforePublish; f != nil {
+		if err := f(); err != nil {
+			return err
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), peerDeleteTimeout)
+	defer cancel()
+	return s.peers.store.ReassertShare(ctx, shareDirKey(sh.secretHash[:]), sh.id, s.peers.selfID, sh.ownerID, s.shares.expiry(sh))
+}
+
 func (s *Server) withdrawShare(sh *share) {
 	key := shareDirKey(sh.secretHash[:])
+	s.peers.withdraws.Add(1)
 	go func() {
+		defer s.peers.withdraws.Done()
+		if f := s.peers.beforeWithdraw; f != nil {
+			f()
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), peerDeleteTimeout)
 		defer cancel()
-		slogStorageError("withdraw share", s.peers.store.WithdrawShare(ctx, key, s.peers.selfID))
+		slogStorageError("withdraw share", s.peers.store.WithdrawShare(ctx, key, s.peers.selfID, sh.id))
 	}()
 }
 
@@ -90,9 +110,23 @@ func (s *Server) shareNotFoundMessage() string {
 	return "no such live share on edge " + s.peers.selfID
 }
 
-func (p *peerForwarder) republishShares() {
-	for _, sh := range p.srv.shares.live() {
-		slogStorageError("publish share", p.srv.publishShare(sh))
+func (p *peerForwarder) reassertShares() {
+	s := p.srv
+	for _, sh := range s.shares.live() {
+		err := s.reassertShare(sh)
+		switch {
+		case err == nil:
+			if _, live := s.shares.byShareID(sh.id); !live {
+				s.withdrawShare(sh)
+			}
+		case errors.Is(err, storage.ErrShareTaken):
+			s.closeShare(sh, proto.ShareReasonTaken)
+		case errors.Is(err, storage.ErrShareMoved):
+			s.closeShare(sh, proto.ShareReasonMoved)
+		default:
+			slogStorageError("reassert share", err)
+			metricShareDirectoryErrors.Add(1)
+		}
 	}
 }
 

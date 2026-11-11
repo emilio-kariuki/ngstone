@@ -12,22 +12,44 @@ func (s *Store) PublishShare(ctx context.Context, dirKey, shareID, edgeID, owner
 	if dirKey == "" || shareID == "" || edgeID == "" || ownerID == "" {
 		return ErrInvalid
 	}
-	res, err := s.exec(ctx, `INSERT INTO share_directory (dir_key, share_id, edge_id, owner_id, expires_at, revoked) VALUES ($1, $2, $3, $4, $5, 0) ON CONFLICT(dir_key) DO UPDATE SET share_id = excluded.share_id, edge_id = excluded.edge_id, expires_at = excluded.expires_at, revoked = CASE WHEN share_directory.share_id = excluded.share_id THEN share_directory.revoked ELSE 0 END WHERE share_directory.owner_id = excluded.owner_id`, dirKey, shareID, edgeID, ownerID, nowString(expiresAt))
+	res, err := s.exec(ctx, `INSERT INTO share_directory (dir_key, share_id, edge_id, owner_id, expires_at, revoked) VALUES ($1, $2, $3, $4, $5, 0) ON CONFLICT(dir_key) DO UPDATE SET share_id = excluded.share_id, edge_id = excluded.edge_id, expires_at = excluded.expires_at, revoked = CASE WHEN share_directory.share_id = excluded.share_id THEN share_directory.revoked ELSE 0 END WHERE share_directory.owner_id = excluded.owner_id AND (share_directory.share_id <> excluded.share_id OR share_directory.edge_id = excluded.edge_id)`, dirKey, shareID, edgeID, ownerID, nowString(expiresAt))
+	return s.shareWriteResult(ctx, "publish share", res, err, dirKey, ownerID)
+}
+
+func (s *Store) ReassertShare(ctx context.Context, dirKey, shareID, edgeID, ownerID string, expiresAt time.Time) error {
+	if dirKey == "" || shareID == "" || edgeID == "" || ownerID == "" {
+		return ErrInvalid
+	}
+	res, err := s.exec(ctx, `INSERT INTO share_directory (dir_key, share_id, edge_id, owner_id, expires_at, revoked) VALUES ($1, $2, $3, $4, $5, 0) ON CONFLICT(dir_key) DO UPDATE SET expires_at = excluded.expires_at WHERE share_directory.share_id = excluded.share_id AND share_directory.edge_id = excluded.edge_id AND share_directory.owner_id = excluded.owner_id`, dirKey, shareID, edgeID, ownerID, nowString(expiresAt))
+	return s.shareWriteResult(ctx, "reassert share", res, err, dirKey, ownerID)
+}
+
+func (s *Store) shareWriteResult(ctx context.Context, op string, res sql.Result, err error, dirKey, ownerID string) error {
 	if err != nil {
-		return fmt.Errorf("storage: publish share: %w", err)
+		return fmt.Errorf("storage: %s: %w", op, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("storage: publish share: %w", err)
+		return fmt.Errorf("storage: %s: %w", op, err)
 	}
-	if n == 0 {
+	if n > 0 {
+		return nil
+	}
+	var owner string
+	err = s.db.QueryRowContext(ctx, s.bind(`SELECT owner_id FROM share_directory WHERE dir_key = $1`), dirKey).Scan(&owner)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("storage: %s: directory row changed during the write", op)
+	case err != nil:
+		return fmt.Errorf("storage: %s: %w", op, err)
+	case owner != ownerID:
 		return ErrShareTaken
 	}
-	return nil
+	return ErrShareMoved
 }
 
-func (s *Store) WithdrawShare(ctx context.Context, dirKey, edgeID string) error {
-	if _, err := s.exec(ctx, `DELETE FROM share_directory WHERE dir_key = $1 AND edge_id = $2`, dirKey, edgeID); err != nil {
+func (s *Store) WithdrawShare(ctx context.Context, dirKey, edgeID, shareID string) error {
+	if _, err := s.exec(ctx, `DELETE FROM share_directory WHERE dir_key = $1 AND edge_id = $2 AND share_id = $3`, dirKey, edgeID, shareID); err != nil {
 		return fmt.Errorf("storage: withdraw share: %w", err)
 	}
 	return nil

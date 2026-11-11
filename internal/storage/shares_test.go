@@ -61,13 +61,13 @@ func TestWithdrawShareIsGuardedByEdgeID(t *testing.T) {
 		ctx := context.Background()
 		seedPeer(t, s, "edge-b", time.Now().Add(time.Hour))
 		seedLiveShare(t, s, "key-1", "share-1", "edge-b", "owner-a")
-		if err := s.WithdrawShare(ctx, "key-1", "edge-c"); err != nil {
+		if err := s.WithdrawShare(ctx, "key-1", "edge-c", "share-1"); err != nil {
 			t.Fatal(err)
 		}
 		if _, ok, _ := s.LookupShareEdge(ctx, "key-1", "edge-a", time.Now()); !ok {
 			t.Fatal("withdraw by another edge deleted the row")
 		}
-		if err := s.WithdrawShare(ctx, "key-1", "edge-b"); err != nil {
+		if err := s.WithdrawShare(ctx, "key-1", "edge-b", "share-1"); err != nil {
 			t.Fatal(err)
 		}
 		if _, ok, _ := s.LookupShareEdge(ctx, "key-1", "edge-a", time.Now()); ok {
@@ -314,5 +314,129 @@ func TestMigrationUpgradesFromVersion5(t *testing.T) {
 		dsn := postgresSchemaDSN(t)
 		s := openPostgresTestStore(t, dsn, "edge-a")
 		check(t, reopen(t, s, func() *Store { return openPostgresTestStore(t, dsn, "edge-a") }))
+	})
+}
+
+func shareRow(t *testing.T, s *Store, dirKey string) (edgeID, shareID, ownerID string) {
+	t.Helper()
+	if err := s.db.QueryRowContext(context.Background(), s.bind(`SELECT edge_id, share_id, owner_id FROM share_directory WHERE dir_key = $1`), dirKey).Scan(&edgeID, &shareID, &ownerID); err != nil {
+		t.Fatalf("read share row: %v", err)
+	}
+	return edgeID, shareID, ownerID
+}
+
+func TestWithdrawShareIgnoresOlderShareID(t *testing.T) {
+	forEachPeerStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		seedPeer(t, s, "edge-b", time.Now().Add(time.Hour))
+		seedLiveShare(t, s, "key-1", "share-1", "edge-b", "owner-a")
+		seedLiveShare(t, s, "key-1", "share-2", "edge-b", "owner-a")
+		if err := s.WithdrawShare(ctx, "key-1", "edge-b", "share-1"); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, _ := s.LookupShareEdge(ctx, "key-1", "edge-a", time.Now()); !ok {
+			t.Fatal("a withdraw for an older share id deleted the newer row")
+		}
+		if err := s.WithdrawShare(ctx, "key-1", "edge-b", "share-2"); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, _ := s.LookupShareEdge(ctx, "key-1", "edge-a", time.Now()); ok {
+			t.Fatal("a withdraw for the current share id kept the row")
+		}
+	})
+}
+
+func TestReassertShareRestoresMissingRow(t *testing.T) {
+	forEachPeerStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		seedPeer(t, s, "edge-b", time.Now().Add(time.Hour))
+		seedLiveShare(t, s, "key-1", "share-1", "edge-b", "owner-a")
+		if err := s.WithdrawShare(ctx, "key-1", "edge-b", "share-1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ReassertShare(ctx, "key-1", "share-1", "edge-b", "owner-a", time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("reassert = %v", err)
+		}
+		if peer, ok, err := s.LookupShareEdge(ctx, "key-1", "edge-a", time.Now()); err != nil || !ok || peer.EdgeID != "edge-b" {
+			t.Fatalf("lookup after reassert = %+v, %v, %v", peer, ok, err)
+		}
+	})
+}
+
+func TestReassertShareUpdatesExpiry(t *testing.T) {
+	forEachPeerStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		seedPeer(t, s, "edge-b", time.Now().Add(4*time.Hour))
+		seedLiveShare(t, s, "key-1", "share-1", "edge-b", "owner-a")
+		later := time.Now().Add(3 * time.Hour)
+		if _, ok, _ := s.LookupShareEdge(ctx, "key-1", "edge-a", later.Add(-time.Minute)); ok {
+			t.Fatal("the seeded row already covers the later time")
+		}
+		if err := s.ReassertShare(ctx, "key-1", "share-1", "edge-b", "owner-a", later); err != nil {
+			t.Fatalf("reassert = %v", err)
+		}
+		if _, ok, _ := s.LookupShareEdge(ctx, "key-1", "edge-a", later.Add(-time.Minute)); !ok {
+			t.Fatal("reassert did not move the expiry")
+		}
+	})
+}
+
+func TestReassertShareKeepsRevoked(t *testing.T) {
+	forEachPeerStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		seedPeer(t, s, "edge-b", time.Now().Add(time.Hour))
+		seedLiveShare(t, s, "key-1", "share-1", "edge-b", "owner-a")
+		if ok, err := s.RevokeShare(ctx, "share-1", "owner-a", time.Now()); err != nil || !ok {
+			t.Fatalf("revoke = %v, %v", ok, err)
+		}
+		if err := s.ReassertShare(ctx, "key-1", "share-1", "edge-b", "owner-a", time.Now().Add(time.Hour)); err != nil {
+			t.Fatalf("reassert = %v", err)
+		}
+		if ids, err := s.RevokedShares(ctx, "edge-b", time.Now(), 10); err != nil || !reflect.DeepEqual(ids, []string{"share-1"}) {
+			t.Fatalf("revoked after reassert = %v, %v, want share-1", ids, err)
+		}
+		if _, ok, _ := s.LookupShareEdge(ctx, "key-1", "edge-a", time.Now()); ok {
+			t.Fatal("reassert made a revoked share resolvable")
+		}
+	})
+}
+
+func TestReassertShareRefusesOtherRegistration(t *testing.T) {
+	forEachPeerStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		seedPeer(t, s, "edge-b", time.Now().Add(time.Hour))
+		seedPeer(t, s, "edge-c", time.Now().Add(time.Hour))
+		seedLiveShare(t, s, "key-1", "share-2", "edge-c", "owner-a")
+		exp := time.Now().Add(time.Hour)
+		if err := s.ReassertShare(ctx, "key-1", "share-1", "edge-b", "owner-a", exp); !errors.Is(err, ErrShareMoved) {
+			t.Fatalf("reassert of an older registration = %v, want ErrShareMoved", err)
+		}
+		if err := s.ReassertShare(ctx, "key-1", "share-2", "edge-b", "owner-a", exp); !errors.Is(err, ErrShareMoved) {
+			t.Fatalf("reassert of the same share id from another edge = %v, want ErrShareMoved", err)
+		}
+		if err := s.ReassertShare(ctx, "key-1", "share-2", "edge-c", "owner-b", exp); !errors.Is(err, ErrShareTaken) {
+			t.Fatalf("reassert by another owner = %v, want ErrShareTaken", err)
+		}
+		if edgeID, shareID, ownerID := shareRow(t, s, "key-1"); edgeID != "edge-c" || shareID != "share-2" || ownerID != "owner-a" {
+			t.Fatalf("row after refused reasserts = %s %s %s, want edge-c share-2 owner-a", edgeID, shareID, ownerID)
+		}
+		if err := s.ReassertShare(ctx, "key-1", "share-2", "edge-c", "", exp); !errors.Is(err, ErrInvalid) {
+			t.Fatalf("reassert with an empty owner = %v, want ErrInvalid", err)
+		}
+	})
+}
+
+func TestPublishShareSameShareFromOtherEdgeDoesNotRepoint(t *testing.T) {
+	forEachPeerStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		seedPeer(t, s, "edge-b", time.Now().Add(time.Hour))
+		seedPeer(t, s, "edge-c", time.Now().Add(time.Hour))
+		seedLiveShare(t, s, "key-1", "share-1", "edge-b", "owner-a")
+		if err := s.PublishShare(ctx, "key-1", "share-1", "edge-c", "owner-a", time.Now().Add(time.Hour)); !errors.Is(err, ErrShareMoved) {
+			t.Fatalf("publish of the same share id from another edge = %v, want ErrShareMoved", err)
+		}
+		if edgeID, shareID, _ := shareRow(t, s, "key-1"); edgeID != "edge-b" || shareID != "share-1" {
+			t.Fatalf("row after the refused publish = %s %s, want edge-b share-1", edgeID, shareID)
+		}
 	})
 }

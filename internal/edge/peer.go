@@ -167,9 +167,11 @@ type peerForwarder struct {
 	draining bool
 	splices  sync.WaitGroup
 
-	beforePublish func()
-	quit          context.Context
-	quitCancel    context.CancelFunc
+	beforePublish  func() error
+	beforeWithdraw func()
+	withdraws      sync.WaitGroup
+	quit           context.Context
+	quitCancel     context.CancelFunc
 
 	ln     net.Listener
 	public *sniListener
@@ -300,7 +302,6 @@ func (p *peerForwarder) heartbeat(ctx context.Context) error {
 	ttl := p.leaseTTL()
 	p.purgeShares(ctx)
 	p.beat(ctx, ttl)
-	p.republishShares()
 	ticker := time.NewTicker(ttl / 3)
 	defer ticker.Stop()
 	for {
@@ -329,6 +330,7 @@ func (p *peerForwarder) beat(ctx context.Context, ttl time.Duration) {
 	slogStorageError("upsert edge peer", err)
 	p.refreshPins()
 	p.syncShares(ctx, now)
+	p.reassertShares()
 }
 
 func (p *peerForwarder) stop() {

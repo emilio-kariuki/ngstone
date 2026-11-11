@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -867,9 +868,10 @@ func blockPublish(t *testing.T, e *peerEdge) (started <-chan struct{}, release f
 	t.Helper()
 	in, out := make(chan struct{}), make(chan struct{})
 	var startOnce, releaseOnce sync.Once
-	e.srv.peers.beforePublish = func() {
+	e.srv.peers.beforePublish = func() error {
 		startOnce.Do(func() { close(in) })
 		<-out
+		return nil
 	}
 	release = func() { releaseOnce.Do(func() { close(out) }) }
 	t.Cleanup(release)
@@ -1026,5 +1028,91 @@ func TestForwardedControlSpliceEndsAtShutdown(t *testing.T) {
 			}
 			waitWithin(t, time.Second, "owner edge control wait", cl.b.srv.controlConns.Wait)
 		})
+	}
+}
+
+func shareDirCarries(t *testing.T, from, holder *peerEdge, secret string, at time.Time) bool {
+	t.Helper()
+	peer := holder.record()
+	peer.ExpiresAt = time.Now().Add(time.Hour)
+	if err := holder.store.UpsertEdgePeer(context.Background(), peer); err != nil {
+		t.Fatal(err)
+	}
+	key := shareDirKey(shareSecretHashBytes(secret))
+	_, ok, err := from.store.LookupShareEdge(context.Background(), key, from.id, at)
+	if err != nil {
+		t.Fatalf("lookup share edge: %v", err)
+	}
+	return ok
+}
+
+func TestHeartbeatRepairsMissingDirectoryRow(t *testing.T) {
+	cl := newShareCluster(t)
+	_, id := startShare(t, cl.b, "repair-secret", nil)
+	key := shareDirKey(shareSecretHashBytes("repair-secret"))
+	if err := cl.b.store.WithdrawShare(context.Background(), key, "edge-b", id); err != nil {
+		t.Fatal(err)
+	}
+	if shareDirHas(t, cl.a, "repair-secret") {
+		t.Fatal("the row survived the withdraw")
+	}
+	cl.b.srv.peers.beat(context.Background(), cl.b.srv.peers.leaseTTL())
+	if !shareDirHas(t, cl.a, "repair-secret") {
+		t.Fatal("the heartbeat did not restore the directory row")
+	}
+}
+
+func TestFailedExtendIsRepairedOnNextBeat(t *testing.T) {
+	cl := newShareCluster(t)
+	sess, id := startShare(t, cl.b, "extend-secret", nil)
+	var fail atomic.Bool
+	fail.Store(true)
+	cl.b.srv.peers.beforePublish = func() error {
+		if fail.Load() {
+			return errors.New("store unavailable")
+		}
+		return nil
+	}
+	newExp := time.Now().Add(20 * time.Minute)
+	if err := sess.Control().Write(proto.TypeShareUpdate, 9, proto.ShareUpdate{ShareID: id, ExpiresAtMS: newExp.UnixMilli()}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		m := readSession(t, sess)
+		if m.Type == proto.TypeShareOK {
+			break
+		}
+		if m.Type == proto.TypeShareErr {
+			t.Fatalf("update refused: %s", m.Data)
+		}
+	}
+	probe := time.Now().Add(15 * time.Minute)
+	if shareDirCarries(t, cl.a, cl.b, "extend-secret", probe) {
+		t.Fatal("the directory carries the new expiry although the write failed")
+	}
+	fail.Store(false)
+	cl.b.srv.peers.beat(context.Background(), cl.b.srv.peers.leaseTTL())
+	if !shareDirCarries(t, cl.a, cl.b, "extend-secret", probe) {
+		t.Fatal("the next heartbeat did not carry the new expiry to the directory")
+	}
+}
+
+func TestQuickReRegisterKeepsDirectoryRow(t *testing.T) {
+	cl := newShareCluster(t)
+	gate := make(chan struct{})
+	cl.b.srv.peers.beforeWithdraw = func() { <-gate }
+	_, id := startShare(t, cl.b, "quick-secret", nil)
+	for i := 0; i < 30; i++ {
+		old, ok := cl.b.srv.shares.byShareID(id)
+		if !ok {
+			t.Fatalf("round %d: share %s is not live", i, id)
+		}
+		cl.b.srv.closeShare(old, "unshared")
+		_, id = startShare(t, cl.b, "quick-secret", nil)
+		gate <- struct{}{}
+		cl.b.srv.peers.withdraws.Wait()
+		if !shareDirHas(t, cl.a, "quick-secret") {
+			t.Fatalf("round %d: the old registration's withdraw removed the new row", i)
+		}
 	}
 }

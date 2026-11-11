@@ -116,6 +116,8 @@ const (
 	ShareReasonEdgeShutdown = "edge_shutdown"
 	ShareReasonIdle         = "idle"   // share: no connection for idle_timeout
 	ShareReasonKicked       = "kicked" // connector: removed by the sharer
+	ShareReasonTaken        = "taken"
+	ShareReasonMoved        = "moved"
 )
 
 // ShareEvent.Event values.

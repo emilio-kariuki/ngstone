@@ -914,7 +914,7 @@ func (s *Server) handleShareUpdate(as *AgentSession, ctrl *proto.Conn, id uint64
 	}
 	slog.Info("edge: share extended", "share_id", sh.id, "by_session", as.ID, "by_owner", durableOwnerID(as), "expires_at", expiresAt.UTC().Format(time.RFC3339))
 	if s.peers != nil {
-		if err := s.publishShare(sh); err != nil {
+		if err := s.reassertShare(sh); err != nil {
 			slogStorageError("publish share", err)
 			metricShareDirectoryErrors.Add(1)
 		}
