@@ -79,6 +79,8 @@ func TestHandshakeWebhookRejectsTCPAndOldEdges(t *testing.T) {
 		{name: "tcp", cfg: Config{Kind: proto.KindTCP, TargetURL: "127.0.0.1:1", Webhook: &webhook.Config{Provider: "github", Secret: "s"}}, version: 3},
 		{name: "protocol v1", cfg: Config{Kind: proto.KindHTTP, TargetURL: "http://127.0.0.1:1", Webhook: &webhook.Config{Provider: "github", Secret: "s"}}, version: 1},
 		{name: "invalid config", cfg: Config{Kind: proto.KindHTTP, TargetURL: "http://127.0.0.1:1", Webhook: &webhook.Config{Provider: "hmac", Secret: "s"}}, version: 3},
+		{name: "http2", cfg: Config{Kind: proto.KindHTTP, TargetURL: "http://127.0.0.1:1", HTTP2: true, Webhook: &webhook.Config{Provider: "github", Secret: "s"}}, version: 3},
+		{name: "visitor login", cfg: Config{Kind: proto.KindHTTP, TargetURL: "http://127.0.0.1:1", OIDC: &proto.OIDCLogin{AllowEmails: []string{"alice@example.com"}}, Webhook: &webhook.Config{Provider: "github", Secret: "s"}}, version: 3},
 		{name: "plaintext to remote edge", cfg: Config{Kind: proto.KindHTTP, TargetURL: "http://127.0.0.1:1", ControlAddr: "edge.example.com:4443", Insecure: true, Webhook: &webhook.Config{Provider: "github", Secret: "s"}}, version: 3},
 	}
 	for _, tc := range cases {

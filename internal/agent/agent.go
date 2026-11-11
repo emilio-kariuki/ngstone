@@ -824,6 +824,12 @@ func (a *Agent) webhookBind(negotiated int) (*proto.WebhookVerification, error) 
 	if a.bindKind() != proto.KindHTTP {
 		return nil, fmt.Errorf("%w: webhook verification is only supported for http tunnels", errFatalHandshake)
 	}
+	if a.cfg.HTTP2 {
+		return nil, fmt.Errorf("%w: webhook verification cannot be combined with HTTP/2 tunnels", errFatalHandshake)
+	}
+	if a.cfg.OIDC != nil {
+		return nil, fmt.Errorf("%w: webhook verification cannot be combined with visitor login", errFatalHandshake)
+	}
 	if negotiated < 2 {
 		return nil, fmt.Errorf("%w: edge does not support webhook verification (negotiated protocol v%d); upgrade ngstoned", errFatalHandshake, negotiated)
 	}
