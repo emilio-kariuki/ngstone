@@ -34,6 +34,7 @@ func main() {
 	databaseDriver := flag.String("database-driver", "", "control-plane database driver: sqlite or postgres (defaults from the database URL)")
 	databaseURLFlag := flag.String("database-url", "", "control-plane database URL (defaults to $NGSTONE_DATABASE_URL or SQLite at /var/lib/ngstoned/control.db; prefer the environment for PostgreSQL credentials)")
 	edgeID := flag.String("edge-id", "", "stable identifier for this edge server (defaults to $NGSTONE_EDGE_ID or a generated value)")
+	peerAddr := flag.String("peer-addr", "", "address (ip:port) this edge listens on for forwarded connections from other edges and advertises to them through the shared database; requires PostgreSQL; empty disables inter-edge forwarding (defaults to $NGSTONE_PEER_ADDR)")
 	leaseTTL := flag.Duration("lease-ttl", storage.DefaultLeaseTTL, "connector lease lifetime; heartbeats renew leases before expiry")
 	adminTokenSHA256Hex := flag.String("admin-token-sha256", "", "hex-encoded SHA-256 of the management API bearer token (defaults to $NGSTONE_ADMIN_TOKEN_SHA256; loopback-only when unset)")
 	alertWebhookURL := flag.String("alert-webhook", "", "HTTP(S) webhook for credential, connector, and lease lifecycle alerts (defaults to $NGSTONE_ALERT_WEBHOOK_URL)")
@@ -119,6 +120,7 @@ func main() {
 	if resolvedEdgeID == "" {
 		resolvedEdgeID = *edgeID
 	}
+	resolvedPeerAddr := envOrFlag("NGSTONE_PEER_ADDR", *peerAddr)
 	tokenSHA256HexVal := os.Getenv("NGSTONE_TOKEN_SHA256")
 	if tokenSHA256HexVal == "" {
 		tokenSHA256HexVal = *tokenSHA256Hex
@@ -230,6 +232,21 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if resolvedPeerAddr != "" {
+		if databaseURL == "" {
+			logger.Error("ngstoned: -peer-addr (or $NGSTONE_PEER_ADDR) requires a database URL")
+			os.Exit(1)
+		}
+		driver, err := storage.ResolveDriver(resolvedDatabaseDriver, databaseURL)
+		if err != nil {
+			logger.Error("ngstoned: invalid database configuration", "err", err)
+			os.Exit(1)
+		}
+		if driver != storage.DriverPostgres {
+			logger.Error("ngstoned: -peer-addr (or $NGSTONE_PEER_ADDR) requires PostgreSQL", "driver", driver)
+			os.Exit(1)
+		}
+	}
 	var adminSum []byte
 	if adminTokenSHA256HexVal != "" {
 		var err error
@@ -284,6 +301,7 @@ func main() {
 		StorageDriver:     resolvedDatabaseDriver,
 		StorageDSN:        databaseURL,
 		EdgeID:            resolvedEdgeID,
+		PeerAddr:          resolvedPeerAddr,
 		LeaseTTL:          *leaseTTL,
 		AdminTokenSHA256:  adminSum,
 		PublicScheme:      *publicScheme,
@@ -331,7 +349,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA, "dns-provider", *dnsProvider, "proxy-protocol", *proxyProtocol, "scoped_credentials", credentialsFile != "", "durable_storage", databaseURL != "", "admin_bearer", adminTokenSHA256HexVal != "", "oidc", oidcConfig != nil)
+	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA, "dns-provider", *dnsProvider, "proxy-protocol", *proxyProtocol, "scoped_credentials", credentialsFile != "", "durable_storage", databaseURL != "", "peer_addr", resolvedPeerAddr, "admin_bearer", adminTokenSHA256HexVal != "", "oidc", oidcConfig != nil)
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("ngstoned: exited with error", "err", err)
 		os.Exit(1)

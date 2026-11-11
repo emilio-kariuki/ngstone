@@ -547,6 +547,8 @@ type idleDeadline struct {
 	conns    []net.Conn
 	last     atomic.Int64
 	timedOut sync.Once
+	mu       sync.Mutex
+	capped   atomic.Bool
 }
 
 // idleExtendEvery throttles deadline updates on busy connections; it is
@@ -566,10 +568,22 @@ func (d *idleDeadline) extend(now time.Time, force bool) {
 	if !force && now.Sub(time.Unix(0, d.last.Load())) < min(idleExtendEvery, d.timeout/4) {
 		return
 	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.capped.Load() {
+		return
+	}
 	d.last.Store(now.UnixNano())
 	for _, c := range d.conns {
 		_ = c.SetReadDeadline(now.Add(d.timeout))
 	}
+}
+
+func (d *idleDeadline) capRead(c net.Conn, deadline time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.capped.Store(true)
+	_ = c.SetReadDeadline(deadline)
 }
 
 func (d *idleDeadline) reader(c net.Conn) io.Reader {
@@ -589,7 +603,7 @@ func (r *idleReader) Read(p []byte) (int, error) {
 	if n > 0 {
 		r.d.extend(time.Now(), false)
 	}
-	if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
+	if err != nil && errors.Is(err, os.ErrDeadlineExceeded) && !r.d.capped.Load() {
 		r.d.timedOut.Do(func() { metricTCPClosedIdle.Add(1) })
 	}
 	return n, err

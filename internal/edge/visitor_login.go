@@ -1,9 +1,11 @@
 package edge
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -14,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"ngstone/internal/access"
 	"ngstone/internal/oidc"
 )
 
@@ -190,7 +193,7 @@ func (s *Server) handleVisitorCallback(w http.ResponseWriter, r *http.Request, v
 		writeVisitorPage(w, http.StatusBadGateway, "Sign-in failed", "The identity provider rejected the sign-in.")
 		return
 	}
-	rule, routed := s.visitorRuleForHost(stripPort(st.Host))
+	rule, routed := s.visitorRuleForHost(r.Context(), stripPort(st.Host))
 	if !routed {
 		writeVisitorPage(w, http.StatusNotFound, "Tunnel offline", "The tunnel you were visiting is no longer online.")
 		return
@@ -239,10 +242,35 @@ func (s *Server) visitorReturnHostValid(host string) bool {
 	return name != "" && hostMatchesDomain(name, strings.ToLower(s.cfg.Domain)) && !strings.ContainsAny(host, "/?#@\\")
 }
 
-func (s *Server) visitorRuleForHost(host string) (*visitorLoginRule, bool) {
+func (s *Server) visitorRuleForHost(ctx context.Context, host string) (*visitorLoginRule, bool) {
 	b, ok := s.registry.Route(host)
 	if !ok {
-		return nil, false
+		if s.peers == nil || s.storage == nil {
+			return nil, false
+		}
+		lctx, cancel := context.WithTimeout(ctx, peerLookupTimeout)
+		defer cancel()
+		accessJSON, found, err := s.storage.LookupHostAccess(lctx, host, time.Now())
+		if err != nil {
+			slogStorageError("lookup host access", err)
+			return nil, false
+		}
+		if !found {
+			return nil, false
+		}
+		var cfg access.Config
+		if err := json.Unmarshal([]byte(accessJSON), &cfg); err != nil {
+			return nil, false
+		}
+		if cfg.VisitorLogin == nil {
+			return nil, true
+		}
+		emails, domains, err := access.NormalizeLogin(cfg.VisitorLogin.AllowEmails, cfg.VisitorLogin.AllowDomains)
+		if err != nil {
+			return nil, true
+		}
+		metricPeerApexRuleLookups.Add(1)
+		return &visitorLoginRule{emails: emails, domains: domains}, true
 	}
 	if snapshot := b.snapshot.Load(); snapshot != nil {
 		return snapshot.access.loginRule(), true

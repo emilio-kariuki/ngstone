@@ -1,6 +1,7 @@
 package edge
 
 import (
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
@@ -523,7 +524,7 @@ func TestVisitorLoginBindValidation(t *testing.T) {
 				if reply.Type != proto.TypeBindOK || err != nil || !bindOK.OIDC {
 					t.Fatalf("reply = %s %s, want BindOK acknowledging OIDC", reply.Type, reply.Data)
 				}
-				rule, _ := tc.server.visitorRuleForHost("c.example.com")
+				rule, _ := tc.server.visitorRuleForHost(context.Background(), "c.example.com")
 				if rule == nil || len(rule.domains) != 1 || rule.domains[0] != "example.org" {
 					t.Fatalf("login rule = %+v", rule)
 				}

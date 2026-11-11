@@ -57,6 +57,9 @@ type Config struct {
 	HTTPAddr string
 	OpsAddr  string
 
+	PeerAddr        string
+	PublicTLSConfig *tls.Config
+
 	TCPPortRange string
 	TCPBindAddr  string
 
@@ -101,6 +104,7 @@ type Server struct {
 
 	tlsMgr *TLSManager
 	tcpMgr *tcpManager
+	peers  *peerForwarder
 
 	shares        *shareRegistry
 	shareSem      *globalSemaphore
@@ -165,6 +169,16 @@ func New(cfg Config) (*Server, error) {
 	closeOpenedStorage := func() {
 		if durableStore != nil && cfg.Storage == nil {
 			_ = durableStore.Close()
+		}
+	}
+	if cfg.PublicTLSConfig != nil && cfg.Insecure {
+		closeOpenedStorage()
+		return nil, errors.New("edge: a public TLS config cannot be combined with insecure mode")
+	}
+	if cfg.PeerAddr != "" {
+		if err := validatePeerAddr(cfg, durableStore != nil); err != nil {
+			closeOpenedStorage()
+			return nil, err
 		}
 	}
 
@@ -269,6 +283,14 @@ func New(cfg Config) (*Server, error) {
 		shares:            newShareRegistry(cfg.MaxShareTTL),
 		shareSem:          newGlobalSemaphore(maxGlobalShareConns),
 	}
+	if cfg.PeerAddr != "" {
+		srv.peers, err = newPeerForwarder(srv)
+		if err != nil {
+			alerts.close()
+			closeOpenedStorage()
+			return nil, err
+		}
+	}
 	srv.shares.onExpire = func(sh *share) { srv.closeShare(sh, proto.ShareReasonExpired) }
 	srv.shares.onIdle = func(sh *share) {
 		if srv.shares.idleNow(sh) {
@@ -327,7 +349,7 @@ func (s *Server) Run(ctx context.Context) error {
 		return errors.New("edge: domain must not be empty")
 	}
 
-	if !s.cfg.Insecure {
+	if !s.cfg.Insecure && s.cfg.PublicTLSConfig == nil {
 		mgr, err := NewTLSManager(TLSConfig{
 			Domain:      s.cfg.Domain,
 			DNSProvider: s.cfg.DNSProvider,
@@ -368,6 +390,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	var httpLn net.Listener
 	var opsLn net.Listener
+	var peerLn net.Listener
 
 	closeAll := func() {
 		controlLn.Close()
@@ -377,6 +400,9 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		if opsLn != nil {
 			opsLn.Close()
+		}
+		if peerLn != nil {
+			peerLn.Close()
 		}
 	}
 
@@ -391,6 +417,8 @@ func (s *Server) Run(ctx context.Context) error {
 			return fmt.Errorf("edge: http redirect listen: %w", err)
 		}
 		publicLn = tls.NewListener(publicLn, s.tlsMgr.PublicTLSConfig())
+	} else if s.cfg.PublicTLSConfig != nil {
+		publicLn = tls.NewListener(publicLn, s.cfg.PublicTLSConfig)
 	}
 
 	if s.cfg.OpsAddr != "" {
@@ -399,6 +427,15 @@ func (s *Server) Run(ctx context.Context) error {
 			closeAll()
 			return fmt.Errorf("edge: ops listen: %w", err)
 		}
+	}
+
+	if s.peers != nil {
+		peerLn, err = net.Listen("tcp", s.cfg.PeerAddr)
+		if err != nil {
+			closeAll()
+			return fmt.Errorf("edge: peer listen: %w", err)
+		}
+		s.peers.ln = peerLn
 	}
 
 	limits := s.limitsOrDefault()
@@ -416,6 +453,10 @@ func (s *Server) Run(ctx context.Context) error {
 		protocols.SetHTTP1(true)
 		protocols.SetUnencryptedHTTP2(true)
 		publicSrv.Protocols = &protocols
+	}
+
+	if s.peers != nil {
+		publicSrv.ConnContext = peerConnContext
 	}
 
 	var httpSrv *http.Server
@@ -444,6 +485,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	g.Go(func() error {
 		<-gctx.Done()
+		s.peers.stop()
 		s.controlMu.Lock()
 		s.controlDraining = true
 		s.controlMu.Unlock()
@@ -457,6 +499,7 @@ func (s *Server) Run(ctx context.Context) error {
 		if opsSrv != nil {
 			opsSrv.Shutdown(shutdownCtx)
 		}
+		s.peers.waitSplices(shutdownCtx)
 		return nil
 	})
 
@@ -475,6 +518,11 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		return err
 	})
+
+	if s.peers != nil {
+		g.Go(func() error { return s.peers.acceptLoop(gctx) })
+		g.Go(func() error { return s.peers.heartbeat(gctx) })
+	}
 
 	if httpSrv != nil {
 		g.Go(func() error {
@@ -496,7 +544,7 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	}
 
-	slog.Info("ngstoned: listeners up", "control", s.cfg.ControlAddr, "public", s.cfg.PublicAddr, "insecure", s.cfg.Insecure, "proxy_protocol", s.cfg.ProxyProtocol)
+	slog.Info("ngstoned: listeners up", "control", s.cfg.ControlAddr, "public", s.cfg.PublicAddr, "insecure", s.cfg.Insecure, "proxy_protocol", s.cfg.ProxyProtocol, "peer_addr", s.cfg.PeerAddr)
 	s.recordEvent("info", "listeners up", map[string]string{
 		"control": s.cfg.ControlAddr,
 		"public":  s.cfg.PublicAddr,

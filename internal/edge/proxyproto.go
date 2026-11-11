@@ -328,3 +328,16 @@ func proxyProtoTCPAddr(addr netip.Addr, port uint16) (net.Addr, error) {
 	}
 	return net.TCPAddrFromAddrPort(netip.AddrPortFrom(addr.Unmap(), port)), nil
 }
+
+func proxyProtoV1Line(src netip.AddrPort) (string, error) {
+	addr := src.Addr().Unmap().WithZone("")
+	if !addr.IsValid() {
+		return "", errProxyProtoMalformed
+	}
+	family := "TCP6"
+	if addr.Is4() {
+		family = "TCP4"
+	}
+	port := src.Port()
+	return fmt.Sprintf("PROXY %s %s %s %d %d\r\n", family, addr, addr, port, port), nil
+}

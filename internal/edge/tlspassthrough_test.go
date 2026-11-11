@@ -957,3 +957,33 @@ func TestRegistryRejectsHTTPOnlyOptionsForTLS(t *testing.T) {
 		})
 	}
 }
+
+func TestSpliceClosesClientWithoutCloseWrite(t *testing.T) {
+	clientEnd, clientPeer := net.Pipe()
+	upstreamEnd, upstreamPeer := net.Pipe()
+	t.Cleanup(func() {
+		clientEnd.Close()
+		clientPeer.Close()
+		upstreamEnd.Close()
+		upstreamPeer.Close()
+	})
+	done := make(chan struct{})
+	go func() {
+		splice(&replayConn{Conn: clientEnd}, upstreamEnd, time.Minute, 0)
+		close(done)
+	}()
+
+	go func() {
+		upstreamPeer.Write([]byte("bye"))
+		upstreamPeer.Close()
+	}()
+	buf := make([]byte, 3)
+	if _, err := io.ReadFull(clientPeer, buf); err != nil || string(buf) != "bye" {
+		t.Fatalf("client read = %q, %v", buf, err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("splice did not return after one side finished")
+	}
+}

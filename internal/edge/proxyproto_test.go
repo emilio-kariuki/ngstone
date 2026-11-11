@@ -687,3 +687,39 @@ func TestProxyProtoConnCloseWriteHalfCloses(t *testing.T) {
 		t.Fatalf("RemoteAddr = %q, want 203.0.113.7:5555", got)
 	}
 }
+
+func TestProxyProtoV1LineRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		src  netip.AddrPort
+		line string
+		want netip.AddrPort
+	}{
+		{name: "ipv4", src: netip.MustParseAddrPort("203.0.113.9:51234"), line: "PROXY TCP4 203.0.113.9 203.0.113.9 51234 51234\r\n", want: netip.MustParseAddrPort("203.0.113.9:51234")},
+		{name: "ipv6", src: netip.MustParseAddrPort("[2001:db8::7]:443"), line: "PROXY TCP6 2001:db8::7 2001:db8::7 443 443\r\n", want: netip.MustParseAddrPort("[2001:db8::7]:443")},
+		{name: "4in6", src: netip.MustParseAddrPort("[::ffff:1.2.3.4]:8080"), line: "PROXY TCP4 1.2.3.4 1.2.3.4 8080 8080\r\n", want: netip.MustParseAddrPort("1.2.3.4:8080")},
+		{name: "zone", src: netip.MustParseAddrPort("[fe80::1%en0]:9000"), line: "PROXY TCP6 fe80::1 fe80::1 9000 9000\r\n", want: netip.MustParseAddrPort("[fe80::1]:9000")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line, err := proxyProtoV1Line(tc.src)
+			if err != nil {
+				t.Fatalf("proxyProtoV1Line: %v", err)
+			}
+			if line != tc.line {
+				t.Fatalf("line = %q, want %q", line, tc.line)
+			}
+			addr, err := readProxyProtoHeader(strings.NewReader(line), nil)
+			if err != nil {
+				t.Fatalf("parse %q: %v", line, err)
+			}
+			got := addr.(*net.TCPAddr).AddrPort()
+			if got != tc.want {
+				t.Fatalf("parsed = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if _, err := proxyProtoV1Line(netip.AddrPort{}); !errors.Is(err, errProxyProtoMalformed) {
+		t.Fatalf("invalid addr err = %v, want errProxyProtoMalformed", err)
+	}
+}

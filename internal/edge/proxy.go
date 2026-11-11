@@ -133,7 +133,7 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	}
 	b, ok := s.registry.Route(host)
 	if !ok {
-		writeError(rec, s.routeMissStatus(host))
+		writeError(rec, s.routeMissStatus(r, host))
 		return
 	}
 	var requestBytes countingReadCloser
@@ -470,8 +470,12 @@ func ambiguousRequestTarget(u *url.URL) bool {
 	return false
 }
 
-func (s *Server) routeMissStatus(host string) int {
+func (s *Server) routeMissStatus(r *http.Request, host string) int {
 	if _, ok := s.registry.RouteTLS(host); ok {
+		return http.StatusMisdirectedRequest
+	}
+	if s.peers != nil && (peerForwarded(r.Context()) || (r.TLS != nil && r.TLS.ServerName != "" && !strings.EqualFold(r.TLS.ServerName, host))) {
+		metricPeerMisdirected.Add(1)
 		return http.StatusMisdirectedRequest
 	}
 	return http.StatusNotFound

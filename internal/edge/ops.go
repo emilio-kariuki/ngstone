@@ -33,6 +33,18 @@ var (
 	metricRejectedClientIdle = expvar.NewInt("ngstoned_rejected_client_idle_total")
 	metricTCPClosedIdle      = expvar.NewInt("ngstoned_tcp_closed_idle_total")
 	metricActiveUpgrades     = expvar.NewInt("ngstoned_active_upgrades")
+
+	metricPeerForwardedConns    = expvar.NewInt("ngstoned_peer_forwarded_conns_total")
+	metricPeerForwardFailed     = expvar.NewInt("ngstoned_peer_forward_failed_total")
+	metricPeerForwardStale      = expvar.NewInt("ngstoned_peer_forward_stale_total")
+	metricPeerLookups           = expvar.NewInt("ngstoned_peer_lookups_total")
+	metricPeerLookupErrors      = expvar.NewInt("ngstoned_peer_lookup_errors_total")
+	metricPeerRejectedLookupCap = expvar.NewInt("ngstoned_peer_rejected_lookup_cap_total")
+	metricPeerAcceptedConns     = expvar.NewInt("ngstoned_peer_accepted_conns_total")
+	metricPeerRejectedAuth      = expvar.NewInt("ngstoned_peer_rejected_auth_total")
+	metricPeerMisdirected       = expvar.NewInt("ngstoned_peer_misdirected_421_total")
+	metricPeerApexRuleLookups   = expvar.NewInt("ngstoned_peer_apex_rule_lookups_total")
+	metricActivePeerForwards    = expvar.NewInt("ngstoned_active_peer_forwards")
 )
 
 type certStatusJSON struct {

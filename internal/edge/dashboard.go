@@ -81,6 +81,17 @@ type dashboardMetrics struct {
 	TCPRejectedBindCap       int64 `json:"tcp_rejected_bind_cap"`
 	TCPRejectedRateLimited   int64 `json:"tcp_rejected_rate_limited"`
 	TCPRejectedForbiddenCIDR int64 `json:"tcp_rejected_forbidden_cidr"`
+	PeerForwardedConns       int64 `json:"peer_forwarded_conns"`
+	PeerForwardFailed        int64 `json:"peer_forward_failed"`
+	PeerForwardStale         int64 `json:"peer_forward_stale"`
+	PeerLookups              int64 `json:"peer_lookups"`
+	PeerLookupErrors         int64 `json:"peer_lookup_errors"`
+	PeerRejectedLookupCap    int64 `json:"peer_rejected_lookup_cap"`
+	PeerAcceptedConns        int64 `json:"peer_accepted_conns"`
+	PeerRejectedAuth         int64 `json:"peer_rejected_auth"`
+	PeerMisdirected421       int64 `json:"peer_misdirected_421"`
+	PeerApexRuleLookups      int64 `json:"peer_apex_rule_lookups"`
+	ActivePeerForwards       int64 `json:"active_peer_forwards"`
 }
 
 func (s *Server) dashboardState(r *http.Request) dashboardState {
@@ -327,6 +338,17 @@ func dashboardMetricsSnapshot() dashboardMetrics {
 		TCPRejectedBindCap:       metricTCPRejectedBindCap.Value(),
 		TCPRejectedRateLimited:   metricTCPRejectedRateLimited.Value(),
 		TCPRejectedForbiddenCIDR: metricTCPRejectedForbiddenCIDR.Value(),
+		PeerForwardedConns:       metricPeerForwardedConns.Value(),
+		PeerForwardFailed:        metricPeerForwardFailed.Value(),
+		PeerForwardStale:         metricPeerForwardStale.Value(),
+		PeerLookups:              metricPeerLookups.Value(),
+		PeerLookupErrors:         metricPeerLookupErrors.Value(),
+		PeerRejectedLookupCap:    metricPeerRejectedLookupCap.Value(),
+		PeerAcceptedConns:        metricPeerAcceptedConns.Value(),
+		PeerRejectedAuth:         metricPeerRejectedAuth.Value(),
+		PeerMisdirected421:       metricPeerMisdirected.Value(),
+		PeerApexRuleLookups:      metricPeerApexRuleLookups.Value(),
+		ActivePeerForwards:       metricActivePeerForwards.Value(),
 	}
 }
 
@@ -370,6 +392,17 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writePrometheusCounter(w, "ngstoned_tcp_rejected_bind_cap_total", "TCP binds rejected by the per-session bind cap.", metrics.TCPRejectedBindCap)
 	writePrometheusCounter(w, "ngstoned_tcp_rejected_rate_limited_total", "TCP connections rejected by the per-IP rate limiter.", metrics.TCPRejectedRateLimited)
 	writePrometheusCounter(w, "ngstoned_tcp_rejected_forbidden_cidr_total", "TCP connections rejected by an IP allowlist.", metrics.TCPRejectedForbiddenCIDR)
+	writePrometheusCounter(w, "ngstoned_peer_forwarded_conns_total", "Public connections forwarded to the edge that owns the tunnel.", metrics.PeerForwardedConns)
+	writePrometheusCounter(w, "ngstoned_peer_forward_failed_total", "Forwards closed because no peer edge accepted the connection.", metrics.PeerForwardFailed)
+	writePrometheusCounter(w, "ngstoned_peer_forward_stale_total", "Forwards refused by a peer edge that no longer owns the tunnel.", metrics.PeerForwardStale)
+	writePrometheusCounter(w, "ngstoned_peer_lookups_total", "Tunnel owner lookups issued for forwarding.", metrics.PeerLookups)
+	writePrometheusCounter(w, "ngstoned_peer_lookup_errors_total", "Tunnel owner lookups that failed.", metrics.PeerLookupErrors)
+	writePrometheusCounter(w, "ngstoned_peer_rejected_lookup_cap_total", "Forwards rejected by the owner lookup concurrency cap.", metrics.PeerRejectedLookupCap)
+	writePrometheusCounter(w, "ngstoned_peer_accepted_conns_total", "Forwarded connections accepted from peer edges.", metrics.PeerAcceptedConns)
+	writePrometheusCounter(w, "ngstoned_peer_rejected_auth_total", "Peer connections rejected during authentication.", metrics.PeerRejectedAuth)
+	writePrometheusCounter(w, "ngstoned_peer_misdirected_421_total", "Requests answered with 421 because the connection targeted another edge.", metrics.PeerMisdirected421)
+	writePrometheusCounter(w, "ngstoned_peer_apex_rule_lookups_total", "Visitor login rules read from shared storage for tunnels owned by another edge.", metrics.PeerApexRuleLookups)
+	writePrometheusGauge(w, "ngstoned_active_peer_forwards", "Currently spliced forwarded connections.", metrics.ActivePeerForwards)
 	writePrometheusGauge(w, "ngstoned_active_tunnels", "Currently routed HTTP and TCP tunnels.", int64(len(s.dashboardTunnels())))
 	writePrometheusGauge(w, "ngstoned_uptime_seconds", "Seconds since ngstoned started.", uptimeSeconds(s.startedAt))
 	fmt.Fprintln(w, "# HELP ngstoned_tunnel_requests_total Requests observed for a tunnel.")

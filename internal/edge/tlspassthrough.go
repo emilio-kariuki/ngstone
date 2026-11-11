@@ -106,7 +106,8 @@ func peekClientHello(r io.Reader, max int) (string, []byte, error) {
 
 type replayConn struct {
 	net.Conn
-	buf []byte
+	buf       []byte
+	forwarded bool
 }
 
 func (c *replayConn) Read(p []byte) (int, error) {
@@ -122,7 +123,7 @@ func (c *replayConn) CloseWrite() error {
 	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
 		return cw.CloseWrite()
 	}
-	return nil
+	return c.Conn.Close()
 }
 
 type sniListener struct {
@@ -151,6 +152,9 @@ func (s *Server) newSNIListener(inner net.Listener) *sniListener {
 	}
 	if l.timeout <= 0 {
 		l.timeout = DefaultReadHeaderTimeout
+	}
+	if s.peers != nil {
+		s.peers.public = l
 	}
 	go l.acceptLoop()
 	return l
@@ -213,35 +217,92 @@ func (l *sniListener) acceptLoop() {
 	}
 }
 
-func (l *sniListener) classify(c net.Conn) {
+func (l *sniListener) peek(c net.Conn) (string, []byte, error) {
 	if err := c.SetReadDeadline(time.Now().Add(l.timeout)); err != nil {
-		c.Close()
-		return
+		return "", nil, err
 	}
-	serverName, peeked, err := peekClientHello(c, l.maxPeek)
+	return peekClientHello(c, l.maxPeek)
+}
+
+func clearReadDeadline(c net.Conn) bool {
+	if err := c.SetReadDeadline(time.Time{}); err != nil {
+		c.Close()
+		return false
+	}
+	return true
+}
+
+func (l *sniListener) classify(c net.Conn) {
+	serverName, peeked, err := l.peek(c)
 	if err != nil && !errors.Is(err, errNotClientHello) {
 		c.Close()
 		return
 	}
 	replay := &replayConn{Conn: c, buf: peeked}
-	if err == nil && serverName != "" && l.srv.registry != nil {
-		if b, ok := l.srv.registry.RouteTLS(serverName); ok {
-			if err := c.SetReadDeadline(time.Time{}); err != nil {
-				c.Close()
-				return
-			}
-			l.srv.serveTLSPassthrough(b, serverName, replay, l.sem)
-			return
+	if err != nil || serverName == "" || l.srv.registry == nil {
+		if clearReadDeadline(c) {
+			l.deliver(replay)
 		}
-	}
-	if err := c.SetReadDeadline(time.Time{}); err != nil {
-		c.Close()
 		return
 	}
+	if b, ok := l.srv.registry.RouteTLS(serverName); ok {
+		if clearReadDeadline(c) {
+			l.srv.serveTLSPassthrough(b, serverName, replay, l.sem)
+		}
+		return
+	}
+	_, local := l.srv.registry.Route(serverName)
+	if !clearReadDeadline(c) {
+		return
+	}
+	if !local && l.srv.peers != nil && l.srv.peers.eligible(serverName) {
+		l.srv.peers.forward(replay, serverName)
+		return
+	}
+	l.deliver(replay)
+}
+
+func (l *sniListener) classifyForwarded(c net.Conn) {
+	serverName, peeked, err := l.peek(c)
+	if err != nil || serverName == "" || l.srv.registry == nil {
+		l.refuse(c)
+		return
+	}
+	replay := &replayConn{Conn: c, buf: peeked}
+	if b, ok := l.srv.registry.RouteTLS(serverName); ok {
+		if l.acceptForwarded(c) {
+			l.srv.serveTLSPassthrough(b, serverName, replay, l.sem)
+		}
+		return
+	}
+	if _, local := l.srv.registry.Route(serverName); !local {
+		l.refuse(c)
+		return
+	}
+	replay.forwarded = true
+	if l.acceptForwarded(c) {
+		l.deliver(replay)
+	}
+}
+
+func (l *sniListener) acceptForwarded(c net.Conn) bool {
+	if !writePeerStatus(c, peerStatusAccept) {
+		c.Close()
+		return false
+	}
+	return clearReadDeadline(c)
+}
+
+func (l *sniListener) refuse(c net.Conn) {
+	writePeerStatus(c, peerStatusNotOwner)
+	c.Close()
+}
+
+func (l *sniListener) deliver(replay *replayConn) {
 	select {
 	case l.ready <- replay:
 	case <-l.done:
-		c.Close()
+		replay.Close()
 	}
 }
 
@@ -316,22 +377,29 @@ func (s *Server) serveTLSPassthrough(b *Binding, host string, client *replayConn
 		}
 	}()
 
-	idle := newIdleDeadline(s.limitsOrDefault().TCPIdleTimeout, client, stream)
+	bytesIn, bytesOut := splice(client, stream, s.limitsOrDefault().TCPIdleTimeout, 0)
+	s.observability.observeTCP(b.durableTunnelID(), host, time.Since(started), bytesIn, bytesOut)
+}
+
+func splice(client, upstream net.Conn, idle, grace time.Duration) (in, out int64) {
+	deadline := newIdleDeadline(idle, client, upstream)
 	var wg sync.WaitGroup
 	wg.Add(2)
-	var bytesIn, bytesOut int64
 	go func() {
 		defer wg.Done()
-		bytesIn, _ = io.Copy(stream, idle.reader(client))
-		closeWrite(stream)
+		in, _ = io.Copy(upstream, deadline.reader(client))
+		closeWrite(upstream)
 	}()
 	go func() {
 		defer wg.Done()
-		bytesOut, _ = io.Copy(client, idle.reader(stream))
-		closeWrite(client.Conn)
+		out, _ = io.Copy(client, deadline.reader(upstream))
+		closeWrite(client)
+		if grace > 0 {
+			deadline.capRead(client, time.Now().Add(grace))
+		}
 	}()
 	wg.Wait()
-	s.observability.observeTCP(b.durableTunnelID(), host, time.Since(started), bytesIn, bytesOut)
+	return in, out
 }
 
 func tlsTunnelURL(hostname, publicAddr string) string {
