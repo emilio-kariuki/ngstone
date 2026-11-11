@@ -78,3 +78,30 @@ func TestServicesRejectEphemeralCredentials(t *testing.T) {
 		t.Fatalf("environment-only service: %v", err)
 	}
 }
+
+func TestServicesRejectEphemeralWebhookSecrets(t *testing.T) {
+	home, _, _ := setupServiceEnv(t, "linux", false)
+	t.Setenv("STRIPE_SECRET", "whsec_ephemeral")
+	t.Setenv("NGSTONE_WEBHOOK_SECRET", "whsec_ephemeral")
+	credPath := filepath.Join(home, "web.credential")
+	if err := os.WriteFile(credPath, []byte("web-private-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, webhook := range []string{
+		`{"provider":"stripe","secret_env":"STRIPE_SECRET"}`,
+		`{"provider":"stripe"}`,
+	} {
+		path := filepath.Join(home, "ngstone.json")
+		data := `{"tunnels":{"web":{"target":"3000","credential_file":"web.credential","webhook":` + webhook + `}}}`
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := buildServiceSpec(path, nil)
+		if err == nil || !strings.Contains(err.Error(), "webhook.secret_file") {
+			t.Fatalf("webhook %s: %v", webhook, err)
+		}
+		if strings.Contains(err.Error(), "whsec_ephemeral") {
+			t.Fatalf("webhook %s: error exposes the secret: %v", webhook, err)
+		}
+	}
+}

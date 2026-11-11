@@ -136,6 +136,9 @@ func buildServiceSpec(cfgPath string, names []string) (serviceSpec, error) {
 		if tunnel.CredentialEnv != "" {
 			return serviceSpec{}, fmt.Errorf("tunnel %s: background credentials must use credential_file so they survive logout and restart", named.Name)
 		}
+		if tunnel.Webhook != nil && tunnel.Webhook.SecretFile == "" {
+			return serviceSpec{}, fmt.Errorf("tunnel %s: background webhook secrets must use webhook.secret_file so they survive logout and restart", named.Name)
+		}
 		if tunnel.CredentialFile == "" {
 			if saved.Token == "" {
 				return serviceSpec{}, errors.New("the service needs credential_file for each tunnel or the token saved by 'ngstone auth'")
