@@ -313,7 +313,7 @@ func (r *Registry) BindWithOptions(opts BindOptions) (*Binding, *AgentSession, e
 	if !opts.MultiConnector && opts.ConnectorTokenDigest != "" {
 		return nil, nil, ErrConnectorConfigMismatch
 	}
-	if opts.TLS && (opts.MultiConnector || opts.HTTP2 || opts.TrafficPolicy != nil) {
+	if opts.TLS && (opts.MultiConnector || opts.HTTP2 || opts.TrafficPolicy != nil || opts.Webhook != nil || (opts.Access != nil && (opts.Access.login != nil || len(opts.Access.basicDigests) > 0))) {
 		return nil, nil, ErrConnectorConfigMismatch
 	}
 	opts.Host = normalizeHost(opts.Host)

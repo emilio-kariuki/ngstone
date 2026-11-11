@@ -27,6 +27,7 @@ import (
 
 	"ngstone/internal/proto"
 	"ngstone/internal/tunnel"
+	"ngstone/internal/webhook"
 )
 
 func passthroughTestCert(t *testing.T, names ...string) (tls.Certificate, *x509.CertPool) {
@@ -903,6 +904,55 @@ func TestSNIListenerPassthroughRejections(t *testing.T) {
 			}
 			if h.agentHit.Load() != 0 {
 				t.Fatal("agent saw a stream for a rejected connection")
+			}
+		})
+	}
+}
+
+func TestRegistryRejectsHTTPOnlyOptionsForTLS(t *testing.T) {
+	verifier, err := webhook.New(webhook.Config{Provider: "github", Secret: "s"})
+	if err != nil {
+		t.Fatalf("webhook verifier: %v", err)
+	}
+	login, err := buildAccessControl(proto.Bind{OIDC: &proto.OIDCLogin{AllowEmails: []string{"alice@example.com"}}})
+	if err != nil {
+		t.Fatalf("login access control: %v", err)
+	}
+	basic, err := buildAccessControl(proto.Bind{BasicAuthSHA256: []string{strings.Repeat("a", 64)}})
+	if err != nil {
+		t.Fatalf("basic access control: %v", err)
+	}
+	cidr, err := buildAccessControl(proto.Bind{AllowCIDRs: []string{"10.0.0.0/8"}})
+	if err != nil {
+		t.Fatalf("cidr access control: %v", err)
+	}
+	cases := []struct {
+		name    string
+		opts    BindOptions
+		wantErr bool
+	}{
+		{"webhook verifier", BindOptions{Webhook: verifier}, true},
+		{"access control with login rule", BindOptions{Access: login}, true},
+		{"access control with basic auth digest", BindOptions{Access: basic}, true},
+		{"allow cidr only", BindOptions{Access: cidr}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := NewRegistry()
+			as, cleanup := newTestAgentSession(t, "inst-a")
+			defer cleanup()
+			tc.opts.Host = "secure.example.com"
+			tc.opts.Session = as
+			tc.opts.TLS = true
+			_, _, err := r.BindWithOptions(tc.opts)
+			if tc.wantErr {
+				if !errors.Is(err, ErrConnectorConfigMismatch) {
+					t.Fatalf("err = %v, want ErrConnectorConfigMismatch", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("bind: %v", err)
 			}
 		})
 	}
