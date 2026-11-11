@@ -1112,6 +1112,8 @@ go build ./cmd/ngstoned
 Or `make build` to build both into `bin/`. See the [Makefile](Makefile) for
 cross-compiling and deploy targets.
 
+Set `NGSTONE_TEST_POSTGRES_URL` to a throwaway PostgreSQL DSN to run the PostgreSQL storage tests (`go test ./internal/storage -run Postgres`); they use their own schema and skip when it is unset.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
