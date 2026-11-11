@@ -170,6 +170,17 @@ func migrate(ctx context.Context, db *sql.DB, driver string) error {
 			return err
 		}
 	}
+	if applied < 6 {
+		statements := []string{
+			`CREATE TABLE IF NOT EXISTS share_directory (dir_key TEXT PRIMARY KEY, share_id TEXT NOT NULL, edge_id TEXT NOT NULL, expires_at TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0)`,
+			`CREATE INDEX IF NOT EXISTS idx_share_directory_edge ON share_directory(edge_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_share_directory_share ON share_directory(share_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_share_directory_expiry ON share_directory(expires_at)`,
+		}
+		if err := applyMigration(ctx, db, driver, 6, statements); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
