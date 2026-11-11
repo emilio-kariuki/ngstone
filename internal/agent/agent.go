@@ -575,8 +575,8 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		return proto.BindOK{}, err
 	}
 
-	if a.bindKind() == proto.KindTLS && (len(a.cfg.BasicAuthSHA256) > 0 || a.cfg.Policy != nil || a.cfg.HTTP2 || a.cfg.MultiConnector || a.cfg.RemotePort != 0 || a.cfg.HostHeader != "") {
-		return proto.BindOK{}, fmt.Errorf("%w: basic auth, host header rewriting, traffic policies, HTTP/2, multiple connectors, and remote ports are not supported for tls tunnels", errFatalHandshake)
+	if a.bindKind() == proto.KindTLS && (len(a.cfg.BasicAuthSHA256) > 0 || a.cfg.Policy != nil || a.cfg.HTTP2 || a.cfg.MultiConnector || a.cfg.RemotePort != 0 || a.cfg.HostHeader != "" || a.cfg.OIDC != nil) {
+		return proto.BindOK{}, fmt.Errorf("%w: basic auth, OIDC visitor login, host header rewriting, traffic policies, HTTP/2, multiple connectors, and remote ports are not supported for tls tunnels", errFatalHandshake)
 	}
 
 	policyDigest := ""
