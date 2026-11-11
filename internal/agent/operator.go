@@ -122,15 +122,6 @@ func (o *Operator) once(ctx context.Context, typ string, data any) (proto.Msg, e
 	return m, nil
 }
 
-// ListShares returns every live share on the edge.
-func (o *Operator) ListShares(ctx context.Context) ([]proto.ShareInfo, error) {
-	ok, err := o.ListSharesOK(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return ok.Shares, nil
-}
-
 func (o *Operator) ListSharesOK(ctx context.Context) (proto.SharesOK, error) {
 	m, err := o.once(ctx, proto.TypeListShares, proto.ListShares{})
 	if err != nil {
