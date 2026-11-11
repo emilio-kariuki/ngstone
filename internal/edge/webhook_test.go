@@ -1,10 +1,13 @@
 package edge
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -304,17 +307,28 @@ func TestHandlePublicWebhookBufferBudget(t *testing.T) {
 	}
 }
 
-func TestHandlePublicWebhookHoldsBudgetWhileProxying(t *testing.T) {
+func waitBudgetReleased(t *testing.T, s *Server, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for s.webhookBudget.inUse() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("webhook budget still in use: %d", s.webhookBudget.inUse())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestHandlePublicWebhookReleasesBudgetOnceBodyIsHandedOver(t *testing.T) {
 	verifier, err := webhook.New(webhook.Config{Provider: webhook.ProviderGitHub, Secret: testWebhookSecret})
 	if err != nil {
 		t.Fatalf("webhook.New: %v", err)
 	}
 	s := newServerForTest(LimitsConfig{PerIPRate: 1000, PerIPBurst: 1000})
-	entered := make(chan int64, 1)
+	entered := make(chan struct{}, 1)
 	unblock := make(chan struct{})
 	as := newFakeAgentSession(t, "webhook-hold", func(w http.ResponseWriter, r *http.Request) {
 		io.ReadAll(r.Body)
-		entered <- s.webhookBudget.inUse()
+		entered <- struct{}{}
 		<-unblock
 	})
 	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "hooks.example.com", Session: as, Takeover: true, Webhook: verifier}); err != nil {
@@ -325,15 +339,164 @@ func TestHandlePublicWebhookHoldsBudgetWhileProxying(t *testing.T) {
 	go func() {
 		done <- webhookRequest(s, "/", body, false, map[string]string{webhook.GitHubSignatureHeader: webhooktest.GitHubSignature(testWebhookSecret, []byte(body))})
 	}()
-	if got := <-entered; got != int64(len(body)) {
-		t.Fatalf("webhook budget in use while proxying = %d, want %d", got, len(body))
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request never reached the origin")
+	}
+	waitBudgetReleased(t, s, 5*time.Second)
+	select {
+	case rec := <-done:
+		t.Fatalf("request finished early with %d", rec.Code)
+	default:
 	}
 	close(unblock)
 	if rec := <-done; rec.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%q", rec.Code, rec.Body.String())
 	}
+}
+
+func TestHandlePublicWebhookReleasesBudgetWhileResponseStreams(t *testing.T) {
+	verifier, err := webhook.New(webhook.Config{Provider: webhook.ProviderGitHub, Secret: testWebhookSecret})
+	if err != nil {
+		t.Fatalf("webhook.New: %v", err)
+	}
+	s := newServerForTest(LimitsConfig{PerIPRate: 1000, PerIPBurst: 1000, WebhookMaxBodyBytes: 64, WebhookBufferBytes: 64})
+	unblock := make(chan struct{})
+	streaming := make(chan struct{}, 1)
+	stream := newFakeAgentSession(t, "webhook-sse", func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, "data: hello\n\n")
+		w.(http.Flusher).Flush()
+		streaming <- struct{}{}
+		<-unblock
+	})
+	other := newFakeAgentSession(t, "webhook-other", func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		io.WriteString(w, "ok")
+	})
+	for host, as := range map[string]*AgentSession{"hooks.example.com": stream, "other.example.com": other} {
+		if _, _, err := s.registry.BindWithOptions(BindOptions{Host: host, Session: as, Takeover: true, Webhook: verifier}); err != nil {
+			t.Fatalf("bind %s: %v", host, err)
+		}
+	}
+	body := strings.Repeat("x", 50)
+	signed := func(host string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "http://"+host+"/", strings.NewReader(body))
+		req.Host = host
+		req.RemoteAddr = "203.0.113.7:4444"
+		req.Header.Set(webhook.GitHubSignatureHeader, webhooktest.GitHubSignature(testWebhookSecret, []byte(body)))
+		rec := httptest.NewRecorder()
+		s.handlePublic(rec, req)
+		return rec
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- signed("hooks.example.com") }()
+	select {
+	case <-streaming:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream never started")
+	}
+	waitBudgetReleased(t, s, 5*time.Second)
+	if rec := signed("other.example.com"); rec.Code != http.StatusOK {
+		t.Fatalf("second verifying request status = %d body=%q while the first response streams", rec.Code, rec.Body.String())
+	}
+	select {
+	case <-done:
+		t.Fatal("streaming request finished before it was released")
+	default:
+	}
+	close(unblock)
+	if rec := <-done; rec.Code != http.StatusOK {
+		t.Fatalf("stream status = %d", rec.Code)
+	}
+}
+
+type failingBody struct {
+	data []byte
+	err  error
+}
+
+func (f *failingBody) Read(p []byte) (int, error) {
+	if len(f.data) == 0 {
+		return 0, f.err
+	}
+	n := copy(p, f.data)
+	f.data = f.data[n:]
+	return n, nil
+}
+
+func TestWebhookBodyErrorReleasesBudget(t *testing.T) {
+	v, err := webhook.New(webhook.Config{Provider: webhook.ProviderGitHub, Secret: testWebhookSecret})
+	if err != nil {
+		t.Fatalf("webhook.New: %v", err)
+	}
+	for _, length := range []int64{40, -1} {
+		budget := newByteBudget(100)
+		req := httptest.NewRequest(http.MethodPost, "http://hooks.example.com/", &failingBody{data: []byte("partial"), err: errors.New("client aborted")})
+		req.ContentLength = length
+		req.Header.Set(webhook.GitHubSignatureHeader, "sha256="+strings.Repeat("0", 64))
+		rec := httptest.NewRecorder()
+		if _, ok := verifyWebhookRequest(rec, req, v, 64, budget, time.Now()); ok {
+			t.Fatalf("length %d: aborted body accepted", length)
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("length %d: status = %d", length, rec.Code)
+		}
+		if got := budget.inUse(); got != 0 {
+			t.Fatalf("length %d: budget in use = %d after an aborted body", length, got)
+		}
+	}
+}
+
+func TestWebhookBodyReadHasAbsoluteDeadline(t *testing.T) {
+	verifier, err := webhook.New(webhook.Config{Provider: webhook.ProviderGitHub, Secret: testWebhookSecret})
+	if err != nil {
+		t.Fatalf("webhook.New: %v", err)
+	}
+	s := newClientLimitsServer(t, LimitsConfig{ClientIdleTimeout: 300 * time.Millisecond, WebhookMaxBodyBytes: 64, WebhookBufferBytes: 64})
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "svc.example.com", Session: newEchoAgentSession(t, "inst-trickle"), Takeover: true, Webhook: verifier}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	runServer(t, s)
+
+	conn, err := net.Dial("tcp", s.cfg.PublicAddr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	io.WriteString(conn, "POST / HTTP/1.1\r\nHost: svc.example.com\r\nTransfer-Encoding: chunked\r\n"+webhook.GitHubSignatureHeader+": sha256="+strings.Repeat("0", 64)+"\r\n\r\n")
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for i := 0; i < 100; i++ {
+			select {
+			case <-stop:
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+			if _, err := io.WriteString(conn, "1\r\nx\r\n"); err != nil {
+				return
+			}
+		}
+	}()
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	start := time.Now()
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("no response to a trickled webhook body within 5s: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestTimeout {
+		t.Fatalf("trickled webhook body got %d, want 408", resp.StatusCode)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("trickled webhook body took %v with a 300ms idle timeout", elapsed)
+	}
 	if got := s.webhookBudget.inUse(); got != 0 {
-		t.Fatalf("webhook budget in use after proxying = %d", got)
+		t.Fatalf("webhook budget in use = %d after the deadline", got)
 	}
 }
 

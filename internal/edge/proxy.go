@@ -301,13 +301,18 @@ type idleBody struct {
 	rc      *http.ResponseController
 	idle    time.Duration
 	stalled atomic.Bool
+	until   time.Time
 }
 
 func (b *idleBody) Read(p []byte) (int, error) {
 	if b.idle <= 0 {
 		return b.ReadCloser.Read(p)
 	}
-	_ = b.rc.SetReadDeadline(time.Now().Add(b.idle))
+	deadline := time.Now().Add(b.idle)
+	if !b.until.IsZero() && b.until.Before(deadline) {
+		deadline = b.until
+	}
+	_ = b.rc.SetReadDeadline(deadline)
 	n, err := b.ReadCloser.Read(p)
 	if err != nil && errors.Is(err, os.ErrDeadlineExceeded) {
 		b.stalled.Store(true)

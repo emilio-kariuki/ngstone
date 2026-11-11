@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"ngstone/internal/proto"
@@ -65,12 +66,42 @@ func verifyWebhookRequest(w http.ResponseWriter, r *http.Request, v *webhook.Ver
 	r.TransferEncoding = nil
 	if len(body) == 0 {
 		r.Body = http.NoBody
-		r.GetBody = func() (io.ReadCloser, error) { return http.NoBody, nil }
+		release()
 		return release, true
 	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
+	r.Body = &releasingBody{reader: bytes.NewReader(body), release: release}
 	return release, true
+}
+
+type releasingBody struct {
+	mu      sync.Mutex
+	reader  *bytes.Reader
+	release func()
+}
+
+func (b *releasingBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.reader == nil {
+		return 0, io.EOF
+	}
+	n, err := b.reader.Read(p)
+	if err != nil {
+		b.drop()
+	}
+	return n, err
+}
+
+func (b *releasingBody) Close() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.drop()
+	return nil
+}
+
+func (b *releasingBody) drop() {
+	b.reader = nil
+	b.release()
 }
 
 func readWebhookBody(w http.ResponseWriter, r *http.Request, limit int64, budget *byteBudget) ([]byte, func(), bool) {
@@ -80,6 +111,10 @@ func readWebhookBody(w http.ResponseWriter, r *http.Request, limit int64, budget
 	size := r.ContentLength
 	if size < 0 {
 		size = limit
+	}
+	if ib, ok := r.Body.(*idleBody); ok && ib.idle > 0 {
+		ib.until = time.Now().Add(ib.idle)
+		defer func() { ib.until = time.Time{} }()
 	}
 	release, ok := budget.reserve(size)
 	if !ok {
