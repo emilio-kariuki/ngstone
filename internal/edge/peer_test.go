@@ -91,6 +91,11 @@ func countDials(t *testing.T, addr string) *atomic.Int64 {
 
 func (pc *peerCluster) edge(t *testing.T, edgeID string) *peerEdge {
 	t.Helper()
+	return pc.edgeWith(t, edgeID, nil)
+}
+
+func (pc *peerCluster) edgeWith(t *testing.T, edgeID string, mgr *tcpManager) *peerEdge {
+	t.Helper()
 	store, err := storage.Open(storage.Config{DSN: pc.dsn, EdgeID: edgeID})
 	if err != nil {
 		t.Fatalf("open storage %s: %v", edgeID, err)
@@ -99,6 +104,7 @@ func (pc *peerCluster) edge(t *testing.T, edgeID string) *peerEdge {
 
 	e := &peerEdge{id: edgeID, store: store, srv: newTestServer("tok")}
 	e.srv.storage = store
+	e.srv.tcpMgr = mgr
 	e.srv.cfg.PeerAddr = "127.0.0.1:1"
 	p, err := newPeerForwarder(e.srv)
 	if err != nil {

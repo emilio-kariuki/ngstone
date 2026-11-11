@@ -23,6 +23,9 @@ import (
 const (
 	maxGlobalTCPConns  = 256
 	maxBindsPerSession = 8
+
+	maxRemoteTCPListeners = 1024
+	remoteBindRetry       = 30 * time.Second
 )
 
 var errPortUnavailable = errors.New("edge: port_unavailable")
@@ -76,6 +79,9 @@ type tcpManager struct {
 	conns     map[*AgentSession]map[*tcpConn]struct{}
 	releasing map[*AgentSession]struct{}
 	observe   func(string, string, time.Duration, int64, int64)
+
+	remote       map[int]net.Listener
+	remoteFailed map[int]time.Time
 }
 
 type tcpTunnelInfo struct {
@@ -124,16 +130,22 @@ func newTCPManager(lo, hi int, bindAddr string, limiter *perIPLimiter) *tcpManag
 		bySession:       make(map[*AgentSession]map[int]struct{}),
 		conns:           make(map[*AgentSession]map[*tcpConn]struct{}),
 		releasing:       make(map[*AgentSession]struct{}),
+		remote:          make(map[int]net.Listener),
+		remoteFailed:    make(map[int]time.Time),
 	}
 }
 
 func (tm *tcpManager) register(as *AgentSession, tc *tcpConn) {
 	tm.mu.Lock()
+	tm.registerLocked(as, tc)
+	tm.mu.Unlock()
+}
+
+func (tm *tcpManager) registerLocked(as *AgentSession, tc *tcpConn) {
 	if tm.conns[as] == nil {
 		tm.conns[as] = make(map[*tcpConn]struct{})
 	}
 	tm.conns[as][tc] = struct{}{}
-	tm.mu.Unlock()
 }
 
 func (tm *tcpManager) deregister(as *AgentSession, tc *tcpConn) {
@@ -160,6 +172,9 @@ func (tm *tcpManager) reserveLocked(requested int) (int, error) {
 	}
 	for p := tm.lo; p <= tm.hi; p++ {
 		if _, taken := tm.allocated[p]; !taken {
+			if _, remote := tm.remote[p]; remote {
+				continue
+			}
 			tm.allocated[p] = struct{}{}
 			return p, nil
 		}
@@ -304,6 +319,7 @@ func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string, all
 			return 0, err
 		}
 
+		tm.closeRemoteLocked(port)
 		ln, err := net.Listen("tcp", net.JoinHostPort(tm.bindAddr, strconv.Itoa(port)))
 		if err != nil {
 			delete(tm.allocated, port)
@@ -329,7 +345,10 @@ func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string, all
 		tm.mu.Lock()
 		candidate := 0
 		for ; p <= tm.hi; p++ {
-			if _, taken := tm.allocated[p]; !taken {
+			if _, taken := tm.allocated[p]; taken {
+				continue
+			}
+			if _, remote := tm.remote[p]; !remote {
 				candidate = p
 				break
 			}
@@ -401,11 +420,135 @@ func (tm *tcpManager) acceptLoop(tt *tcpTunnel) {
 		}
 		backoff = 5 * time.Millisecond
 
-		tc := &tcpConn{client: c}
-		tt.session.inflight.Add(1)
-		tm.register(tt.session, tc)
-		durableID, _ := tt.durableID.Load().(string)
-		go tm.handleConn(tt.session, tt.hostname, durableID, tt.allow, tc)
+		tc := tm.admit(tt, c)
+		go tm.serveAdmitted(tt, tc)
+	}
+}
+
+func (tm *tcpManager) admit(tt *tcpTunnel, c net.Conn) *tcpConn {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	return tm.admitLocked(tt, c)
+}
+
+func (tm *tcpManager) admitLocked(tt *tcpTunnel, c net.Conn) *tcpConn {
+	tc := &tcpConn{client: c}
+	tt.session.inflight.Add(1)
+	tm.registerLocked(tt.session, tc)
+	return tc
+}
+
+func (tm *tcpManager) serveAdmitted(tt *tcpTunnel, tc *tcpConn) {
+	durableID, _ := tt.durableID.Load().(string)
+	tm.handleConn(tt.session, tt.hostname, durableID, tt.allow, tc)
+}
+
+type forwardedConn struct {
+	tm *tcpManager
+	tt *tcpTunnel
+	tc *tcpConn
+}
+
+func (f *forwardedConn) serve() {
+	f.tm.serveAdmitted(f.tt, f.tc)
+}
+
+func (f *forwardedConn) abort() {
+	f.tc.client.Close()
+	f.tt.session.inflight.Done()
+	f.tm.deregister(f.tt.session, f.tc)
+}
+
+func (tm *tcpManager) acceptForwarded(port int, c net.Conn) (*forwardedConn, bool) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	tt := tm.byPort[port]
+	if tt == nil {
+		return nil, false
+	}
+	select {
+	case <-tt.closed:
+		return nil, false
+	default:
+	}
+	if _, releasing := tm.releasing[tt.session]; releasing {
+		return nil, false
+	}
+	return &forwardedConn{tm: tm, tt: tt, tc: tm.admitLocked(tt, c)}, true
+}
+
+func (tm *tcpManager) closeRemoteLocked(port int) {
+	if ln, ok := tm.remote[port]; ok {
+		ln.Close()
+		delete(tm.remote, port)
+		metricPeerTCPListeners.Set(int64(len(tm.remote)))
+	}
+}
+
+func (tm *tcpManager) reconcileRemote(want map[int]struct{}, accept func(port int, c net.Conn)) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	for p := range tm.remote {
+		if _, ok := want[p]; !ok {
+			tm.closeRemoteLocked(p)
+		}
+	}
+	for p := range tm.remoteFailed {
+		if _, ok := want[p]; !ok {
+			delete(tm.remoteFailed, p)
+		}
+	}
+	ports := make([]int, 0, len(want))
+	for p := range want {
+		ports = append(ports, p)
+	}
+	sort.Ints(ports)
+	now := time.Now()
+	for _, p := range ports {
+		if len(tm.remote) >= maxRemoteTCPListeners {
+			break
+		}
+		if p < tm.lo || p > tm.hi {
+			continue
+		}
+		if _, ok := tm.allocated[p]; ok {
+			continue
+		}
+		if _, ok := tm.remote[p]; ok {
+			continue
+		}
+		if failedAt, ok := tm.remoteFailed[p]; ok && now.Sub(failedAt) < remoteBindRetry {
+			continue
+		}
+		ln, err := net.Listen("tcp", net.JoinHostPort(tm.bindAddr, strconv.Itoa(p)))
+		if err != nil {
+			tm.remoteFailed[p] = now
+			metricPeerTCPBindFailed.Add(1)
+			slog.Warn("edge: peer tcp bind failed", "port", p, "err", err, "retry", remoteBindRetry)
+			continue
+		}
+		delete(tm.remoteFailed, p)
+		tm.remote[p] = ln
+		go tm.acceptRemote(p, ln, accept)
+	}
+	metricPeerTCPListeners.Set(int64(len(tm.remote)))
+}
+
+func (tm *tcpManager) acceptRemote(port int, ln net.Listener, accept func(port int, c net.Conn)) {
+	backoff := 5 * time.Millisecond
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return
+			}
+			slog.Warn("tcp accept error", "port", port, "err", err, "backoff", backoff)
+			time.Sleep(backoff)
+			backoff = min(backoff*2, time.Second)
+			continue
+		}
+		backoff = 5 * time.Millisecond
+		go accept(port, c)
 	}
 }
 

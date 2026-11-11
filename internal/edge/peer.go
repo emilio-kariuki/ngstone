@@ -13,6 +13,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"expvar"
 	"fmt"
 	"io"
 	"log/slog"
@@ -61,6 +62,8 @@ const (
 	peerDownCacheTTL   = 5 * time.Second
 
 	peerHalfCloseGrace = 5 * time.Second
+
+	peerTCPPollInterval = 2 * time.Second
 )
 
 var (
@@ -147,6 +150,9 @@ type peerForwarder struct {
 	ownersMu sync.Mutex
 	misses   *expirable.LRU[string, struct{}]
 	down     *expirable.LRU[string, struct{}]
+
+	tcpOwners atomic.Pointer[map[int][]storage.EdgePeer]
+	tcpFresh  atomic.Int64
 
 	pins        atomic.Pointer[map[string]time.Time]
 	lastRefresh atomic.Int64
@@ -324,6 +330,9 @@ func (p *peerForwarder) stop() {
 	if p.ln != nil {
 		p.ln.Close()
 	}
+	if p.srv.tcpMgr != nil {
+		p.srv.tcpMgr.reconcileRemote(nil, p.forwardTCP)
+	}
 }
 
 func (p *peerForwarder) beginSplice() bool {
@@ -405,6 +414,7 @@ func (p *peerForwarder) serveConn(ctx context.Context, c net.Conn) {
 		return
 	}
 	kind := peerFrameSNI
+	var tcpPort int
 	if tc.ConnectionState().NegotiatedProtocol == peerALPN2 {
 		var head [1]byte
 		if _, err := io.ReadFull(tc, head[:]); err != nil {
@@ -422,6 +432,7 @@ func (p *peerForwarder) serveConn(ctx context.Context, c net.Conn) {
 				tc.Close()
 				return
 			}
+			tcpPort = int(binary.BigEndian.Uint16(port[:]))
 		default:
 			slog.Debug("edge: peer frame of unknown type", "remote", c.RemoteAddr().String(), "type", kind)
 			tc.Close()
@@ -432,6 +443,13 @@ func (p *peerForwarder) serveConn(ctx context.Context, c net.Conn) {
 	if err != nil || remote == nil {
 		slog.Debug("edge: peer connection without a client address", "remote", c.RemoteAddr().String(), "err", err)
 		tc.Close()
+		return
+	}
+	if kind == peerFrameTCP {
+		p.serveTCP(tc, tcpPort, remote, func() {
+			held = false
+			p.handshakeSem.release()
+		})
 		return
 	}
 	if kind != peerFrameSNI {
@@ -447,6 +465,28 @@ func (p *peerForwarder) serveConn(ctx context.Context, c net.Conn) {
 	p.handshakeSem.release()
 	metricPeerAcceptedConns.Add(1)
 	p.public.classifyForwarded(&peerConn{Conn: tc, remote: remote})
+}
+
+func (p *peerForwarder) serveTCP(tc *tls.Conn, port int, remote net.Addr, releaseHandshake func()) {
+	mgr := p.srv.tcpMgr
+	if mgr == nil || port < mgr.lo || port > mgr.hi {
+		writePeerStatus(tc, peerStatusNotOwner)
+		tc.Close()
+		return
+	}
+	fwd, ok := mgr.acceptForwarded(port, &peerConn{Conn: tc, remote: remote})
+	if !ok {
+		writePeerStatus(tc, peerStatusNotOwner)
+		tc.Close()
+		return
+	}
+	if !writePeerStatus(tc, peerStatusAccept) || tc.SetDeadline(time.Time{}) != nil {
+		fwd.abort()
+		return
+	}
+	releaseHandshake()
+	metricPeerAcceptedConns.Add(1)
+	fwd.serve()
 }
 
 func writePeerStatus(c net.Conn, status byte) bool {
@@ -654,7 +694,7 @@ func (p *peerForwarder) pick(owners []storage.EdgePeer, failed storage.EdgePeer)
 
 func (p *peerForwarder) connect(key string, entry *ownerEntry, frame peerFrame) (upstream *tls.Conn, noOwner bool) {
 	var failed storage.EdgePeer
-	resolved := false
+	resolved := key == ""
 	reresolve := func() (found, noOwner bool) {
 		resolved = true
 		fresh, res := p.refresh(key, entry)
@@ -762,23 +802,105 @@ func (p *peerForwarder) forward(client *replayConn, host string) {
 		slog.Debug("edge: peer forward failed", "host", host, "client", frame.src.String())
 		client.Close()
 	default:
-		p.run(client, upstream)
+		p.run(client.Conn, upstream, metricPeerForwardedConns)
 	}
 }
 
-func (p *peerForwarder) run(client *replayConn, upstream *tls.Conn) {
+func (p *peerForwarder) run(client net.Conn, upstream *tls.Conn, forwarded *expvar.Int) {
 	if !p.beginSplice() {
 		upstream.Close()
 		client.Close()
 		return
 	}
 	metricActivePeerForwards.Add(1)
-	metricPeerForwardedConns.Add(1)
+	forwarded.Add(1)
 	defer p.splices.Done()
 	defer metricActivePeerForwards.Add(-1)
 	defer client.Close()
 	defer upstream.Close()
-	splice(client.Conn, upstream, p.srv.limitsOrDefault().TCPIdleTimeout, peerHalfCloseGrace)
+	splice(client, upstream, p.srv.limitsOrDefault().TCPIdleTimeout, peerHalfCloseGrace)
+}
+
+func (p *peerForwarder) forwardTCP(port int, c net.Conn) {
+	src, ok := peerClientAddrPort(c.RemoteAddr())
+	if !ok {
+		c.Close()
+		return
+	}
+	if _, err := proxyProtoV1Line(src); err != nil {
+		c.Close()
+		return
+	}
+	ip := src.Addr().String()
+	if !p.srv.perIPLimiter.allow(ip) {
+		metricRejectedRateLimited.Add(1)
+		c.Close()
+		return
+	}
+	var owners []storage.EdgePeer
+	if snapshot := p.tcpOwners.Load(); snapshot != nil {
+		owners = (*snapshot)[port]
+	}
+	if len(owners) == 0 {
+		c.Close()
+		return
+	}
+	release, ok := p.reserve(ip)
+	if !ok {
+		c.Close()
+		return
+	}
+	defer release()
+	frame := peerFrame{kind: peerFrameTCP, port: uint16(port), src: src}
+	upstream, _ := p.connect("", &ownerEntry{peers: owners}, frame)
+	if upstream == nil {
+		metricPeerForwardFailed.Add(1)
+		slog.Debug("edge: peer tcp forward failed", "port", port, "client", src.String())
+		c.Close()
+		return
+	}
+	p.run(c, upstream, metricPeerTCPForwarded)
+}
+
+func (p *peerForwarder) watchTCP(ctx context.Context) error {
+	defer p.srv.tcpMgr.reconcileRemote(nil, p.forwardTCP)
+	p.pollTCP(ctx, time.Now())
+	ticker := time.NewTicker(peerTCPPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			p.pollTCP(ctx, time.Now())
+		}
+	}
+}
+
+func (p *peerForwarder) pollTCP(ctx context.Context, now time.Time) {
+	mgr := p.srv.tcpMgr
+	qctx, cancel := context.WithTimeout(ctx, peerLookupTimeout)
+	ports, err := p.store.LiveRemoteTCPPorts(qctx, p.srv.cfg.Domain, p.selfID, mgr.lo, mgr.hi, now, 2*maxRemoteTCPListeners)
+	cancel()
+	if ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		slogStorageError("live remote tcp ports", err)
+		if last := p.tcpFresh.Load(); last != 0 && now.Sub(time.Unix(0, last)) > storage.DefaultLeaseTTL {
+			p.tcpFresh.Store(0)
+			p.tcpOwners.Store(&map[int][]storage.EdgePeer{})
+			mgr.reconcileRemote(nil, p.forwardTCP)
+		}
+		return
+	}
+	p.tcpFresh.Store(now.UnixNano())
+	p.tcpOwners.Store(&ports)
+	want := make(map[int]struct{}, len(ports))
+	for port := range ports {
+		want[port] = struct{}{}
+	}
+	mgr.reconcileRemote(want, p.forwardTCP)
 }
 
 func validatePeerListen(listen string) error {

@@ -248,3 +248,105 @@ func TestLookupHostAccessIgnoresExpiredLease(t *testing.T) {
 		}
 	})
 }
+
+func seedPortLease(t *testing.T, s *Store, hostname, kind, edgeID string, port int) {
+	t.Helper()
+	_, err := s.AcquireLease(context.Background(), LeaseRequest{
+		Hostname: hostname, Kind: kind, EdgeID: edgeID, OwnerID: "owner-1",
+		InstanceID: "instance-" + edgeID + kind, SessionID: "session-" + edgeID + kind,
+		ExpiresAt: time.Now().Add(time.Hour), RemotePort: port,
+	})
+	if err != nil {
+		t.Fatalf("acquire %s lease on %s port %d: %v", kind, edgeID, port, err)
+	}
+}
+
+func TestLiveRemoteTCPPorts(t *testing.T) {
+	forEachPeerStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		live := time.Now().Add(time.Hour)
+
+		t.Run("returns remote owner", func(t *testing.T) {
+			seedPortLease(t, s, "returns.example.com", "tcp", "edge-b1", 9001)
+			seedPeer(t, s, "edge-b1", live)
+			got, err := s.LiveRemoteTCPPorts(ctx, " Returns.Example.com ", "edge-a", 9000, 9100, time.Now(), 10)
+			if err != nil || len(got) != 1 || len(got[9001]) != 1 {
+				t.Fatalf("ports = %+v, %v", got, err)
+			}
+			owner := got[9001][0]
+			if owner.EdgeID != "edge-b1" || owner.PeerAddr != "edge-b1.internal:7443" || owner.SPKISHA256 != "pin-edge-b1" {
+				t.Fatalf("owner = %+v", owner)
+			}
+		})
+
+		t.Run("excludes own leases", func(t *testing.T) {
+			seedPortLease(t, s, "own.example.com", "tcp", "edge-self2", 9011)
+			seedPortLease(t, s, "own.example.com", "tcp", "edge-b2", 9012)
+			seedPeer(t, s, "edge-self2", live)
+			seedPeer(t, s, "edge-b2", live)
+			got, err := s.LiveRemoteTCPPorts(ctx, "own.example.com", "edge-self2", 9000, 9100, time.Now(), 10)
+			if err != nil || len(got) != 1 || len(got[9012]) != 1 || got[9012][0].EdgeID != "edge-b2" {
+				t.Fatalf("ports = %+v, %v; want only edge-b2 on 9012", got, err)
+			}
+		})
+
+		t.Run("excludes expired lease", func(t *testing.T) {
+			seedPortLease(t, s, "lease.example.com", "tcp", "edge-b3", 9021)
+			seedPeer(t, s, "edge-b3", time.Now().Add(3*time.Hour))
+			got, err := s.LiveRemoteTCPPorts(ctx, "lease.example.com", "edge-a", 9000, 9100, time.Now().Add(2*time.Hour), 10)
+			if err != nil || len(got) != 0 {
+				t.Fatalf("ports after lease expiry = %+v, %v", got, err)
+			}
+		})
+
+		t.Run("excludes expired peer", func(t *testing.T) {
+			seedPortLease(t, s, "peer.example.com", "tcp", "edge-b4", 9031)
+			seedPeer(t, s, "edge-b4", time.Now().Add(-time.Minute))
+			got, err := s.LiveRemoteTCPPorts(ctx, "peer.example.com", "edge-a", 9000, 9100, time.Now(), 10)
+			if err != nil || len(got) != 0 {
+				t.Fatalf("ports with expired peer = %+v, %v", got, err)
+			}
+		})
+
+		t.Run("excludes ports outside range", func(t *testing.T) {
+			seedPortLease(t, s, "range.example.com", "tcp", "edge-b5", 9041)
+			seedPortLease(t, s, "range.example.com", "tcp", "edge-b5", 9500)
+			seedPeer(t, s, "edge-b5", live)
+			got, err := s.LiveRemoteTCPPorts(ctx, "range.example.com", "edge-a", 9000, 9100, time.Now(), 10)
+			if err != nil || len(got) != 1 || len(got[9041]) != 1 {
+				t.Fatalf("ports = %+v, %v; want only 9041", got, err)
+			}
+		})
+
+		t.Run("excludes other tunnel kinds", func(t *testing.T) {
+			seedPortLease(t, s, "kind.example.com", "http", "edge-b6", 0)
+			seedPortLease(t, s, "kindtls.example.com", "tls", "edge-b6", 0)
+			seedPeer(t, s, "edge-b6", live)
+			for _, host := range []string{"kind.example.com", "kindtls.example.com"} {
+				got, err := s.LiveRemoteTCPPorts(ctx, host, "edge-a", 0, 9100, time.Now(), 10)
+				if err != nil || len(got) != 0 {
+					t.Fatalf("ports for %s = %+v, %v; want none", host, got, err)
+				}
+			}
+		})
+
+		t.Run("limit caps rows", func(t *testing.T) {
+			for port := 9061; port <= 9063; port++ {
+				seedPortLease(t, s, "limit.example.com", "tcp", "edge-b7", port)
+			}
+			seedPeer(t, s, "edge-b7", live)
+			got, err := s.LiveRemoteTCPPorts(ctx, "limit.example.com", "edge-a", 9000, 9100, time.Now(), 2)
+			if err != nil || len(got) != 2 || len(got[9061]) != 1 || len(got[9062]) != 1 {
+				t.Fatalf("ports = %+v, %v; want the first two ports", got, err)
+			}
+		})
+
+		t.Run("wraps errors", func(t *testing.T) {
+			s.Close()
+			_, err := s.LiveRemoteTCPPorts(ctx, "x.example.com", "edge-a", 9000, 9100, time.Now(), 10)
+			if err == nil || !strings.Contains(err.Error(), "storage: live remote tcp ports") {
+				t.Fatalf("err = %v, want it wrapped with its own context", err)
+			}
+		})
+	})
+}

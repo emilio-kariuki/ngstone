@@ -51,6 +51,7 @@ type fwdConfig struct {
 	proxySrc       string
 	idp            *e2eIdP
 	separateListen bool
+	tcpLo, tcpHi   int
 }
 
 type fwdOption func(*fwdConfig)
@@ -61,6 +62,10 @@ func withProxyProtocol(src string) fwdOption {
 
 func withSeparatePeerListen() fwdOption {
 	return func(c *fwdConfig) { c.separateListen = true }
+}
+
+func withTCPPorts(lo, hi int) fwdOption {
+	return func(c *fwdConfig) { c.tcpLo, c.tcpHi = lo, hi }
 }
 
 func withVisitorIdP(idp *e2eIdP) fwdOption {
@@ -130,6 +135,13 @@ func (p *fwdPair) startEdge(t *testing.T, id, publicAddr string, proxyProtocol b
 	if p.cfg.separateListen {
 		cfg.PeerListen = freeAddr(t)
 		cfg.PeerAddr = portMap(t, cfg.PeerListen)
+	}
+	if p.cfg.tcpHi != 0 {
+		cfg.TCPPortRange = fmt.Sprintf("%d-%d", p.cfg.tcpLo, p.cfg.tcpHi)
+		cfg.TCPBindAddr = "127.0.0.1"
+		if id != "edge-a" {
+			cfg.TCPBindAddr = "::1"
+		}
 	}
 	if proxyProtocol {
 		cfg.ProxyProtocol = true
@@ -835,5 +847,138 @@ func TestForwardVisitorLogin(t *testing.T) {
 		if got := expvarCount(t, "ngstoned_peer_apex_rule_lookups_total") - lookupsBefore; got < 1 {
 			t.Fatalf("apex rule lookups from shared storage = %d, want at least 1", got)
 		}
+	})
+}
+
+func (p *fwdPair) startTCPAgent(t *testing.T, target string, port int, allowCIDR string) func() {
+	t.Helper()
+	issued, err := p.a.store.Issue(credentials.Spec{Kind: credentials.KindTCP, RemotePort: port, OwnerID: "e2e-owner"}, time.Hour)
+	if err != nil {
+		t.Fatalf("issue tcp credential for port %d: %v", port, err)
+	}
+	cfg := agent.Config{
+		ControlAddr: p.a.controlAddr,
+		Token:       issued.Token,
+		Kind:        proto.KindTCP,
+		RemotePort:  port,
+		TargetURL:   target,
+		AllowCIDRs:  []string{allowCIDR},
+		Insecure:    true,
+		Store:       inspect.NewStore(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		agent.New(cfg).Run(ctx)
+		close(done)
+	}()
+	stop := func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(fwdStopBudget):
+			t.Errorf("tcp agent for port %d did not stop within %s", port, fwdStopBudget)
+		}
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+func tcpEchoes(addr string) bool {
+	c, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		return false
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := c.Write([]byte("ping")); err != nil {
+		return false
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(c, buf); err != nil {
+		return false
+	}
+	return string(buf) == "ping"
+}
+
+func tcpDialable(addr string) bool {
+	c, err := net.DialTimeout("tcp", addr, time.Second)
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
+}
+
+func waitTCPCondition(t *testing.T, budget time.Duration, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(budget)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out after %s waiting for %s", budget, what)
+}
+
+func freePortPair(t *testing.T) int {
+	t.Helper()
+	for i := 0; i < 50; i++ {
+		lo, _ := freeTCPRange(t, 40)
+		var held []net.Listener
+		ok := true
+		for _, host := range []string{"127.0.0.1", "::1"} {
+			for port := lo + 39; port <= lo+40; port++ {
+				ln, err := net.Listen("tcp", net.JoinHostPort(host, fmt.Sprint(port)))
+				if err != nil {
+					ok = false
+					break
+				}
+				held = append(held, ln)
+			}
+		}
+		for _, ln := range held {
+			ln.Close()
+		}
+		if ok {
+			return lo
+		}
+	}
+	t.Fatalf("no free adjacent port pair on 127.0.0.1 and ::1")
+	return 0
+}
+
+func TestForwardRawTCP(t *testing.T) {
+	if ln, err := net.Listen("tcp", "[::1]:0"); err != nil {
+		t.Skipf("IPv6 loopback unavailable: %v", err)
+	} else {
+		ln.Close()
+	}
+	forEachForwardStorage(t, func(t *testing.T, dsn string) {
+		lo := freePortPair(t)
+		p := startForwardedPair(t, dsn, withTCPPorts(lo, lo+40))
+		echo := startTCPEcho(t)
+
+		portV4, portV6 := lo+39, lo+40
+		viaA := func(port int) string { return net.JoinHostPort("127.0.0.1", fmt.Sprint(port)) }
+		viaB := func(port int) string { return net.JoinHostPort("::1", fmt.Sprint(port)) }
+
+		stopV4 := p.startTCPAgent(t, echo, portV4, "127.0.0.1/32")
+		p.startTCPAgent(t, echo, portV6, "::1/128")
+
+		waitTCPCondition(t, 5*time.Second, "owner to echo for 127.0.0.1/32", func() bool { return tcpEchoes(viaA(portV4)) })
+		waitTCPCondition(t, 5*time.Second, "edge B to open the proxied port for the 127.0.0.1/32 tunnel", func() bool { return tcpDialable(viaB(portV4)) })
+		if tcpEchoes(viaB(portV4)) {
+			t.Fatalf("::1 client reached the 127.0.0.1/32 tunnel through edge B; the owner must enforce allow-CIDR with the real client address")
+		}
+
+		waitTCPCondition(t, 5*time.Second, "::1/128 tunnel to echo through edge B", func() bool { return tcpEchoes(viaB(portV6)) })
+		if tcpEchoes(viaA(portV6)) {
+			t.Fatalf("127.0.0.1 client reached the ::1/128 tunnel directly on the owner")
+		}
+
+		stopV4()
+		waitTCPCondition(t, 5*time.Second, "edge B to stop serving the disconnected tunnel", func() bool { return !tcpDialable(viaB(portV4)) })
 	})
 }

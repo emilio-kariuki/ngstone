@@ -77,6 +77,33 @@ func (s *Store) LookupHostOwners(ctx context.Context, hostname, excludeEdgeID st
 	return out, nil
 }
 
+func (s *Store) LiveRemoteTCPPorts(ctx context.Context, hostname, excludeEdgeID string, lo, hi int, now time.Time, limit int) (map[int][]EdgePeer, error) {
+	hostname = strings.ToLower(strings.TrimSpace(hostname))
+	rows, err := s.db.QueryContext(ctx, s.bind(`SELECT t.remote_port, e.edge_id, e.peer_addr, e.spki_sha256, e.expires_at FROM tunnels t JOIN connector_leases l ON l.tunnel_id = t.id JOIN edge_peers e ON e.edge_id = l.edge_id WHERE t.hostname = $1 AND t.kind = 'tcp' AND t.remote_port BETWEEN $2 AND $3 AND l.expires_at > $4 AND e.expires_at > $4 AND l.edge_id <> $5 GROUP BY t.remote_port, e.edge_id, e.peer_addr, e.spki_sha256, e.expires_at ORDER BY t.remote_port, e.edge_id LIMIT $6`), hostname, lo, hi, nowString(now), excludeEdgeID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("storage: live remote tcp ports: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[int][]EdgePeer)
+	for rows.Next() {
+		var port int
+		var peer EdgePeer
+		var expiresAt string
+		if err := rows.Scan(&port, &peer.EdgeID, &peer.PeerAddr, &peer.SPKISHA256, &expiresAt); err != nil {
+			return nil, fmt.Errorf("storage: live remote tcp ports: %w", err)
+		}
+		peer.ExpiresAt, err = parseTime(expiresAt)
+		if err != nil {
+			return nil, fmt.Errorf("storage: live remote tcp ports: %w", err)
+		}
+		out[port] = append(out[port], peer)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: live remote tcp ports: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Store) LookupHostAccess(ctx context.Context, hostname string, now time.Time) (string, bool, error) {
 	hostname = strings.ToLower(strings.TrimSpace(hostname))
 	var accessJSON string

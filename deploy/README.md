@@ -278,8 +278,11 @@ Forwarding requires PostgreSQL (not SQLite, not `-insecure`), a concrete
 private address, a certificate for the same domain on every edge (share the
 certificate storage to stay under the ACME duplicate-certificate limit), and
 identical `NGSTONE_VISITOR_OIDC_*` values, including the cookie secret, on
-every edge. Raw TCP tunnels, share links and custom domains are not
-forwarded. With Docker's bridge network, set `NGSTONE_PEER_LISTEN` (or
+every edge. Raw TCP tunnels are forwarded when every edge uses the same
+`-tcp-ports` range: each edge opens the tunnel's port within about two seconds
+and forwards to the owner, which enforces allow-CIDR with the real client
+address (open the range in every edge's firewall). Share links and custom
+domains are not forwarded. With Docker's bridge network, set `NGSTONE_PEER_LISTEN` (or
 `-peer-listen`) to the address inside the container and publish that port; see
 [Run with Docker](#run-with-docker). `NGSTONE_PEER_ADDR` stays the address the
 other edges dial.

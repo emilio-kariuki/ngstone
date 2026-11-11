@@ -524,6 +524,9 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.peers != nil {
 		g.Go(func() error { return s.peers.acceptLoop(gctx) })
 		g.Go(func() error { return s.peers.heartbeat(gctx) })
+		if s.tcpMgr != nil {
+			g.Go(func() error { return s.peers.watchTCP(gctx) })
+		}
 	}
 
 	if httpSrv != nil {

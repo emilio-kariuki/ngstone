@@ -143,8 +143,8 @@ process holding a live lease serves a tunnel.
 With PostgreSQL and `NGSTONE_PEER_ADDR=<private-ip>:<port>` set on every edge,
 an edge that receives a public connection for a tunnel owned by another edge
 forwards it to the owner over a pinned mutual-TLS connection, so any edge can
-sit behind your load balancer or DNS round robin. HTTP, WebSocket, SSE, and TLS
-passthrough tunnels are forwarded; the forwarding is a single hop.
+sit behind your load balancer or DNS round robin. HTTP, WebSocket, SSE, TLS
+passthrough, and raw TCP tunnels are forwarded; the forwarding is a single hop.
 
 Requirements:
 
@@ -168,7 +168,13 @@ publishes in the shared database, so anyone who can write that database can
 add a peer. The owner trusts the forwarded client address only from a pinned
 peer.
 
-Not forwarded: raw TCP tunnels, share links, custom domains, connections with
+Raw TCP tunnels: every edge started with the same `-tcp-ports` range opens the
+tunnel's port within about two seconds of the owner binding it, and forwards
+connections to the owner. The owner enforces allow-CIDR and limits with the
+real client address. A port outside an edge's own range, or one it cannot bind,
+is not served by that edge, so give every edge the same range.
+
+Not forwarded: share links, custom domains, connections with
 no SNI or a ClientHello over 16 KiB, and anything under `-insecure`. A
 request for one of these must reach the owning edge directly.
 

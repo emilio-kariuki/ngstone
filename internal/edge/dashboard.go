@@ -93,6 +93,9 @@ type dashboardMetrics struct {
 	PeerMisdirected421       int64 `json:"peer_misdirected_421"`
 	PeerApexRuleLookups      int64 `json:"peer_apex_rule_lookups"`
 	ActivePeerForwards       int64 `json:"active_peer_forwards"`
+	PeerTCPForwarded         int64 `json:"peer_tcp_forwarded"`
+	PeerTCPBindFailed        int64 `json:"peer_tcp_bind_failed"`
+	PeerTCPListeners         int64 `json:"peer_tcp_listeners"`
 }
 
 func (s *Server) dashboardState(r *http.Request) dashboardState {
@@ -351,6 +354,9 @@ func dashboardMetricsSnapshot() dashboardMetrics {
 		PeerMisdirected421:       metricPeerMisdirected.Value(),
 		PeerApexRuleLookups:      metricPeerApexRuleLookups.Value(),
 		ActivePeerForwards:       metricActivePeerForwards.Value(),
+		PeerTCPForwarded:         metricPeerTCPForwarded.Value(),
+		PeerTCPBindFailed:        metricPeerTCPBindFailed.Value(),
+		PeerTCPListeners:         metricPeerTCPListeners.Value(),
 	}
 }
 
@@ -406,6 +412,9 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writePrometheusCounter(w, "ngstoned_peer_misdirected_421_total", "Requests answered with 421 because the connection targeted another edge.", metrics.PeerMisdirected421)
 	writePrometheusCounter(w, "ngstoned_peer_apex_rule_lookups_total", "Visitor login rules read from shared storage for tunnels owned by another edge.", metrics.PeerApexRuleLookups)
 	writePrometheusGauge(w, "ngstoned_active_peer_forwards", "Currently spliced forwarded connections.", metrics.ActivePeerForwards)
+	writePrometheusCounter(w, "ngstoned_peer_tcp_forwarded_total", "Raw TCP connections forwarded to the edge that owns the tunnel.", metrics.PeerTCPForwarded)
+	writePrometheusCounter(w, "ngstoned_peer_tcp_bind_failed_total", "Ports of TCP tunnels on other edges that this edge could not bind.", metrics.PeerTCPBindFailed)
+	writePrometheusGauge(w, "ngstoned_peer_tcp_listeners", "Ports currently open to forward raw TCP tunnels owned by other edges.", metrics.PeerTCPListeners)
 	writePrometheusGauge(w, "ngstoned_active_tunnels", "Currently routed HTTP and TCP tunnels.", int64(len(s.dashboardTunnels())))
 	writePrometheusGauge(w, "ngstoned_uptime_seconds", "Seconds since ngstoned started.", uptimeSeconds(s.startedAt))
 	fmt.Fprintln(w, "# HELP ngstoned_tunnel_requests_total Requests observed for a tunnel.")

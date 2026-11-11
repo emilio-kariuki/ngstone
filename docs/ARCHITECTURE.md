@@ -366,8 +366,9 @@ connection reaching an edge without the connector is forwarded in one hop:
 
 The two hop protocols are negotiated by ALPN, and the owner dispatches on the
 negotiated protocol, never on the first byte. Peer-2 carries the frame type so
-later steps can add TCP and control targets; the owner currently answers
-not-owner to TCP and control frames, and closes on any other type. Peer-1
+TCP and control targets can share the hop; the owner answers not-owner to
+control frames and to TCP frames for a port it does not own or is not
+configured for, and closes on any other type. Peer-1
 remains accepted so edges can be upgraded one at a time: an ingress that
 would need a peer-2 frame skips a peer-1 owner without marking it down and
 counts it in `ngstoned_peer_version_skew_total`.
@@ -406,10 +407,23 @@ other's registration. Pins carry the registration expiry, so a pin whose row
 expired or was deleted stops being accepted once its cached expiry passes,
 even while storage is unreachable.
 
+Raw TCP tunnels: each edge with forwarding and `-tcp-ports` enabled polls
+storage every two seconds for live TCP leases held by other edges whose port
+falls in its own range, and opens a proxy listener on `-tcp-bind` for each
+(at most 1024, retrying a failed bind after 30 seconds). A connection to a
+proxy listener is forwarded as a peer-2 TCP frame carrying the port and the real
+client address; the owner looks the port up locally and never forwards it
+again, and applies allow-CIDR, rate limits and in-flight limits to that client
+address. A requested bind for the same port on the owner closes its proxy
+listener, and auto-allocation skips ports held by proxy listeners. If storage
+stays unreachable for longer than the lease TTL the proxy listeners are closed.
+A port outside an edge's range, or one it cannot bind, is not served by that
+edge, so every edge should use the same range.
+
 Trust model: peers are trusted only through pins in the shared database, so
 write access to that database grants peer status. The owner accepts a
 forwarded client address only on a connection that completed the pinned mutual
-handshake. Raw TCP, share links, custom domains, and connections with no SNI
+handshake. Share links, custom domains, and connections with no SNI
 or a ClientHello over 16 KiB are not forwarded.
 
 ### Public-side protocol handling

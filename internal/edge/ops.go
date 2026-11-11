@@ -46,6 +46,9 @@ var (
 	metricPeerMisdirected       = expvar.NewInt("ngstoned_peer_misdirected_421_total")
 	metricPeerApexRuleLookups   = expvar.NewInt("ngstoned_peer_apex_rule_lookups_total")
 	metricActivePeerForwards    = expvar.NewInt("ngstoned_active_peer_forwards")
+	metricPeerTCPForwarded      = expvar.NewInt("ngstoned_peer_tcp_forwarded_total")
+	metricPeerTCPBindFailed     = expvar.NewInt("ngstoned_peer_tcp_bind_failed_total")
+	metricPeerTCPListeners      = expvar.NewInt("ngstoned_peer_tcp_listeners")
 )
 
 type certStatusJSON struct {
