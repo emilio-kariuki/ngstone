@@ -79,3 +79,24 @@ func TestProjectTunnelFromYAMLTLS(t *testing.T) {
 		t.Fatalf("project tunnel target = %q, want app.local:9443", got.Target)
 	}
 }
+
+func TestCmdTLSRejectsHTTPOnlyFlags(t *testing.T) {
+	t.Setenv("NGSTONE_TOKEN", "")
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cases := [][]string{
+		{"--oidc"},
+		{"--verify-webhook", "github"},
+		{"--policy-file", "policy.json"},
+		{"--basic-auth", "u:p"},
+		{"--http2"},
+		{"--multi-connector"},
+	}
+	for _, flags := range cases {
+		t.Run(flags[0], func(t *testing.T) {
+			if code := cmdTLS(append([]string{"8443"}, flags...)); code != 2 {
+				t.Fatalf("cmdTLS(8443 %v) = %d, want 2", flags, code)
+			}
+		})
+	}
+}

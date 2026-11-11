@@ -18,12 +18,15 @@ func TestLoadProjectAcceptsTLSKindWithAllowCIDR(t *testing.T) {
 
 func TestLoadProjectRejectsHTTPOnlyFieldsForTLS(t *testing.T) {
 	cases := map[string]string{
-		"host_header":     `{"tunnels":{"s":{"kind":"tls","target":"8443","host_header":"demo.local"}}}`,
-		"basic auth":      `{"tunnels":{"s":{"kind":"tls","target":"8443","basic_auth_file":"credentials"}}}`,
-		"policy_file":     `{"tunnels":{"s":{"kind":"tls","target":"8443","policy_file":"policy.json"}}}`,
-		"http2":           `{"tunnels":{"s":{"kind":"tls","target":"8443","http2":true}}}`,
-		"multi_connector": `{"tunnels":{"s":{"kind":"tls","target":"8443","subdomain":"s","multi_connector":true}}}`,
-		"remote_port":     `{"tunnels":{"s":{"kind":"tls","target":"8443","remote_port":9443}}}`,
+		"host_header":      `{"tunnels":{"s":{"kind":"tls","target":"8443","host_header":"demo.local"}}}`,
+		"basic auth":       `{"tunnels":{"s":{"kind":"tls","target":"8443","basic_auth_file":"credentials"}}}`,
+		"policy_file":      `{"tunnels":{"s":{"kind":"tls","target":"8443","policy_file":"policy.json"}}}`,
+		"http2":            `{"tunnels":{"s":{"kind":"tls","target":"8443","http2":true}}}`,
+		"multi_connector":  `{"tunnels":{"s":{"kind":"tls","target":"8443","subdomain":"s","multi_connector":true}}}`,
+		"remote_port":      `{"tunnels":{"s":{"kind":"tls","target":"8443","remote_port":9443}}}`,
+		"oidc":             `{"tunnels":{"s":{"kind":"tls","target":"8443","oidc":true}}}`,
+		"oidc_allow_email": `{"tunnels":{"s":{"kind":"tls","target":"8443","oidc_allow_email":["a@example.com"]}}}`,
+		"webhook":          `{"tunnels":{"s":{"kind":"tls","target":"8443","webhook":{"provider":"github","secret_env":"SECRET"}}}}`,
 	}
 	for field, data := range cases {
 		t.Run(field, func(t *testing.T) {
@@ -57,13 +60,18 @@ func TestParseTunnelsAcceptsTLSKind(t *testing.T) {
 
 func TestParseTunnelsRejectsBadTLSInput(t *testing.T) {
 	cases := map[string]string{
-		"tls with url":         "tunnels:\n  s:\n    kind: tls\n    url: https://127.0.0.1:8443\n",
-		"tls with host_header": "tunnels:\n  s:\n    kind: tls\n    port: 8443\n    host_header: x\n",
-		"tls with basic auth":  "tunnels:\n  s:\n    kind: tls\n    port: 8443\n    basic_auth: [u:p]\n",
-		"tls with http2":       "tunnels:\n  s:\n    kind: tls\n    port: 8443\n    http2: true\n",
-		"tls with remote_port": "tunnels:\n  s:\n    kind: tls\n    port: 8443\n    remote_port: 9443\n",
-		"tls bad address":      "tunnels:\n  s:\n    kind: tls\n    address: nohost\n",
-		"tls without target":   "tunnels:\n  s:\n    kind: tls\n    subdomain: s\n",
+		"tls with url":              "tunnels:\n  s:\n    kind: tls\n    url: https://127.0.0.1:8443\n",
+		"tls with host_header":      "tunnels:\n  s:\n    kind: tls\n    port: 8443\n    host_header: x\n",
+		"tls with basic auth":       "tunnels:\n  s:\n    kind: tls\n    port: 8443\n    basic_auth: [u:p]\n",
+		"tls with http2":            "tunnels:\n  s:\n    kind: tls\n    port: 8443\n    http2: true\n",
+		"tls with remote_port":      "tunnels:\n  s:\n    kind: tls\n    port: 8443\n    remote_port: 9443\n",
+		"tls with policy_file":      "tunnels:\n  s:\n    kind: tls\n    port: 8443\n    policy_file: policy.json\n",
+		"tls with multi_connector":  "tunnels:\n  s:\n    kind: tls\n    port: 8443\n    subdomain: s\n    multi_connector: true\n",
+		"tls with oidc":             "tunnels:\n  s:\n    kind: tls\n    port: 8443\n    oidc: true\n",
+		"tls with oidc_allow_email": "tunnels:\n  s:\n    kind: tls\n    port: 8443\n    oidc_allow_email: [a@example.com]\n",
+		"tls with webhook":          "tunnels:\n  s:\n    kind: tls\n    port: 8443\n    webhook:\n      provider: github\n      secret_env: SECRET\n",
+		"tls bad address":           "tunnels:\n  s:\n    kind: tls\n    address: nohost\n",
+		"tls without target":        "tunnels:\n  s:\n    kind: tls\n    subdomain: s\n",
 	}
 	for name, src := range cases {
 		t.Run(name, func(t *testing.T) {
