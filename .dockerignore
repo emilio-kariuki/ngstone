@@ -1,0 +1,13 @@
+# The image builds only ngstoned, so the context is an allowlist: everything
+# is excluded (.git, landing, e2e, docs, deploy, bin, node_modules, .env
+# files, editor and agent config) except the Go module and its sources.
+*
+!go.mod
+!go.sum
+!cmd
+!internal
+
+# Tests are not compiled into the binary; leaving them out keeps test-only
+# edits from invalidating the build cache.
+**/*_test.go
+**/testdata/

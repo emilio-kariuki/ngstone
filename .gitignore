@@ -24,6 +24,7 @@ credentials.json
 *.credentials.json
 .env
 .env.*
+!.env.example
 
 # agent/tooling config — local only, never publish
 CLAUDE.md
