@@ -174,7 +174,8 @@ connections to the owner. The owner enforces allow-CIDR and limits with the
 real client address. A port outside an edge's own range, or one it cannot bind,
 is not served by that edge, so give every edge the same range.
 
-Not forwarded: share links, custom domains, connections with
+Share links are forwarded when the sharer authenticated with a `share`
+credential. Not forwarded: custom domains, connections with
 no SNI or a ClientHello over 16 KiB, and anything under `-insecure`. A
 request for one of these must reach the owning edge directly.
 
@@ -264,9 +265,20 @@ credential is issued or a `tls` tunnel is bound, because an older `ngstoned`
 rejects a credentials file containing an unknown credential kind and does not
 apply the shared `http`/`tls` hostname rule.
 
-Database-share commands require a legacy shared-token operator session. Scoped
-tunnel credentials cannot create, inspect, or manage database shares. Configure
-each edge for either scoped credentials or the legacy shared-token mode.
+Share credentials create and manage database shares:
+`ngstone credentials issue --kind share` or
+`ngstone admin credentials issue --kind share`. A share credential takes no
+subdomain or remote port and cannot bind tunnels; it may manage only shares
+that belong to its owner. Credentials issued through the management API belong
+to the issuing principal, so every share credential issued by the same
+principal manages the same shares. A credential issued with
+`ngstone credentials issue` has no owner and manages only its own shares. HTTP,
+TCP, TLS and preview credentials cannot use share commands. A legacy
+shared-token session still manages every share. Every edge sharing a
+credentials file or database must be upgraded before a `share` credential is
+issued: an older `ngstoned` rejects a credentials file containing the `share`
+kind, and an older edge on a shared database accepts the token but refuses
+every share command.
 
 The same management API persists traffic policies and custom domains:
 

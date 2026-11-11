@@ -230,8 +230,9 @@ $ ngstone doctor --json`}
         <Property name="issue" type="subcommand">
           Creates an HTTP credential scoped to <code>--subdomain</code>, or a
           TCP credential scoped to <code>--remote-port</code> with{" "}
-          <code>--kind tcp</code>. The default TTL is 24 hours and the maximum
-          is 720 hours.
+          <code>--kind tcp</code>. <code>--kind share</code> issues a credential
+          for <code>ngstone share</code> that manages only its owner&apos;s
+          shares. The default TTL is 24 hours and the maximum is 720 hours.
         </Property>
         <Property name="list" type="subcommand">
           Prints credential metadata and status. It never prints token

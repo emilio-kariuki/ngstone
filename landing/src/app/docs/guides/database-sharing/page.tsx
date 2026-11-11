@@ -136,9 +136,11 @@ listening  127.0.0.1:6380          redis     ->  redis-cli -p 6380`}
 
       <Anchor id="managing">Managing shares from anywhere</Anchor>
       <p>
-        Any terminal with the token can see and manage every share, not
-        only the one that started it. These open a fresh session, do one
-        thing and exit, so they work from scripts too.
+        Any terminal with the legacy shared token can see and manage every
+        share, not only the one that started it. These open a fresh session,
+        do one thing and exit, so they work from scripts too. A{" "}
+        <code>share</code> credential manages only the shares of its own
+        owner.
       </p>
       <CodeBlock
         language="bash"

@@ -20,7 +20,7 @@ Management drain and active connector replacement enforce the principal
 boundary. Durable leases and the in-memory registry compare access rules
 through `internal/access`; inline policy snapshots are reused by owner and
 digest without overwriting other tunnels' policies. Preview credentials bind
-one assigned hostname and cannot expand into named tunnels or pools.
+one assigned hostname and cannot expand into named tunnels or pools. Share credentials bind nothing: they may send share commands only and manage only the shares of their owner.
 Database migration v4 preserves older ownership and policy associations;
 see the coordinated upgrade procedure in [deploy/README.md](../deploy/README.md#upgrading-existing-control-plane-databases).
 
@@ -427,8 +427,16 @@ edge, so every edge should use the same range.
 Trust model: peers are trusted only through pins in the shared database, so
 write access to that database grants peer status. The owner accepts a
 forwarded client address only on a connection that completed the pinned mutual
-handshake. Share links, custom domains, and connections with no SNI
+handshake. Custom domains and connections with no SNI
 or a ClientHello over 16 KiB are not forwarded.
+
+Share links are forwarded as control frames: an edge that does not hold a
+connector's share finds the holding edge in the `share_directory` table (a
+domain-separated key, share id, edge id, owner id, expiry and revoked flag) and
+passes the raw control bytes over the peer hop, and the holding edge
+authenticates the connector with its real address. A share secret registered by
+another owner is refused, and `unshare` from any edge revokes the row for the
+owner.
 
 ### Public-side protocol handling
 

@@ -301,8 +301,8 @@ identical `NGSTONE_VISITOR_OIDC_*` values, including the cookie secret, on
 every edge. Raw TCP tunnels are forwarded when every edge uses the same
 `-tcp-ports` range: each edge opens the tunnel's port within about two seconds
 and forwards to the owner, which enforces allow-CIDR with the real client
-address (open the range in every edge's firewall). Share links and custom
-domains are not forwarded. With Docker's bridge network, set `NGSTONE_PEER_LISTEN` (or
+address (open the range in every edge's firewall). Share links are forwarded
+for sharers using a `share` credential; custom domains are not forwarded. With Docker's bridge network, set `NGSTONE_PEER_LISTEN` (or
 `-peer-listen`) to the address inside the container and publish that port; see
 [Run with Docker](#run-with-docker). `NGSTONE_PEER_ADDR` stays the address the
 other edges dial.
@@ -337,7 +337,9 @@ and a credential is limited to one exact HTTP subdomain, one exact TCP
 remote port, or one edge-assigned preview hostname. For `ngstone preview`,
 issue with `--kind preview --ttl 2h` and omit `--subdomain` / `--remote-port`.
 The preview credential retains its assigned hostname across reconnects;
-issue another credential for a new URL.
+issue another credential for a new URL. For `ngstone share`, issue with
+`--kind share --ttl 24h`; it takes no `--subdomain` / `--remote-port` and
+manages only the shares of its owner.
 The edge rechecks active credentials during the heartbeat, so
 revocation and expiry close live sessions shortly afterward.
 

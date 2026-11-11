@@ -17,7 +17,7 @@ This document builds on [ARCHITECTURE.md](ARCHITECTURE.md) and reuses its vocabu
 - Shares end on their own: a fixed expiry chosen by the sharer and enforced by the edge, an optional idle timeout, plus instant revocation from the sharing terminal or any other terminal holding the token.
 - Access policies the sharer can state up front: which source networks may connect, how many connectors and connections at once, how many connector joins in total, a passphrase, and per-connection approval.
 - Auditing: the sharer sees every connector join and leave and every connection open and close, with name, address, duration and byte counts. Any operator terminal can watch the same stream for every share, and the edge can append it to a file.
-- Keep the project's principles: stdlib-first, one path per feature, everything flow-controlled, nothing unbounded in memory, no persistent state on the edge.
+- Keep the project's principles: stdlib-first, one path per feature, everything flow-controlled, nothing unbounded in memory, no persistent state on the edge except the share directory row kept while inter-edge forwarding is enabled (see "Shares across edges").
 
 **Non-goals (v1)**
 
@@ -25,7 +25,7 @@ This document builds on [ARCHITECTURE.md](ARCHITECTURE.md) and reuses its vocabu
 - **Query-level auditing or read-only enforcement.** That requires parsing each database's wire protocol. `--user` only puts a role into the hint connectors see; the database enforces it.
 - **End-to-end encryption past the edge.** The edge terminates TLS on both sessions and copies bytes between them, so an operator who controls the VPS can read the traffic. Enable the database's own TLS (`sslmode=require` and friends) when the VPS is not fully trusted.
 - **Durable, searchable audit history.** The edge's `-share-audit-log` is an append-only JSON Lines file, nothing more.
-- **A hosted multi-tenant service.** Every operator session holds the same token and may manage every share.
+- **A hosted multi-tenant service.** In legacy shared-token mode every operator session may manage every share. With scoped credentials a `share` credential creates shares and manages only shares of the same owner. The edge still has no accounts, quotas or per-owner share limits.
 
 ---
 
@@ -106,7 +106,7 @@ $ ngstone shares --watch        # every share's audit lines, live
 $ ngstone shares --json
 ```
 
-These open a fresh operator session with the saved token, so they work from a second terminal or a script while the share runs elsewhere. There is one operator, so every share is theirs to manage.
+These open a fresh operator session with the saved token, so they work from a second terminal or a script while the share runs elsewhere. In legacy shared-token mode there is one operator, so every share is theirs to manage. A `share` credential manages only the shares of its own owner.
 
 ---
 
@@ -320,6 +320,18 @@ Both sessions' in-flight trackers count the relay, so graceful drain on either s
 | label, connector name | 128 printable bytes, 32 chars |
 
 Memory follows the §5 window budget in ARCHITECTURE.md: a relayed connection holds two yamux streams on the edge, so the stated ceiling is 256 × 2 × 1 MiB.
+
+---
+
+### Shares across edges
+
+With inter-edge forwarding enabled, a registered share is also published to the shared database as one directory row: a domain-separated key derived from the secret hash, the share id, the id of the edge holding the share, the owner id, the expiry and a revoked flag. It never contains the secret, the secret hash, the passphrase, the label, the targets or any address.
+
+- A connector that reaches an edge that does not hold its share is forwarded to the sharer's edge as raw control bytes over the peer hop. The sharer's edge authenticates the connector and enforces the passphrase, allow-CIDR, limits and audit with the connector's real address.
+- `unshare` works from any edge for the owner: the directory row is marked revoked, new connectors are refused immediately, and the holding edge closes existing connectors within one heartbeat.
+- `shares`, `extend` and `kick` act on the edge the operator session reached.
+- Publishing a share needs the database while forwarding is enabled; if the publish fails the share is not registered.
+- A share secret already registered by another owner is refused with `share_taken`.
 
 ---
 
