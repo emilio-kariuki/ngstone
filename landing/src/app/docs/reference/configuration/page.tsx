@@ -99,10 +99,15 @@ export default function ConfigurationPage() {
           letters, numbers, <code>-</code>, <code>_</code>, and <code>.</code>.
         </Property>
         <Property name="kind" type="string" defaultValue="http">
-          Either <code>http</code> or <code>tcp</code>.
+          <code>http</code>, <code>tcp</code>, or <code>tls</code>. A{" "}
+          <code>tls</code> tunnel is routed by SNI and passed through without
+          decryption; see{" "}
+          <a href="/docs/guides/tls-passthrough">TLS passthrough</a>. It
+          accepts <code>subdomain</code> and <code>allow_cidr</code>, and
+          rejects the HTTP-only fields and <code>remote_port</code>.
         </Property>
         <Property name="target" type="string" required>
-          Bare local port, <code>host:port</code> for TCP, or a full HTTP URL.
+          Bare local port, <code>host:port</code> for TCP or TLS, or a full HTTP URL.
         </Property>
         <Property name="subdomain" type="string">
           Requested public subdomain.

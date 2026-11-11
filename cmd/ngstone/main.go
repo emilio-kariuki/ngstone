@@ -37,6 +37,7 @@ var verbs = map[string]func([]string) int{
 	"auth":          cmdAuth,
 	"port":          cmdPort,
 	"tcp":           cmdTCP,
+	"tls":           cmdTLS,
 	"share":         cmdShare,
 	"connect":       cmdConnect,
 	"shares":        cmdShares,
@@ -91,6 +92,7 @@ Commands:
   preview <port|url>      start a disposable preview URL
   port <port|url>         expose a local port or URL through the tunnel
   tcp <port|host:port>    expose a raw TCP service through the tunnel
+  tls <port|host:port>    pass TLS through by SNI; the local service keeps its own certificate
   share <preset>...       share local databases with teammates via a link
   connect <link>          connect to a shared database through a link
   shares                  list live shares on the edge (--watch tails their events)
@@ -127,6 +129,7 @@ Examples:
   ngstone preview 3000 --ttl 30m
   ngstone tcp 5432
   ngstone tcp db.local:5432 --remote-port 15432
+  ngstone tls 8443 --subdomain secure
   ngstone share postgres --expires 2h --label "staging replica"
   ngstone share postgres redis:6380 --approve --passphrase hunter2
   ngstone share tcp:9000 --single-use --idle 30m

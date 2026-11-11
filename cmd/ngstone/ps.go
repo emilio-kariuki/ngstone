@@ -26,8 +26,8 @@ func publishStatus(ctx context.Context, command string, cfgs []agent.Config, age
 		for i, a := range agents {
 			st := a.Status()
 			kind := "http"
-			if cfgs[i].Kind == "tcp" {
-				kind = "tcp"
+			if cfgs[i].Kind == "tcp" || cfgs[i].Kind == "tls" {
+				kind = cfgs[i].Kind
 			}
 			state := st.State
 			if state == "" {

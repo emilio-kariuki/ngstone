@@ -122,8 +122,13 @@ func (p Project) Validate() error {
 		if kind == "" {
 			kind = "http"
 		}
-		if kind != "http" && kind != "tcp" {
-			return fmt.Errorf("tunnel %q kind must be http or tcp", name)
+		if kind != "http" && kind != "tcp" && kind != "tls" {
+			return fmt.Errorf("tunnel %q kind must be http, tcp, or tls", name)
+		}
+		if kind == "tls" {
+			if err := validateTLSProjectTunnel(name, tunnel); err != nil {
+				return err
+			}
 		}
 		if kind == "tcp" && tunnel.HostHeader != "" {
 			return fmt.Errorf("tunnel %q host_header is only valid for http tunnels", name)
@@ -158,7 +163,7 @@ func (p Project) Validate() error {
 		if err := tunnel.Webhook.Validate(kind); err != nil {
 			return fmt.Errorf("tunnel %q: %w", name, err)
 		}
-		if kind == "tcp" && (tunnel.OIDC || len(tunnel.OIDCAllowEmail) > 0 || len(tunnel.OIDCAllowDomain) > 0) {
+		if kind != "http" && (tunnel.OIDC || len(tunnel.OIDCAllowEmail) > 0 || len(tunnel.OIDCAllowDomain) > 0) {
 			return fmt.Errorf("tunnel %q oidc is only valid for http tunnels", name)
 		}
 		if !tunnel.OIDC && (len(tunnel.OIDCAllowEmail) > 0 || len(tunnel.OIDCAllowDomain) > 0) {
@@ -183,6 +188,24 @@ func (p Project) Validate() error {
 		normalized := tunnel
 		normalized.Kind = kind
 		p.Tunnels[name] = normalized
+	}
+	return nil
+}
+
+func validateTLSProjectTunnel(name string, tunnel ProjectTunnel) error {
+	switch {
+	case tunnel.HostHeader != "":
+		return fmt.Errorf("tunnel %q host_header is not valid for tls tunnels; the edge passes TLS through without reading HTTP", name)
+	case len(tunnel.BasicAuth) > 0 || tunnel.BasicAuthFile != "":
+		return fmt.Errorf("tunnel %q basic auth is not valid for tls tunnels; the edge passes TLS through without reading HTTP", name)
+	case tunnel.PolicyFile != "":
+		return fmt.Errorf("tunnel %q policy_file is not valid for tls tunnels; the edge passes TLS through without reading HTTP", name)
+	case tunnel.HTTP2:
+		return fmt.Errorf("tunnel %q http2 is not valid for tls tunnels; the local service negotiates ALPN itself", name)
+	case tunnel.MultiConnector:
+		return fmt.Errorf("tunnel %q multi_connector is only valid for http tunnels", name)
+	case tunnel.RemotePort != 0:
+		return fmt.Errorf("tunnel %q remote_port is only valid for tcp tunnels", name)
 	}
 	return nil
 }

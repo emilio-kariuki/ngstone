@@ -238,7 +238,7 @@ func buildProjectAgent(name string, tunnel config.ProjectTunnel, projectDir stri
 
 	target := tunnel.Target
 	var err error
-	if kind == "tcp" {
+	if kind == "tcp" || kind == "tls" {
 		target, err = resolveTCPTarget(tunnel.Target)
 	} else {
 		target, err = resolveTargetURL(tunnel.Target)
@@ -425,8 +425,8 @@ func runJSONAgent(ctx context.Context, acfg agent.Config, name, harPath string, 
 	}
 	a := agent.New(acfg)
 	command := "port"
-	if acfg.Kind == "tcp" {
-		command = "tcp"
+	if acfg.Kind == "tcp" || acfg.Kind == "tls" {
+		command = acfg.Kind
 	}
 	defer publishStatus(ctx, command, []agent.Config{acfg}, []*agent.Agent{a})()
 	done := make(chan error, 1)

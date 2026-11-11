@@ -25,6 +25,7 @@ const TOC: TocItem[] = [
   { id: "ngstone-replay", title: "ngstone replay" },
   { id: "ngstone-port", title: "ngstone port" },
   { id: "ngstone-tcp", title: "ngstone tcp" },
+  { id: "ngstone-tls", title: "ngstone tls" },
   { id: "ngstone-serve", title: "ngstone serve" },
   { id: "ngstone-start", title: "ngstone start" },
   { id: "ngstone-service", title: "ngstone service" },
@@ -743,6 +744,26 @@ $ ngstone tcp db.local:5432 --remote-port 15432`}
         reverse proxy</a> and{" "}
         <a href="/docs/guides/access-control">Access control</a>.
       </Callout>
+
+      <Anchor id="ngstone-tls">ngstone tls</Anchor>
+      <p>
+        Starts a TLS passthrough tunnel: the edge routes connections by
+        ClientHello SNI and never decrypts them, so the local service
+        presents its own certificate. See{" "}
+        <a href="/docs/guides/tls-passthrough">TLS passthrough</a>.
+      </p>
+      <CodeBlock
+        language="bash"
+        code={`$ ngstone tls 8443 --subdomain secure
+tls://secure.example.com -> 127.0.0.1:8443`}
+      />
+      <p>
+        It takes the same flags as <code>ngstone tcp</code>, with{" "}
+        <code>--subdomain</code>/<code>-s</code> in place of{" "}
+        <code>--remote-port</code>. HTTP-only options such as{" "}
+        <code>--basic-auth</code> and <code>--host-header</code> are not
+        accepted.
+      </p>
 
       <Anchor id="ngstone-serve">ngstone serve</Anchor>
       <p>

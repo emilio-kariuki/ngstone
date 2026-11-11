@@ -97,7 +97,8 @@ same runner and terminal inspector. Each YAML tunnel
 accepts the same options as `ngstone port` and `ngstone tcp`: `port` or
 `url`, `subdomain`, `host_header`, `basic_auth` or `basic_auth_file`, and
 `allow_cidr` for HTTP; `port` or `address`, `remote_port` and `allow_cidr`
-for `kind: tcp`. Unknown keys are errors, so a typo cannot silently drop a
+for `kind: tcp`; `port` or `address`, `subdomain` and `allow_cidr` for
+`kind: tls` (see [TLS passthrough](#tls-passthrough)). Unknown keys are errors, so a typo cannot silently drop a
 setting. YAML also supports per-tunnel `credential_env` or `credential_file`,
 `connector_token_env` or `connector_token_file`, `http2`, `multi_connector`,
 `ttl`, `policy_file`, `transport`, `insecure`, and `pin`.
@@ -361,6 +362,48 @@ HTTP-only and cannot be combined with a TCP tunnel.
 The native path is covered by transport tests for response trailers,
 bidirectional streaming, cleartext h2c, cancellation propagation, 2 MiB
 messages, and backend HTTP/2 connection reuse.
+
+### TLS passthrough
+
+HTTP tunnels end TLS at the edge with its wildcard certificate. When the local
+service must present its own certificate (mTLS, a pinned or EV certificate, a
+non-HTTP protocol over TLS, or traffic the edge must never see in plaintext),
+use a `tls` tunnel:
+
+```
+ngstone tls 8443 --subdomain secure
+# tls://secure.example.com -> 127.0.0.1:8443
+ngstone tls app.local:9443 --subdomain secure --allow-cidr 203.0.113.0/24
+```
+
+The edge reads only the SNI from the ClientHello on its public `:443`
+listener, without consuming it, and when the name matches a `tls` tunnel it
+hands the raw connection to the agent, replaying the bytes it peeked. The agent
+dials the local address and splices bytes both ways, so the TLS handshake,
+certificate, and ALPN negotiation happen between the client and your service.
+Connections whose SNI is not a `tls` tunnel, that carry no SNI, or that are not
+TLS at all continue to the normal TLS-terminating path unchanged, so HTTP
+tunnels and the `/_ngstone/control` WebSocket fallback on the apex keep
+working on the same port. The peek is bounded to 16 KiB and the edge's
+`-read-header-timeout`.
+
+Because the edge never decrypts the stream, `--basic-auth`, `--host-header`,
+`--policy-file`, `--http2`, and `--multi-connector` are rejected for `tls`
+tunnels; `--allow-cidr`, per-IP rate and in-flight limits, PROXY protocol
+client addresses, and `--ttl` all apply. The local service needs a certificate
+for the public hostname (`secure.example.com`) that clients trust; the edge's
+own certificate is never involved. A hostname is either an HTTP or a `tls`
+tunnel at a time: binding one kind over a live tunnel of the other kind fails
+with `kind_conflict`.
+
+In `ngstone.json` (`ngstone up`) or `ngstone.yml` (`ngstone start`):
+
+```json
+{"tunnels": {"secure": {"kind": "tls", "target": "8443", "subdomain": "secure", "allow_cidr": "203.0.113.0/24"}}}
+```
+
+`ngstone ps`, `ngstone up --json`, and the terminal inspector's tunnel list
+report the kind as `tls`.
 
 ### Multiple connectors
 
@@ -957,7 +1000,8 @@ same yamux session inside an authenticated WebSocket upgrade at
 `/_ngstone/control` on `:443`. Use `--transport raw` or
 `--transport websocket` to force one path. Every proxied HTTP request gets its
 own yamux stream inside the selected session, opened by the edge and read by
-the agent. Certificates for both the apex and the wildcard are issued and
+the agent. A `tls` tunnel's connections are routed by ClientHello SNI before
+the edge terminates TLS and ride their stream as raw bytes. Certificates for both the apex and the wildcard are issued and
 renewed automatically via
 [certmagic](https://github.com/caddyserver/certmagic) using the DNS-01
 challenge, so no ports need to be exposed for ACME HTTP-01 validation.
