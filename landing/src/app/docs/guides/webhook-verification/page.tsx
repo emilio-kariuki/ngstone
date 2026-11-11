@@ -31,8 +31,9 @@ export default function WebhookVerificationPage() {
         and a public webhook URL accepts requests from anyone. With{" "}
         <code>--verify-webhook</code> the edge checks the provider&apos;s
         HMAC-SHA256 signature on every request before forwarding it, so a
-        forged or replayed delivery is answered with <code>401</code> and
-        never reaches your local app.
+        forged delivery, or a <code>stripe</code> or <code>slack</code>{" "}
+        delivery whose timestamp is outside the tolerance, is answered with{" "}
+        <code>401</code> and never reaches your local app.
       </p>
 
       <Anchor id="quick-start">Quick start</Anchor>
@@ -70,12 +71,12 @@ $ ngstone port 3000 --verify-webhook github --verify-webhook-secret-file github.
         <Property name="slack" type="X-Slack-Signature">
           Signs <code>v0:timestamp:body</code> using{" "}
           <code>X-Slack-Request-Timestamp</code>, which must be within the
-          replay window (default 5 minutes).
+          tolerance (default 5 minutes).
         </Property>
         <Property name="hmac" type="configurable">
           HMAC-SHA256 of the raw body in a header you name, hex or base64,
           with an optional prefix such as <code>sha256=</code>. Covers
-          Shopify, Twilio-style and in-house senders.
+          Shopify and in-house senders that sign only the body.
         </Property>
       </ParamTable>
       <CodeBlock
@@ -90,7 +91,9 @@ $ ngstone port 3000 --verify-webhook github --verify-webhook-secret-file github.
       <ParamTable>
         <Property name="--verify-webhook" type="string">
           <code>stripe</code>, <code>github</code>, <code>slack</code> or{" "}
-          <code>hmac</code>. HTTP tunnels only.
+          <code>hmac</code>. HTTP tunnels only; cannot be combined with{" "}
+          <code>--http2</code> or <code>--oidc</code>, and{" "}
+          <code>ngstone serve</code> rejects it.
         </Property>
         <Property name="--verify-webhook-secret-file" type="string">
           File holding the signing secret. Falls back to{" "}
@@ -103,9 +106,12 @@ $ ngstone port 3000 --verify-webhook github --verify-webhook-secret-file github.
           <code>/index.php/webhooks/stripe</code> are checked too. Paths the
           edge cannot classify (encoded slashes or backslashes, bad escapes,
           control bytes, backslashes, <code>;</code>) are always verified.
+          The prefix must not contain <code>%</code>, <code>?</code> or{" "}
+          <code>#</code>.
         </Property>
         <Property name="--verify-webhook-tolerance" type="duration" defaultValue="5m">
-          Timestamp tolerance for <code>stripe</code> and <code>slack</code>.
+          Timestamp tolerance for <code>stripe</code> and <code>slack</code>,
+          a whole number of seconds from 1s to 24h.
         </Property>
         <Property name="--verify-webhook-header" type="string">
           Signature header for <code>hmac</code>.
@@ -125,7 +131,10 @@ $ ngstone port 3000 --verify-webhook github --verify-webhook-secret-file github.
         <code>webhook</code> block on an HTTP tunnel. Use{" "}
         <code>secret_file</code> (relative to the project file, mode{" "}
         <code>0600</code>) or <code>secret_env</code>; with neither, the
-        agent reads <code>NGSTONE_WEBHOOK_SECRET</code>.
+        agent reads <code>NGSTONE_WEBHOOK_SECRET</code>. A tunnel with a{" "}
+        <code>webhook</code> block cannot set <code>http2: true</code> or{" "}
+        <code>oidc: true</code>, and <code>ngstone service</code> requires{" "}
+        <code>secret_file</code> so the secret survives logout and restart.
       </p>
       <CodeBlock
         filename="ngstone.yml"
@@ -192,7 +201,19 @@ $ ngstone port 3000 --verify-webhook github --verify-webhook-secret-file github.
         needs the signing secret itself, so the agent sends it to the edge
         over the TLS control channel when the tunnel binds. It lives only in
         the edge&apos;s memory and is not written to durable storage. Only
-        use this with an edge you operate or trust.
+        use this with an edge you operate or trust. With{" "}
+        <code>--insecure</code> the control channel is plaintext, so the
+        agent refuses to send the secret unless the edge address is loopback
+        (<code>localhost</code>, <code>127.0.0.0/8</code> or{" "}
+        <code>::1</code>).
+      </Callout>
+      <Callout variant="warning" title="Replay protection is limited">
+        <code>stripe</code> and <code>slack</code> reject a delivery only
+        when its signed timestamp is outside the tolerance. The edge keeps no
+        nonce cache, so a captured delivery can be replayed within that
+        window. <code>github</code> and <code>hmac</code> sign no timestamp
+        and have no replay protection at all. Deduplicate on the
+        provider&apos;s event ID in your app.
       </Callout>
       <p>
         If you set a path prefix, requests whose path does not contain it

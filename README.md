@@ -590,8 +590,9 @@ followed by a `deny` for `/admin` limits a path to one person.
 
 ### Webhook signature verification
 
-The edge can check webhook signatures before forwarding, so unsigned, tampered
-or replayed deliveries get `401` and never reach the local app:
+The edge can check webhook signatures before forwarding, so unsigned or tampered
+deliveries, and `stripe` or `slack` deliveries whose timestamp is outside the
+tolerance, get `401` and never reach the local app:
 
 ```bash
 export NGSTONE_WEBHOOK_SECRET=whsec_...
@@ -605,7 +606,7 @@ ngstone port 3000 --verify-webhook hmac --verify-webhook-header X-Shopify-Hmac-S
 | --- | --- | --- |
 | `stripe` | `Stripe-Signature` (`t=…,v1=…`) | `timestamp.body`, timestamp within tolerance (default 5m) |
 | `github` | `X-Hub-Signature-256` (`sha256=…`) | body |
-| `slack` | `X-Slack-Signature` + `X-Slack-Request-Timestamp` | `v0:timestamp:body`, timestamp within the replay window (default 5m) |
+| `slack` | `X-Slack-Signature` + `X-Slack-Request-Timestamp` | `v0:timestamp:body`, timestamp within tolerance (default 5m) |
 | `hmac` | `--verify-webhook-header` | body, `hex` (default) or `base64`, optional `--verify-webhook-prefix` such as `sha256=` |
 
 The secret comes from `--verify-webhook-secret-file` or `NGSTONE_WEBHOOK_SECRET`;
@@ -614,7 +615,19 @@ verifies every request whose decoded, cleaned path contains the prefix starting 
 any `/`, case-insensitively, so `/webhooks/stripe.json`, `/webhooks/stripe;x=1` and
 `/index.php/webhooks/stripe` are all checked; a path the edge cannot classify
 (an encoded slash or backslash, a bad escape, a control byte, a backslash, `;`)
-is verified too. Without it every request is verified. HTTP tunnels only.
+is verified too. Without it every request is verified. The prefix must not
+contain `%`, `?` or `#`.
+
+Replay protection is limited. `stripe` and `slack` reject a delivery only when
+its signed timestamp is outside the tolerance, a whole number of seconds from
+1s to 24h. The edge keeps no nonce cache, so a captured delivery can be replayed
+within that window; `github` and `hmac` sign no timestamp and have no replay
+protection at all. Deduplicate on the provider's event ID in the app.
+
+Verification works on HTTP tunnels only, and cannot be combined with `--http2`
+or `--oidc` (`http2: true` or `oidc: true` in project files). `ngstone serve`
+rejects the `--verify-webhook` flags, and `ngstone service` requires
+`webhook.secret_file` so the secret survives logout and restart.
 
 In `ngstone.json` or `ngstone.yml`, add a `webhook` block to an HTTP tunnel:
 
@@ -647,7 +660,10 @@ signature`, `timestamp outside tolerance`) and increment
 `ngstoned_rejected_webhook_signature_total`.
 
 HMAC verification needs the signing secret itself, so the agent sends it to the
-edge in the bind message over the control channel. The edge keeps it in memory
+edge in the bind message over the TLS control channel. With `--insecure` the
+control channel is plaintext, so the agent refuses to send a webhook secret
+unless the edge address is loopback (`localhost`, `127.0.0.0/8` or `::1`).
+The edge keeps it in memory
 only: it is not stored durably and never appears in the dashboard, admin API,
 events, `ngstone ps`, `--json` output or HAR exports, which show only the
 provider name. An edge that does not acknowledge webhook verification makes the
