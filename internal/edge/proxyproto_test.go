@@ -636,3 +636,54 @@ func TestProxyProtoEmptyTrustedListPreservesTodaysBehavior(t *testing.T) {
 		t.Fatalf("payload after header = %q, want %q", buf, "hello")
 	}
 }
+
+func TestProxyProtoConnCloseWriteHalfCloses(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		accepted <- c
+	}()
+	client, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer client.Close()
+	_ = client.SetDeadline(time.Now().Add(5 * time.Second))
+	if _, err := client.Write([]byte("PROXY TCP4 203.0.113.7 192.0.2.1 5555 443\r\n")); err != nil {
+		t.Fatalf("write header: %v", err)
+	}
+	if _, err := client.Write([]byte("hi")); err != nil {
+		t.Fatalf("write hi: %v", err)
+	}
+	serverSide := <-accepted
+	defer serverSide.Close()
+	_ = serverSide.SetDeadline(time.Now().Add(5 * time.Second))
+	pc := &proxyProtoConn{Conn: serverSide, timeout: time.Second}
+
+	buf := make([]byte, 2)
+	if _, err := io.ReadFull(pc, buf); err != nil || string(buf) != "hi" {
+		t.Fatalf("read = %q, %v, want hi", buf, err)
+	}
+	closeWrite(pc)
+	if _, err := client.Read(make([]byte, 1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("client read after CloseWrite = %v, want EOF", err)
+	}
+	if _, err := client.Write([]byte("more")); err != nil {
+		t.Fatalf("client write after half-close: %v", err)
+	}
+	more := make([]byte, 4)
+	if _, err := io.ReadFull(pc, more); err != nil || string(more) != "more" {
+		t.Fatalf("read after half-close = %q, %v, want more", more, err)
+	}
+	if got := pc.RemoteAddr().String(); got != "203.0.113.7:5555" {
+		t.Fatalf("RemoteAddr = %q, want 203.0.113.7:5555", got)
+	}
+}

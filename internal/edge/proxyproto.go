@@ -126,6 +126,16 @@ func (c *proxyProtoConn) Write(b []byte) (int, error) {
 	return c.Conn.Write(b)
 }
 
+func (c *proxyProtoConn) CloseWrite() error {
+	if err := c.resolve(); err != nil {
+		return err
+	}
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return c.Conn.Close()
+}
+
 func (c *proxyProtoConn) SetDeadline(t time.Time) error {
 	if err := c.resolve(); err != nil {
 		return err
