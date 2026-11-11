@@ -1125,7 +1125,7 @@ ngstone v0.1.0 (commit 3f1a9c2, built 2026-06-01T12:00:00Z)`}
       <Anchor id="generating-a-token">Scoped credentials &amp; legacy token</Anchor>
       <p>
         The preferred path is <code>ngstone credentials issue</code>. It
-        creates a short-lived credential scoped to one HTTP subdomain or TCP
+        creates a short-lived credential scoped to one HTTP or TLS subdomain or TCP
         port, stores only its hash, and prints the plaintext once:
       </p>
       <CodeBlock

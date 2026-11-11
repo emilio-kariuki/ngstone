@@ -62,7 +62,7 @@ export default function SecurityModelPage() {
         A legacy shared token grants: binding any non-denylisted subdomain,
         receiving that traffic, and serving phishing content under your
         domain. Prefer a scoped credential instead: it is short-lived, bound
-        to one exact subdomain or TCP port, and can be revoked independently.
+        to one exact subdomain (HTTP or TLS) or TCP port, and can be revoked independently.
         Scoped credentials are hashed in the edge database (or compatibility
         file) and checked again while a session is alive. Neither credential type grants: reading other
         tunnels&apos; traffic in flight, shell access to the edge, or control over

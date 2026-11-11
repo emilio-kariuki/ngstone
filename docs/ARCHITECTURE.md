@@ -325,7 +325,7 @@ in `internal/storage`, backed by SQLite by default and PostgreSQL when
 | `custom_domains` | domain, owner, tunnel association, status | unique domain registration |
 | `audit_events` | edge, actor, action, resource, metadata, timestamp | append-only operational history |
 
-An HTTP or TCP bind claims a database lease before entering the local
+An HTTP, TLS, or TCP bind claims a database lease before entering the local
 registry. A control heartbeat renews every lease for that session. Session
 teardown deletes only that session's leases and marks the durable tunnel
 offline when no live connector remains. The edge dashboard merges the local
@@ -568,7 +568,7 @@ func (s *Store) Subscribe(ctx context.Context) <-chan *Exchange
 | **Oversized request body** | `ContentLength` pre-check; else `MaxBytesReader` + `ErrorHandler` | Declared-length → real `413`, nothing crosses the tunnel. Chunked → `413` synthesized from `*http.MaxBytesError`, with the caveat that the agent may already have forwarded a partial body (§5). The naive `MaxBytesReader`-only design returned `502` *after* shipping 256 MiB. |
 | **Subdomain collision** | `Registry.Bind` under lock | Normal bind: different live `InstanceID` → `BindErr{subdomain_taken}`. Multi-connector bind: same explicit subdomain joins the pool when settings match; a mismatch returns `connector_config_mismatch`. Reconnect replaces only the matching connector, and releasing one connector drains it without removing its peers. |
 | **Apex cert fails to issue/renew** | Startup check + `/healthz` per-cert `NotAfter` | Public traffic keeps working on the wildcard while **no agent can connect** — so `ngstoned` refuses to accept on :4443 without a loadable apex cert and exits loudly rather than failing mysteriously (§4). |
-| **Credential leak or revocation** | Auth result logs plus credential status; live sessions rechecked on the 15 s heartbeat | A scoped credential can bind only its exact subdomain or TCP port and expires automatically. Revoke its ID to disconnect that tunnel on the next heartbeat. A legacy shared-token leak still permits any non-denylisted subdomain and requires rotating `token_sha256`. Auth attempts are rate-limited (5/min). |
+| **Credential leak or revocation** | Auth result logs plus credential status; live sessions rechecked on the 15 s heartbeat | A scoped credential can bind only its exact subdomain (HTTP or TLS credential) or TCP port and expires automatically. Revoke its ID to disconnect that tunnel on the next heartbeat. A legacy shared-token leak still permits any non-denylisted subdomain and requires rotating `token_sha256`. Auth attempts are rate-limited (5/min). |
 | **Abusive public traffic** | Limiter counters on `expvar` | Layered: unknown-host fast-404 → per-IP token bucket `429` → global in-flight cap 512 → header/body/time limits. Volumetric DoS is the VPS provider's problem (accepted). Optional `--allow-cidr` flips a tunnel to allowlist-only; an HTTP `--policy-file` is evaluated before a request stream is opened and can return `403` without touching the agent. |
 
 ---

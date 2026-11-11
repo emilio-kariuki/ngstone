@@ -114,7 +114,7 @@ WantedBy=multi-user.target`}
         or to the same PostgreSQL URL on every edge in an active/active group,
         with a distinct <code>NGSTONE_EDGE_ID</code> per edge. Issue credentials
         with <code>ngstone admin credentials issue</code> through the loopback
-        API. Each credential is limited to one subdomain or TCP port and has a
+        API. Each credential is limited to one subdomain (HTTP or TLS) or TCP port and has a
         bounded TTL; <code>credentials revoke</code> invalidates it
         independently. OIDC browser login is available for team access to the
         management API; configure the provider group mappings and keep the

@@ -204,7 +204,11 @@ service account that owns it. `-token-sha256` remains available as a legacy
 migration path; it is not scoped or independently revocable.
 
 TLS credentials are restricted to one subdomain and may bind only `ngstone tls`
-tunnels: `ngstone credentials issue --kind tls --subdomain secure`.
+tunnels: `ngstone credentials issue --kind tls --subdomain secure`. Every edge
+sharing a credentials file or database must be upgraded before a `tls`
+credential is issued or a `tls` tunnel is bound, because an older `ngstoned`
+rejects a credentials file containing an unknown credential kind and does not
+apply the shared `http`/`tls` hostname rule.
 
 Database-share commands require a legacy shared-token operator session. Scoped
 tunnel credentials cannot create, inspect, or manage database shares. Configure
@@ -390,11 +394,12 @@ tunnels and the `/_ngstone/control` WebSocket fallback on the apex keep
 working on the same port. The peek is bounded to 16 KiB and the edge's
 `-read-header-timeout`; a larger ClientHello is closed.
 
-The edge never decrypts traffic for a passthrough connection; an HTTPS request
-that reaches the edge's own TLS for that hostname (for example on a reused or
-domain-fronted connection) gets 421 and is never forwarded. Because of that,
-`--basic-auth`, `--host-header`, `--policy-file`, `--http2`, and
-`--multi-connector` are rejected for `tls` tunnels; `--allow-cidr`, per-IP rate and in-flight limits, PROXY protocol
+The edge never decrypts traffic for a passthrough connection, so it never sees
+the decrypted request. Because of that, `--basic-auth`, `--host-header`,
+`--policy-file`, `--http2`, and `--multi-connector` are rejected for `tls`
+tunnels. An HTTPS request that reaches the edge's own TLS for that hostname (for
+example on a reused or domain-fronted connection) gets 421 and is never
+forwarded. `--allow-cidr`, per-IP rate and in-flight limits, PROXY protocol
 client addresses, and `--ttl` all apply. The local service needs a certificate
 for the public hostname (`secure.example.com`) that clients trust; the edge's
 own certificate is never involved. A hostname is either an HTTP or a `tls`
