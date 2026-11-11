@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -212,6 +213,9 @@ func TestValidationRejectsReservedAndInvalidActions(t *testing.T) {
 		`{"rules":[{"action":"redirect","redirect_url":"https://$path"}]}`,
 		`{"rules":[{"action":"redirect","redirect_url":"/x#frag"}]}`,
 		`{"rules":[{"action":"redirect","redirect_url":"https://user@example.com/"}]}`,
+		`{"rules":[{"action":"redirect","path_prefix":"/old","redirect_url":"https:/$path"}]}`,
+		`{"rules":[{"action":"redirect","path_prefix":"/old","redirect_url":"https://new$path@evil.example/"}]}`,
+		`{"rules":[{"action":"redirect","path_prefix":"/old","redirect_url":"https://new$path.evil.example/"}]}`,
 		`{"rules":[],"cors":{}}`,
 		`{"rules":[],"cors":{"allowed_origins":["*"],"allow_credentials":true}}`,
 		`{"rules":[],"cors":{"allowed_origins":["*","https://a.example"]}}`,
@@ -232,6 +236,32 @@ func TestValidationRejectsReservedAndInvalidActions(t *testing.T) {
 
 	if _, err := Parse([]byte(`{"rules":[{"action":"transform","response_headers":{"set":{"Access-Control-Allow-Origin":"*"}}}]}`)); err != nil {
 		t.Fatalf("Access-Control-* response header without cors was rejected: %v", err)
+	}
+
+	for _, target := range []string{
+		"https://new.example$path",
+		"https://new.example/base$path",
+		"https://new.example/x?next=$path",
+		"https://new.example/",
+	} {
+		input := `{"rules":[{"action":"redirect","path_prefix":"/old","redirect_url":"` + target + `"}]}`
+		if _, err := Parse([]byte(input)); err != nil {
+			t.Fatalf("Parse(%s): %v", input, err)
+		}
+	}
+}
+
+func TestRedirectHostIsPinnedForHostileRequestPaths(t *testing.T) {
+	p, err := Parse([]byte(`{"rules":[{"action":"redirect","path_prefix":"/old","redirect_url":"https://new.example$path"}]}`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, target := range []string{"/old/evil.example/phish", "/old//evil.example", "/old/@evil.example", "/old/%2F%2Fevil.example"} {
+		d := p.Decide(httptestRequest(http.MethodGet, target))
+		location, err := url.Parse(d.RedirectURL)
+		if err != nil || location.Host != "new.example" || location.User != nil {
+			t.Fatalf("%s: RedirectURL = %q, want host new.example", target, d.RedirectURL)
+		}
 	}
 }
 

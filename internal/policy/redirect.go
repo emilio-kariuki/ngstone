@@ -32,6 +32,13 @@ func (r *Rule) validateRedirect() error {
 	if strings.HasPrefix(r.RedirectURL, "//") || !validRedirectTarget(collapseLeadingSlashes(substitutePath(r.RedirectURL, "/x"))) {
 		return errors.New("redirect_url must be an absolute path or an http(s) URL")
 	}
+	if !strings.HasPrefix(collapseLeadingSlashes(substitutePath(r.RedirectURL, "/x")), "/") {
+		empty, okEmpty := redirectHost(r.RedirectURL, "")
+		full, okFull := redirectHost(r.RedirectURL, "/x")
+		if !okEmpty || !okFull || empty != full {
+			return errors.New("redirect_url host must be fixed and must not depend on $path")
+		}
+	}
 	if target := collapseLeadingSlashes(substitutePath(r.RedirectURL, "")); strings.HasPrefix(target, "/") {
 		parsed, err := url.Parse(target)
 		if err != nil {
@@ -64,6 +71,14 @@ func validRedirectTarget(target string) bool {
 		return false
 	}
 	return (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" && parsed.User == nil
+}
+
+func redirectHost(template, path string) (string, bool) {
+	parsed, err := url.Parse(substitutePath(template, path))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil || parsed.Host == "" {
+		return "", false
+	}
+	return parsed.Host, true
 }
 
 func substitutePath(target, path string) string {
