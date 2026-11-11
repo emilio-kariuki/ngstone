@@ -55,6 +55,13 @@ var (
 	metricPeerTCPListeners       = expvar.NewInt("ngstoned_peer_tcp_listeners")
 
 	metricAdminMTLSRejected = expvar.NewInt("ngstoned_admin_mtls_rejected_total")
+
+	metricCustomDomainLookups           = expvar.NewInt("ngstoned_custom_domain_lookups_total")
+	metricCustomDomainLookupErrors      = expvar.NewInt("ngstoned_custom_domain_lookup_errors_total")
+	metricCustomDomainRejectedLookupCap = expvar.NewInt("ngstoned_custom_domain_rejected_lookup_cap_total")
+	metricCustomDomainRateLimited       = expvar.NewInt("ngstoned_custom_domain_rejected_rate_limited_total")
+	metricCustomDomainOwnerMismatch     = expvar.NewInt("ngstoned_custom_domain_owner_mismatch_total")
+	metricCustomDomainLoginRejected     = expvar.NewInt("ngstoned_custom_domain_login_rejected_total")
 )
 
 type certStatusJSON struct {

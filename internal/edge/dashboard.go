@@ -101,6 +101,13 @@ type dashboardMetrics struct {
 	PeerTCPBindFailed        int64 `json:"peer_tcp_bind_failed"`
 	PeerTCPListeners         int64 `json:"peer_tcp_listeners"`
 	AdminMTLSRejected        int64 `json:"admin_mtls_rejected"`
+
+	CustomDomainLookups           int64 `json:"custom_domain_lookups"`
+	CustomDomainLookupErrors      int64 `json:"custom_domain_lookup_errors"`
+	CustomDomainRejectedLookupCap int64 `json:"custom_domain_rejected_lookup_cap"`
+	CustomDomainRateLimited       int64 `json:"custom_domain_rejected_rate_limited"`
+	CustomDomainOwnerMismatch     int64 `json:"custom_domain_owner_mismatch"`
+	CustomDomainLoginRejected     int64 `json:"custom_domain_login_rejected"`
 }
 
 func (s *Server) dashboardState(r *http.Request) dashboardState {
@@ -367,6 +374,13 @@ func dashboardMetricsSnapshot() dashboardMetrics {
 		PeerTCPBindFailed:        metricPeerTCPBindFailed.Value(),
 		PeerTCPListeners:         metricPeerTCPListeners.Value(),
 		AdminMTLSRejected:        metricAdminMTLSRejected.Value(),
+
+		CustomDomainLookups:           metricCustomDomainLookups.Value(),
+		CustomDomainLookupErrors:      metricCustomDomainLookupErrors.Value(),
+		CustomDomainRejectedLookupCap: metricCustomDomainRejectedLookupCap.Value(),
+		CustomDomainRateLimited:       metricCustomDomainRateLimited.Value(),
+		CustomDomainOwnerMismatch:     metricCustomDomainOwnerMismatch.Value(),
+		CustomDomainLoginRejected:     metricCustomDomainLoginRejected.Value(),
 	}
 }
 
@@ -430,6 +444,12 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writePrometheusCounter(w, "ngstoned_peer_tcp_bind_failed_total", "Ports of TCP tunnels on other edges that this edge could not bind.", metrics.PeerTCPBindFailed)
 	writePrometheusGauge(w, "ngstoned_peer_tcp_listeners", "Ports currently open to forward raw TCP tunnels owned by other edges.", metrics.PeerTCPListeners)
 	writePrometheusCounter(w, "ngstoned_admin_mtls_rejected_total", "Management connections rejected for an invalid client certificate.", metrics.AdminMTLSRejected)
+	writePrometheusCounter(w, "ngstoned_custom_domain_lookups_total", "Custom domain lookups issued to shared storage.", metrics.CustomDomainLookups)
+	writePrometheusCounter(w, "ngstoned_custom_domain_lookup_errors_total", "Custom domain lookups that failed.", metrics.CustomDomainLookupErrors)
+	writePrometheusCounter(w, "ngstoned_custom_domain_rejected_lookup_cap_total", "Custom domain lookups skipped by the lookup concurrency cap.", metrics.CustomDomainRejectedLookupCap)
+	writePrometheusCounter(w, "ngstoned_custom_domain_rejected_rate_limited_total", "Custom domain lookups skipped by the per-IP lookup limiter.", metrics.CustomDomainRateLimited)
+	writePrometheusCounter(w, "ngstoned_custom_domain_owner_mismatch_total", "Custom domain requests refused because the bound tunnel owner differs from the domain owner.", metrics.CustomDomainOwnerMismatch)
+	writePrometheusCounter(w, "ngstoned_custom_domain_login_rejected_total", "Custom domain requests refused because the tunnel requires visitor sign-in.", metrics.CustomDomainLoginRejected)
 	writePrometheusGauge(w, "ngstoned_active_tunnels", "Currently routed HTTP and TCP tunnels.", int64(len(s.dashboardTunnels())))
 	writePrometheusGauge(w, "ngstoned_uptime_seconds", "Seconds since ngstoned started.", uptimeSeconds(s.startedAt))
 	fmt.Fprintln(w, "# HELP ngstoned_tunnel_requests_total Requests observed for a tunnel.")

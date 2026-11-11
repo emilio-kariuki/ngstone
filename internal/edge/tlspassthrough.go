@@ -262,6 +262,17 @@ func (l *sniListener) classify(c net.Conn) {
 		l.srv.peers.forward(replay, serverName)
 		return
 	}
+	if !local && !hostMatchesDomain(serverName, normalizeHost(l.srv.cfg.Domain)) {
+		target, b, state := l.srv.localAlias(serverName, remoteIP(c))
+		switch {
+		case state == aliasLocal && target.Kind == "tls":
+			l.srv.serveTLSPassthrough(b, target.Hostname, replay, l.sem)
+			return
+		case state == aliasRefused:
+			c.Close()
+			return
+		}
+	}
 	l.deliver(replay)
 }
 

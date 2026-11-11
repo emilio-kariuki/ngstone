@@ -131,10 +131,21 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		s.serveVisitorApex(rec, r)
 		return
 	}
+	ip := stripPort(r.RemoteAddr)
 	b, ok := s.registry.Route(host)
+	aliased := false
 	if !ok {
-		writeError(rec, s.routeMissStatus(r, host))
-		return
+		target, aliasBinding, state := s.localAlias(host, ip)
+		switch {
+		case state == aliasLocal && target.Kind == "tls":
+			writeError(rec, http.StatusMisdirectedRequest)
+			return
+		case state == aliasLocal:
+			b, aliased, host = aliasBinding, true, target.Hostname
+		default:
+			writeError(rec, s.routeMissStatus(r, host))
+			return
+		}
 	}
 	var requestBytes countingReadCloser
 	started := time.Now()
@@ -156,7 +167,6 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		ac = b.access.Load()
 	}
 
-	ip := stripPort(r.RemoteAddr)
 	if addr, err := netip.ParseAddr(ip); err == nil {
 		if !ac.allowIP(addr) {
 			metricRejectedForbiddenCIDR.Add(1)
@@ -192,6 +202,12 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	stripHeadersWithPrefix(r.Header, edgeHeaderPrefix)
 	var identity *visitorToken
 	if rule := ac.loginRule(); rule != nil {
+		if aliased {
+			rec.Header().Set("Cache-Control", "no-store")
+			metricCustomDomainLoginRejected.Add(1)
+			writeVisitorPage(rec, http.StatusForbidden, "Sign-in unavailable", "This tunnel requires sign-in, which is not available on custom domains.")
+			return
+		}
 		session, ok := s.authorizeVisitor(rec, r, rule)
 		if !ok {
 			return

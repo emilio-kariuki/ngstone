@@ -98,6 +98,8 @@ type Server struct {
 	ownsStorage     bool
 	randomName      func() string
 
+	aliases *aliasResolver
+
 	perIPLimiter *perIPLimiter
 	perIP        *perIPInflight
 	globalSem    *globalSemaphore
@@ -305,6 +307,9 @@ func New(cfg Config) (*Server, error) {
 		proxyProtoTrusted: trustedPrefixes,
 		shares:            newShareRegistry(cfg.MaxShareTTL),
 		shareSem:          newGlobalSemaphore(maxGlobalShareConns),
+	}
+	if durableStore != nil {
+		srv.aliases = newAliasResolver(durableStore, srv.customDomainReserved)
 	}
 	if cfg.PeerAddr != "" {
 		srv.peers, err = newPeerForwarder(srv)
@@ -640,9 +645,12 @@ func (s *Server) waitControlSessions(grace time.Duration) {
 }
 
 func (s *Server) redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
-	if !hostMatchesDomain(stripPort(r.Host), s.cfg.Domain) {
-		http.NotFound(w, r)
-		return
+	host := stripPort(r.Host)
+	if !hostMatchesDomain(host, s.cfg.Domain) {
+		if _, ok := s.aliases.resolve(host, stripPort(r.RemoteAddr)); !ok {
+			http.NotFound(w, r)
+			return
+		}
 	}
 	target := "https://" + r.Host + r.URL.RequestURI()
 	http.Redirect(w, r, target, http.StatusMovedPermanently)

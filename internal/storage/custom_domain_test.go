@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"ngstone/internal/credentials"
 )
@@ -219,6 +220,75 @@ func TestActivateSnapshotsTunnelOwner(t *testing.T) {
 		}
 		if _, err := s.SetCustomDomainStatus(ctx, owned.ID, "active"); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("activation after tunnel owner change = %v, want ErrInvalid", err)
+		}
+	})
+}
+
+func TestLookupCustomDomainTargetRequiresOwnerMatch(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, open func() *Store) {
+		s := open()
+		ctx := t.Context()
+		tunnelID := createTunnel(t, s, "web.example.com", "http", "alice", 0)
+		domain, err := s.CreateCustomDomain(ctx, CustomDomainSpec{Domain: "app.example.org", OwnerID: "alice", TunnelID: tunnelID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, err := s.LookupCustomDomainTarget(ctx, "app.example.org"); err != nil || ok {
+			t.Fatalf("pending lookup = %v, %v; want miss", ok, err)
+		}
+		if _, err := s.SetCustomDomainStatus(ctx, domain.ID, "active"); err != nil {
+			t.Fatal(err)
+		}
+		target, ok, err := s.LookupCustomDomainTarget(ctx, "app.example.org")
+		if err != nil || !ok || target != (CustomDomainTarget{Hostname: "web.example.com", Kind: "http", OwnerID: "alice"}) {
+			t.Fatalf("active lookup = %+v, %v, %v", target, ok, err)
+		}
+		if _, ok, err := s.LookupCustomDomainTarget(ctx, "other.example.org"); err != nil || ok {
+			t.Fatalf("unknown lookup = %v, %v", ok, err)
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE tunnels SET owner_id = 'mallory' WHERE hostname = 'web.example.com'`); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, err := s.LookupCustomDomainTarget(ctx, "app.example.org"); err != nil || ok {
+			t.Fatalf("lookup after tunnel owner change = %v, %v; want miss", ok, err)
+		}
+	})
+}
+
+func TestLookupCustomDomainRequiresActivatedAt(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, open func() *Store) {
+		s := open()
+		ctx := t.Context()
+		tunnelID := createTunnel(t, s, "web.example.com", "http", "alice", 0)
+		domain, err := s.CreateCustomDomain(ctx, CustomDomainSpec{Domain: "app.example.org", OwnerID: "alice", TunnelID: tunnelID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.db.ExecContext(ctx, s.bind(`UPDATE custom_domains SET status = 'active' WHERE id = $1`), domain.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, err := s.LookupCustomDomainTarget(ctx, "app.example.org"); err != nil || ok {
+			t.Fatalf("active without activated_at = %v, %v; want miss", ok, err)
+		}
+		if _, err := s.SetCustomDomainStatus(ctx, domain.ID, "active"); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, err := s.LookupCustomDomainTarget(ctx, "app.example.org"); err != nil || !ok {
+			t.Fatalf("activated lookup = %v, %v", ok, err)
+		}
+		if _, err := s.SetCustomDomainStatus(ctx, domain.ID, "disabled"); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok, err := s.LookupCustomDomainTarget(ctx, "app.example.org"); err != nil || ok {
+			t.Fatalf("disabled lookup = %v, %v; want miss", ok, err)
+		}
+		for _, status := range []string{"disabled", "pending"} {
+			if _, err := s.db.ExecContext(ctx, s.bind(`UPDATE custom_domains SET status = $2, activated_at = $3 WHERE id = $1`), domain.ID, status, nowString(time.Now().UTC())); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok, err := s.LookupCustomDomainTarget(ctx, "app.example.org"); err != nil || ok {
+				t.Fatalf("%s with activated_at lookup = %v, %v; want miss", status, ok, err)
+			}
 		}
 	})
 }

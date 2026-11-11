@@ -150,6 +150,12 @@ type CustomDomain struct {
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
+type CustomDomainTarget struct {
+	Hostname string
+	Kind     string
+	OwnerID  string
+}
+
 type CustomDomainSpec struct {
 	Domain   string
 	TunnelID string
@@ -1474,6 +1480,18 @@ func (s *Store) SetCustomDomainStatus(ctx context.Context, id, status string) (C
 		return CustomDomain{}, ErrInvalid
 	}
 	return value, nil
+}
+
+func (s *Store) LookupCustomDomainTarget(ctx context.Context, domain string) (CustomDomainTarget, bool, error) {
+	var target CustomDomainTarget
+	err := s.db.QueryRowContext(ctx, s.bind(`SELECT t.hostname, t.kind, d.owner_id FROM custom_domains d JOIN tunnels t ON t.id = d.tunnel_id WHERE d.domain = $1 AND d.status = 'active' AND d.activated_at IS NOT NULL AND t.kind IN ('http', 'tls') AND t.remote_port = 0 AND t.owner_id = d.owner_id`), domain).Scan(&target.Hostname, &target.Kind, &target.OwnerID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CustomDomainTarget{}, false, nil
+	}
+	if err != nil {
+		return CustomDomainTarget{}, false, fmt.Errorf("storage: lookup custom domain: %w", err)
+	}
+	return target, true, nil
 }
 
 func (s *Store) DeleteCustomDomain(ctx context.Context, id, ownerID string) error {
