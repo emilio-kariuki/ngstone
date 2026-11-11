@@ -385,38 +385,73 @@ func TestAutoAllocSkipsRemote(t *testing.T) {
 }
 
 func TestWatchTCPFailsClosedAfterTTL(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		configured time.Duration
+		want       time.Duration
+	}{
+		{"default lease ttl", 0, storage.DefaultLeaseTTL},
+		{"configured shorter lease ttl", 10 * time.Second, 10 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pc := newPeerCluster(t)
+			a, _ := pc.tcpEdge(t, "edge-a", "127.0.0.1")
+			b, _ := pc.tcpEdge(t, "edge-b", "127.0.0.1")
+			registerPeers(t, a, b)
+			a.srv.cfg.LeaseTTL = tc.configured
+			port := freePorts(t, 1)[0]
+			a.srv.tcpMgr.lo, a.srv.tcpMgr.hi = port, port
+			b.leaseTCP(t, port)
+			ctx := context.Background()
+			t.Cleanup(func() { a.srv.tcpMgr.reconcileRemote(nil, a.srv.peers.forwardTCP) })
+
+			t0 := time.Now()
+			a.srv.peers.pollTCP(ctx, t0)
+			if _, ok := a.srv.tcpMgr.remote[port]; !ok {
+				t.Fatal("remote port did not open while storage was healthy")
+			}
+			if owners := *a.srv.peers.tcpOwners.Load(); len(owners[port]) != 1 {
+				t.Fatalf("owners = %+v, want one for port %d", owners, port)
+			}
+
+			a.store.Close()
+			a.srv.peers.pollTCP(ctx, t0.Add(tc.want-time.Second))
+			if _, ok := a.srv.tcpMgr.remote[port]; !ok {
+				t.Fatal("remote port closed before the lease TTL elapsed")
+			}
+			a.srv.peers.pollTCP(ctx, t0.Add(tc.want+time.Second))
+			if _, ok := a.srv.tcpMgr.remote[port]; ok {
+				t.Fatal("remote port stayed open after the lease TTL elapsed without a fresh read")
+			}
+			if owners := *a.srv.peers.tcpOwners.Load(); len(owners) != 0 {
+				t.Fatalf("owner snapshot = %+v, want empty", owners)
+			}
+			expectPortRefused(t, port)
+		})
+	}
+}
+
+type mappedRemoteConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (c mappedRemoteConn) RemoteAddr() net.Addr { return c.remote }
+
+func TestForwardTCPKeysLimiterByPlainIPv4(t *testing.T) {
 	pc := newPeerCluster(t)
 	a, _ := pc.tcpEdge(t, "edge-a", "127.0.0.1")
-	b, _ := pc.tcpEdge(t, "edge-b", "127.0.0.1")
-	registerPeers(t, a, b)
-	port := freePorts(t, 1)[0]
-	a.srv.tcpMgr.lo, a.srv.tcpMgr.hi = port, port
-	b.leaseTCP(t, port)
-	ctx := context.Background()
-	t.Cleanup(func() { a.srv.tcpMgr.reconcileRemote(nil, a.srv.peers.forwardTCP) })
+	a.srv.perIPLimiter = newPerIPLimiter(1, 1, 16)
+	client, server := realConnPair(t)
+	defer client.Close()
+	defer server.Close()
 
-	t0 := time.Now()
-	a.srv.peers.pollTCP(ctx, t0)
-	if _, ok := a.srv.tcpMgr.remote[port]; !ok {
-		t.Fatal("remote port did not open while storage was healthy")
-	}
-	if owners := *a.srv.peers.tcpOwners.Load(); len(owners[port]) != 1 {
-		t.Fatalf("owners = %+v, want one for port %d", owners, port)
-	}
+	a.srv.peers.forwardTCP(20001, mappedRemoteConn{Conn: server, remote: &net.TCPAddr{IP: net.IPv4(203, 0, 113, 7), Port: 4242}})
 
-	a.store.Close()
-	a.srv.peers.pollTCP(ctx, t0.Add(storage.DefaultLeaseTTL-time.Second))
-	if _, ok := a.srv.tcpMgr.remote[port]; !ok {
-		t.Fatal("remote port closed before the lease TTL elapsed")
+	keys := a.srv.perIPLimiter.limiters.Keys()
+	if len(keys) != 1 || keys[0] != "203.0.113.7" {
+		t.Fatalf("limiter keys = %v, want [203.0.113.7]", keys)
 	}
-	a.srv.peers.pollTCP(ctx, t0.Add(storage.DefaultLeaseTTL+time.Second))
-	if _, ok := a.srv.tcpMgr.remote[port]; ok {
-		t.Fatal("remote port stayed open after the lease TTL elapsed without a fresh read")
-	}
-	if owners := *a.srv.peers.tcpOwners.Load(); len(owners) != 0 {
-		t.Fatalf("owner snapshot = %+v, want empty", owners)
-	}
-	expectPortRefused(t, port)
 }
 
 func TestTCPForwardInertWithoutPeers(t *testing.T) {

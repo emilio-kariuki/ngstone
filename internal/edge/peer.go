@@ -282,11 +282,15 @@ func (p *peerForwarder) refreshPins() {
 	})
 }
 
-func (p *peerForwarder) heartbeat(ctx context.Context) error {
-	ttl := p.srv.cfg.LeaseTTL
-	if ttl <= 0 {
-		ttl = storage.DefaultLeaseTTL
+func (p *peerForwarder) leaseTTL() time.Duration {
+	if ttl := p.srv.cfg.LeaseTTL; ttl > 0 {
+		return ttl
 	}
+	return storage.DefaultLeaseTTL
+}
+
+func (p *peerForwarder) heartbeat(ctx context.Context) error {
+	ttl := p.leaseTTL()
 	p.purgeShares(ctx)
 	p.beat(ctx, ttl)
 	p.republishShares()
@@ -856,7 +860,7 @@ func (p *peerForwarder) forwardTCP(port int, c net.Conn) {
 		c.Close()
 		return
 	}
-	ip := src.Addr().String()
+	ip := remoteIP(c)
 	if !p.srv.perIPLimiter.allow(ip) {
 		metricRejectedRateLimited.Add(1)
 		c.Close()
@@ -912,7 +916,7 @@ func (p *peerForwarder) pollTCP(ctx context.Context, now time.Time) {
 	}
 	if err != nil {
 		slogStorageError("live remote tcp ports", err)
-		if last := p.tcpFresh.Load(); last != 0 && now.Sub(time.Unix(0, last)) > storage.DefaultLeaseTTL {
+		if last := p.tcpFresh.Load(); last != 0 && now.Sub(time.Unix(0, last)) > p.leaseTTL() {
 			p.tcpFresh.Store(0)
 			p.tcpOwners.Store(&map[int][]storage.EdgePeer{})
 			mgr.reconcileRemote(nil, p.forwardTCP)
