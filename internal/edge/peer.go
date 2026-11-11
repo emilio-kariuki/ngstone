@@ -167,6 +167,8 @@ type peerForwarder struct {
 	draining bool
 	splices  sync.WaitGroup
 
+	beforePublish func()
+
 	ln     net.Listener
 	public *sniListener
 }

@@ -23,7 +23,20 @@ func (r *shareRegistry) holds(hash [32]byte) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cur, ok := r.byHash[hash]
+	return ok && !cur.closed && !cur.unpublished
+}
+
+func (r *shareRegistry) registered(hash [32]byte) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cur, ok := r.byHash[hash]
 	return ok && !cur.closed
+}
+
+func (r *shareRegistry) markPublished(sh *share) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	sh.unpublished = false
 }
 
 func (r *shareRegistry) expiry(sh *share) time.Time {
@@ -37,7 +50,7 @@ func (r *shareRegistry) live() []*share {
 	defer r.mu.Unlock()
 	out := make([]*share, 0, len(r.byID))
 	for _, sh := range r.byID {
-		if !sh.closed {
+		if !sh.closed && !sh.unpublished {
 			out = append(out, sh)
 		}
 	}
@@ -45,6 +58,9 @@ func (r *shareRegistry) live() []*share {
 }
 
 func (s *Server) publishShare(sh *share) error {
+	if f := s.peers.beforePublish; f != nil {
+		f()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), peerDeleteTimeout)
 	defer cancel()
 	return s.peers.store.PublishShare(ctx, shareDirKey(sh.secretHash[:]), sh.id, s.peers.selfID, sh.ownerID, s.shares.expiry(sh))

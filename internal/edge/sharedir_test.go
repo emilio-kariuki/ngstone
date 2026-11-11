@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -857,5 +858,113 @@ func TestCrossEdgeSameSecretOtherOwnerRejected(t *testing.T) {
 	peer, found, err := cl.a.store.LookupShareEdge(context.Background(), shareDirKey(shareSecretHashBytes("the-link-secret")), cl.a.id, time.Now())
 	if err != nil || !found || peer.EdgeID != cl.b.id {
 		t.Fatalf("directory lookup = %+v, %v, %v, want edge %s", peer, found, err, cl.b.id)
+	}
+}
+
+func blockPublish(t *testing.T, e *peerEdge) (started <-chan struct{}, release func()) {
+	t.Helper()
+	in, out := make(chan struct{}), make(chan struct{})
+	var startOnce, releaseOnce sync.Once
+	e.srv.peers.beforePublish = func() {
+		startOnce.Do(func() { close(in) })
+		<-out
+	}
+	release = func() { releaseOnce.Do(func() { close(out) }) }
+	t.Cleanup(release)
+	return in, release
+}
+
+func awaitSignal(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+func TestSharePendingUntilPublished(t *testing.T) {
+	cl := newShareCluster(t)
+	started, release := blockPublish(t, cl.b)
+	res := make(chan proto.Msg, 1)
+	go func() {
+		_, m := startShareRaw(t, cl.b, "the-link-secret", nil)
+		res <- m
+	}()
+	awaitSignal(t, started, "the publish to start")
+
+	hash := shareSecretHash("the-link-secret")
+	if _, ok := cl.b.srv.shares.lookup("the-link-secret"); ok {
+		t.Fatal("an unpublished share is visible to connector lookups")
+	}
+	if cl.b.srv.shares.holds(hash) {
+		t.Fatal("an unpublished share is reported as held")
+	}
+	if len(cl.b.srv.shares.live()) != 0 {
+		t.Fatal("an unpublished share is listed as live")
+	}
+	if shareDirHas(t, cl.a, "the-link-secret") {
+		t.Fatal("the directory row exists before the publish finished")
+	}
+	select {
+	case m := <-res:
+		t.Fatalf("sharer got %s before the publish finished", m.Type)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case m := <-res:
+		if m.Type != proto.TypeShareOK {
+			t.Fatalf("share reply = %s %s, want share_ok", m.Type, m.Data)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no share reply after the publish finished")
+	}
+	if _, ok := cl.b.srv.shares.lookup("the-link-secret"); !ok {
+		t.Fatal("the share is not usable after the publish")
+	}
+	if !cl.b.srv.shares.holds(hash) || !shareDirHas(t, cl.a, "the-link-secret") {
+		t.Fatal("the published share is not held and listed")
+	}
+}
+
+func TestCrossOwnerSameSecretNeverAdmitsConnector(t *testing.T) {
+	cl := newShareCluster(t)
+	useShareCredentials(cl)
+	tokenA, tokenB := issueShareToken(t, cl.a, "owner-a"), issueShareToken(t, cl.a, "owner-b")
+	if _, m := credentialShare(t, cl.b, tokenA, "sharer-a", "the-link-secret"); m.Type != proto.TypeShareOK {
+		t.Fatalf("owner-a share reply = %s %s, want share_ok", m.Type, m.Data)
+	}
+
+	started, release := blockPublish(t, cl.c)
+	res := make(chan proto.Msg, 1)
+	go func() {
+		_, m := credentialShare(t, cl.c, tokenB, "sharer-b", "the-link-secret")
+		res <- m
+	}()
+	awaitSignal(t, started, "the second publish to start")
+
+	forwarded := metricDelta(metricPeerControlForwarded)
+	d := dialConnector(t, serveControlOn(t, cl.c), "the-link-secret")
+	if d.reply.Type != proto.TypeAuthOK {
+		t.Fatalf("connector reply = %s %s, want auth_ok from the owner's edge", d.reply.Type, d.reply.Data)
+	}
+	if forwarded() != 1 {
+		t.Fatalf("forwarded control sessions = %d, want 1: the pending share on the second edge answered", forwarded())
+	}
+
+	release()
+	select {
+	case m := <-res:
+		e, _ := proto.Decode[proto.ShareErr](m)
+		if m.Type != proto.TypeShareErr || e.Code != proto.CodeShareTaken {
+			t.Fatalf("owner-b share reply = %s %s, want share_taken", m.Type, m.Data)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no share reply after the publish finished")
+	}
+	if cl.c.srv.shares.count() != 0 {
+		t.Fatal("the refused share stayed registered on the second edge")
 	}
 }

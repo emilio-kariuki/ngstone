@@ -151,6 +151,7 @@ type share struct {
 	expiry          *time.Timer
 	idle            *time.Timer
 	closed          bool
+	unpublished     bool
 	closeReason     string
 }
 
@@ -443,7 +444,7 @@ func (r *shareRegistry) lookup(secret string) (*share, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	sh, ok := r.byHash[hash]
-	if !ok || sh.closed || !sh.expiresAt.After(r.now()) {
+	if !ok || sh.closed || sh.unpublished || !sh.expiresAt.After(r.now()) {
 		return nil, false
 	}
 	return sh, true
@@ -843,6 +844,7 @@ func (s *Server) handleShare(as *AgentSession, ctrl *proto.Conn, id uint64, req 
 		ctrl.Write(proto.TypeShareErr, id, proto.ShareErr{Code: code, Message: err.Error()})
 		return
 	}
+	sh.unpublished = s.peers != nil
 	replaced, err := s.shares.register(as, sh)
 	if err != nil {
 		switch {
@@ -869,6 +871,7 @@ func (s *Server) handleShare(as *AgentSession, ctrl *proto.Conn, id uint64, req 
 			ctrl.Write(proto.TypeShareErr, id, proto.ShareErr{Code: proto.CodeInternal, Message: "could not publish share to the edge group"})
 			return
 		}
+		s.shares.markPublished(sh)
 	}
 	slog.Info("edge: share registered", "share_id", sh.id, "session_id", as.ID, "owner_id", sh.ownerID, "label", sh.label, "targets", shareTargetsSummary(sh.targets), "expires_at", sh.expiresAt.UTC().Format(time.RFC3339), "max_conns", sh.policy.maxConns, "max_connectors", sh.policy.maxConnectors, "max_uses", sh.policy.maxUses, "approve", sh.policy.approve, "passphrase", sh.policy.hasPassphrase, "e2e", sh.e2e, "allow_cidrs", len(sh.policy.allow))
 	s.notifyWatchers(sh, proto.ShareEvent{ShareID: sh.id, Event: proto.ShareEventRegistered, AtMS: time.Now().UnixMilli(), ExpiresAtMS: sh.expiresAt.UnixMilli(), Label: sh.label})
@@ -1160,7 +1163,7 @@ func (s *Server) closeShare(sh *share, reason string) {
 		return
 	}
 	slog.Info("edge: share closed", "share_id", sh.id, "reason", reason, "connectors", len(connectors), "conns", len(conns))
-	if s.peers != nil && !s.shares.holds(sh.secretHash) {
+	if s.peers != nil && !s.shares.registered(sh.secretHash) {
 		s.withdrawShare(sh)
 	}
 
