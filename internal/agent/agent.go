@@ -827,6 +827,9 @@ func (a *Agent) webhookBind(negotiated int) (*proto.WebhookVerification, error) 
 	if negotiated < 2 {
 		return nil, fmt.Errorf("%w: edge does not support webhook verification (negotiated protocol v%d); upgrade ngstoned", errFatalHandshake, negotiated)
 	}
+	if a.cfg.Insecure && !loopbackControlAddr(a.cfg.ControlAddr) {
+		return nil, fmt.Errorf("%w: refusing to send the webhook secret over a plaintext control channel to a non-loopback edge; remove --insecure", errFatalHandshake)
+	}
 	cfg, err := a.cfg.Webhook.Normalize()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errFatalHandshake, err)
@@ -840,4 +843,16 @@ func (a *Agent) webhookBind(negotiated int) (*proto.WebhookVerification, error) 
 		Prefix:           cfg.Prefix,
 		ToleranceSeconds: int64(cfg.Tolerance / time.Second),
 	}, nil
+}
+
+func loopbackControlAddr(addr string) bool {
+	host, err := controlHost(addr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }

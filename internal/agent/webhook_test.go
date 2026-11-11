@@ -2,6 +2,7 @@ package agent
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,6 +79,7 @@ func TestHandshakeWebhookRejectsTCPAndOldEdges(t *testing.T) {
 		{name: "tcp", cfg: Config{Kind: proto.KindTCP, TargetURL: "127.0.0.1:1", Webhook: &webhook.Config{Provider: "github", Secret: "s"}}, version: 3},
 		{name: "protocol v1", cfg: Config{Kind: proto.KindHTTP, TargetURL: "http://127.0.0.1:1", Webhook: &webhook.Config{Provider: "github", Secret: "s"}}, version: 1},
 		{name: "invalid config", cfg: Config{Kind: proto.KindHTTP, TargetURL: "http://127.0.0.1:1", Webhook: &webhook.Config{Provider: "hmac", Secret: "s"}}, version: 3},
+		{name: "plaintext to remote edge", cfg: Config{Kind: proto.KindHTTP, TargetURL: "http://127.0.0.1:1", ControlAddr: "edge.example.com:4443", Insecure: true, Webhook: &webhook.Config{Provider: "github", Secret: "s"}}, version: 3},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,5 +103,43 @@ func TestHandshakeWebhookRejectsTCPAndOldEdges(t *testing.T) {
 				t.Fatalf("edge side: %v", err)
 			}
 		})
+	}
+}
+
+func TestWebhookBindRefusesPlaintextToRemoteEdge(t *testing.T) {
+	secret := "whsec_DISTINCTIVE_agent_plaintext"
+	cases := []struct {
+		addr     string
+		insecure bool
+		ok       bool
+	}{
+		{addr: "127.0.0.1:4443", insecure: true, ok: true},
+		{addr: "127.0.0.2:4443", insecure: true, ok: true},
+		{addr: "[::1]:4443", insecure: true, ok: true},
+		{addr: "localhost:4443", insecure: true, ok: true},
+		{addr: "LOCALHOST:4443", insecure: true, ok: true},
+		{addr: "edge.example.com:4443", insecure: false, ok: true},
+		{addr: "edge.example.com:4443", insecure: true},
+		{addr: "10.0.0.1:4443", insecure: true},
+		{addr: "localhost.example.com:4443", insecure: true},
+		{addr: ":4443", insecure: true},
+		{addr: "", insecure: true},
+	}
+	for _, tc := range cases {
+		a := New(Config{Kind: proto.KindHTTP, TargetURL: "http://127.0.0.1:1", ControlAddr: tc.addr, Insecure: tc.insecure, Webhook: &webhook.Config{Provider: "github", Secret: secret}})
+		bind, err := a.webhookBind(3)
+		if tc.ok {
+			if err != nil || bind == nil || bind.Secret != secret {
+				t.Errorf("addr %q insecure %v: bind %v err %v, want accepted", tc.addr, tc.insecure, bind, err)
+			}
+			continue
+		}
+		if bind != nil || !errors.Is(err, errFatalHandshake) || !strings.Contains(err.Error(), "plaintext") {
+			t.Errorf("addr %q insecure %v: bind %v err %v, want plaintext refusal", tc.addr, tc.insecure, bind, err)
+			continue
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("addr %q: refusal exposes the secret: %v", tc.addr, err)
+		}
 	}
 }
