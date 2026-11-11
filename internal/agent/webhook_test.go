@@ -210,12 +210,20 @@ func TestHandshakeWebhookJudgesLoopbackByDialedAddress(t *testing.T) {
 					return
 				}
 				if err := edgeSess.Control().Write(proto.TypeAuthOK, msg.ID, proto.AuthOK{ProtoVersion: 3}); err != nil {
-					edgeDone <- edgeResult{err: err}
+					if tc.sent {
+						edgeDone <- edgeResult{err: err}
+					} else {
+						edgeDone <- edgeResult{}
+					}
 					return
 				}
 				bindMsg, err := edgeSess.Control().Read()
 				if err != nil {
-					edgeDone <- edgeResult{}
+					if tc.sent {
+						edgeDone <- edgeResult{err: err}
+					} else {
+						edgeDone <- edgeResult{}
+					}
 					return
 				}
 				bind, err := proto.Decode[proto.Bind](bindMsg)
