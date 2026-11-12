@@ -305,7 +305,7 @@ every edge. Raw TCP tunnels are forwarded when every edge uses the same
 `-tcp-ports` range: each edge opens the tunnel's port within about two seconds
 and forwards to the owner, which enforces allow-CIDR with the real client
 address (open the range in every edge's firewall). Share links are forwarded
-for sharers using a `share` credential; custom domains are not forwarded. With Docker's bridge network, set `NGSTONE_PEER_LISTEN` (or
+for sharers using a `share` credential. Custom domains are forwarded too, provided every edge has the certificate for an HTTP tunnel's name (see [Custom domains](#custom-domains)). With Docker's bridge network, set `NGSTONE_PEER_LISTEN` (or
 `-peer-listen`) to the address inside the container and publish that port; see
 [Run with Docker](#run-with-docker). `NGSTONE_PEER_ADDR` stays the address the
 other edges dial.
@@ -382,8 +382,8 @@ resources are `GET /api/v1/status`, `GET /api/v1/tunnels`, `GET|POST
 /api/v1/policies`, `DELETE /api/v1/policies/{id}`, `GET|POST
 /api/v1/domains`, `DELETE /api/v1/domains/{id}`, and `POST
 /api/v1/tunnels/{hostname}/drain`. Traffic policies are validated and stored
-by digest; custom domains start in `pending` status until DNS and certificate
-automation is attached. The API also exposes `GET
+by digest; custom domains start in `pending` status and serve nothing until an
+administrator activates them (see [Custom domains](#custom-domains)). The API also exposes `GET
 /api/v1/observability/tunnels` for per-tunnel request counts, approximate
 p50/p95/p99 latency, status-code counts, connector health, reconnects, bytes,
 and credential lifecycle counters. Configure `NGSTONE_ALERT_WEBHOOK_URL` to
@@ -484,6 +484,80 @@ edge. Guidance:
   refuses a group- or world-readable key.
 
 Secrets must only ever reach `ngstoned` through `EnvironmentFile=`, never through `ExecStart` flags: `/proc/<pid>/cmdline` is world-readable, so any local user can read a flag value with `ps auxww`, but not the process's environment. `ngstoned` reads `$NGSTONE_CREDENTIALS_FILE`, the legacy `$NGSTONE_TOKEN_SHA256`, and `$NGSTONE_CF_API_TOKEN` in preference to their equivalent flags for exactly this reason, and other providers' credentials have no flags at all — do not add those flags to the unit's `ExecStart`. The agent has the same exposure: prefer `$NGSTONE_TOKEN` over `-token` whenever the agent runs somewhere another local user could run `ps`.
+
+## Custom domains
+
+A custom domain lets an HTTP or TLS tunnel answer on a name you own, such as
+`app.example.org`, as well as on its `subdomain.example.com` name. It needs
+durable storage (SQLite or PostgreSQL), a public TLS listener (not
+`-insecure`), and, for HTTP tunnels, a certificate you supply. Raw TCP tunnels
+are addressed by port, not by name.
+
+Operator workflow:
+
+1. Register the name for an existing tunnel. It is `pending` and serves
+   nothing:
+
+   ```
+   ngstone admin domains add --domain app.example.org --tunnel-id <id>
+   ```
+
+2. Point the name's DNS at the edges (A or AAAA records).
+3. For an HTTP tunnel, obtain a certificate for the name yourself. Place
+   `<name>.crt` (the certificate with its chain) and `<name>.key` in the
+   `-custom-certs` directory (`NGSTONE_CUSTOM_CERTS_DIR`) on **every** edge,
+   with the key at mode `0600`, then restart the edges one at a time. A TLS
+   tunnel needs no edge certificate; its local service presents the
+   certificate for the custom name.
+4. An administrator verifies outside ngstone that the requester controls the
+   name, then runs `ngstone admin domains activate <id>`.
+5. Test it: `curl -I https://app.example.org/`. Disable it with
+   `ngstone admin domains disable <id>`.
+
+Operators may register names for their own tunnels; activating and disabling
+need the administrator role. See [Management API and CLI](#management-api-and-cli).
+
+The directory must be a real directory that is not group or world writable,
+and every `.crt` needs a matching `.key` (and the reverse). Names that the
+edge itself serves, and wildcard names overlapping the edge domain, are
+refused, as are two certificates covering the same name.
+
+**systemd.** The unit's state directory is `StateDirectory=ngstoned`, which is
+`/var/lib/ngstoned` and mode `0700`. Keep the pairs in a subdirectory next to
+`certs`, for example `/var/lib/ngstoned/custom-certs` (mode `0700`), and set
+`NGSTONE_CUSTOM_CERTS_DIR=/var/lib/ngstoned/custom-certs` in
+`/etc/ngstoned/env` (the env file does not expand `${STATE_DIRECTORY}`), or
+add `-custom-certs ${STATE_DIRECTORY}/custom-certs` to `ExecStart`. The unit
+runs as a dynamic user, so the files must end up readable by that user: systemd
+re-owns the state directory tree to it when the unit starts.
+
+**Docker.** Mount the directory read-only and point the edge at it:
+
+```
+# compose.yaml, under the ngstoned service
+volumes:
+  - ./custom-certs:/custom-certs:ro
+
+# .env
+NGSTONE_CUSTOM_CERTS_DIR=/custom-certs
+```
+
+The container runs as uid and gid 65532, so own the files by that user and
+keep the key at `0600`:
+`sudo chown -R 65532:65532 custom-certs && chmod 0700 custom-certs && chmod 0600 custom-certs/*.key`.
+
+Limits:
+
+- No automatic certificates. You obtain and renew them.
+- No ownership verification. Activation is the trust decision.
+- Certificates are per edge and are loaded at start-up; replacing one needs a
+  restart of that edge.
+- An expired or unreadable certificate stops the edge from starting.
+- Tunnels that require visitor sign-in answer 403 on custom domains.
+- Activation reaches other edges within 5 seconds, disabling within 30.
+- Internationalised names must be registered in `xn--` form.
+- Raw TCP tunnels are not addressed by name.
+- No `Strict-Transport-Security` header is set.
 
 ## Staging -> production promotion
 

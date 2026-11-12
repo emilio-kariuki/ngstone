@@ -264,7 +264,9 @@ $ ngstone admin credentials revoke <credential-id>
 $ ngstone admin policies list
 $ ngstone admin policies apply --name web --file traffic-policy.json
 $ ngstone admin domains list
-$ ngstone admin domains add --domain demo.example.org
+$ ngstone admin domains add --domain app.example.org --tunnel-id <tunnel-id>
+$ ngstone admin domains activate <domain-id>
+$ ngstone admin domains disable <domain-id>
 $ ngstone admin tunnel drain demo`}
       />
       <Anchor id="operator-shortcuts">Operator shortcuts</Anchor>
@@ -302,6 +304,7 @@ DELETE /api/v1/policies/{id}
 GET    /api/v1/domains
 POST   /api/v1/domains
 DELETE /api/v1/domains/{id}
+POST   /api/v1/domains/{id}/status
 POST   /api/v1/tunnels/{hostname}/drain`}
       />
       <CodeBlock
@@ -325,6 +328,15 @@ POST   /api/v1/tunnels/{hostname}/drain`}
           status-code counts, active connectors, reconnects, bytes, and
           credential lifecycle counters. Add <code>--json</code> for
           dashboards and automation.
+        </Property>
+        <Property name="domains" type="subcommand">
+          Register a custom domain for an HTTP or TLS tunnel with{" "}
+          <code>add --domain NAME --tunnel-id ID</code>; it stays{" "}
+          <code>pending</code> and serves nothing. <code>activate</code> and{" "}
+          <code>disable</code> need the administrator role. The edge also
+          needs a certificate for the name in its <code>-custom-certs</code>{" "}
+          directory (HTTP tunnels); see <code>deploy/README.md</code>,
+          Custom domains.
         </Property>
         <Property name="credentials issue" type="subcommand">
           Issue a scoped HTTP, TCP, or TLS credential. Use <code>--kind tcp</code>{" "}

@@ -322,7 +322,7 @@ in `internal/storage`, backed by SQLite by default and PostgreSQL when
 | `credentials` | scope, owner, token hash, expiry, revocation | plaintext token is never persisted |
 | `connector_leases` | instance, session, edge, renewal and expiry | active lease required to serve; expired leases are reclaimable |
 | `traffic_policies` | owner, name, normalized JSON, digest | policy digest is persisted with the tunnel |
-| `custom_domains` | domain, owner, tunnel association, status | unique domain registration |
+| `custom_domains` | domain, owner, tunnel association, status (`pending`, `active`, `disabled`), activation time | unique domain registration; only `active` rows with a matching tunnel owner route |
 | `audit_events` | edge, actor, action, resource, metadata, timestamp | append-only operational history |
 
 An HTTP, TLS, or TCP bind claims a database lease before entering the local
@@ -427,8 +427,9 @@ edge, so every edge should use the same range.
 Trust model: peers are trusted only through pins in the shared database, so
 write access to that database grants peer status. The owner accepts a
 forwarded client address only on a connection that completed the pinned mutual
-handshake. Custom domains and connections with no SNI
-or a ClientHello over 16 KiB are not forwarded.
+handshake. Connections with no SNI
+or a ClientHello over 16 KiB are not forwarded. Custom domains are forwarded
+(see Custom domains below).
 
 Share links are forwarded as control frames: an edge that does not hold a
 connector's share finds the holding edge in the `share_directory` table (a
@@ -437,6 +438,18 @@ passes the raw control bytes over the peer hop, and the holding edge
 authenticates the connector with its real address. A share secret registered by
 another owner is refused, and `unshare` from any edge revokes the row for the
 owner.
+
+### Custom domains
+
+A `custom_domains` row maps an externally owned name to one HTTP or TLS tunnel. Rows start `pending`; only an administrator moves one to `active` (which stamps `activated_at` and re-takes the tunnel owner) or `disabled`. `LookupCustomDomainTarget` joins the row to its tunnel and returns a target only when the status is `active`, `activated_at` is set, the tunnel is `http` or `tls` with no remote port, and the tunnel owner equals the domain owner.
+
+Resolution is bounded because it runs on the unauthenticated public path. A name that is not the edge domain, a subdomain of it, or the visitor-login host goes to an alias resolver: a 30 s hit cache and 5 s miss cache, a per-client-IP limiter charged only on cache misses, singleflight per name, and a global cap of 8 concurrent lookups. Storage errors are never cached, and a refused lookup fails closed as an unknown host. Activation therefore reaches other edges within the miss TTL (5 s) and disabling within the hit TTL (30 s); the edge that handled the admin call purges its own caches immediately.
+
+HTTP requests are routed to the tunnel's binding with `Host` left as the custom name; the binding's owner must equal the domain's owner or the request is refused. A tunnel with a visitor-login rule answers 403, since the sign-in flow is tied to the edge domain. For TLS tunnels, the SNI router resolves the custom name the same way and splices to the agent without terminating TLS.
+
+HTTP tunnels need an edge certificate for the name. `-custom-certs` points at a directory of `<name>.crt`/`<name>.key` pairs; `Run` validates the whole directory (permissions, expiry, reserved and overlapping names, duplicates) before listening and caches each pair as an unmanaged certmagic certificate. Any problem stops the edge. Certificates are per edge and read once at start-up.
+
+An edge that does not hold the binding forwards the connection to the owning edge (`peerForwarder`) after resolving the alias locally. The owner repeats the alias resolution, refuses a name that is not bound to a local tunnel of the same owner, and serves it. A random-host flood therefore costs at most the bounded storage lookups and never an owner lookup, since an unresolved name is not eligible for forwarding.
 
 ### Public-side protocol handling
 

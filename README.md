@@ -175,7 +175,7 @@ real client address. A port outside an edge's own range, or one it cannot bind,
 is not served by that edge, so give every edge the same range.
 
 Share links are forwarded when the sharer authenticated with a `share`
-credential. Not forwarded: custom domains, connections with
+credential. Custom domains are forwarded too. Not forwarded: connections with
 no SNI or a ClientHello over 16 KiB, and anything under `-insecure`. A
 request for one of these must reach the owning edge directly.
 
@@ -287,6 +287,7 @@ ngstone admin policies apply --name web --file traffic-policy.json
 ngstone admin policies list
 ngstone admin domains add --domain demo.example.org --tunnel-id <tunnel-id>
 ngstone admin domains list
+ngstone admin domains activate <domain-id>
 ```
 
 For a multi-tunnel project, create `ngstone.json` in the project directory:
@@ -586,6 +587,53 @@ rejected when the tunnel starts.
 Policies are HTTP-only and are not access control by themselves: combine
 them with `--basic-auth`, `--allow-cidr`, or `--oidc` when the tunnel must be
 private.
+
+### Custom domains
+
+An HTTP or TLS tunnel can also answer on a name you own, such as
+`app.example.org`, in addition to its `subdomain.example.com` name. Custom
+domains need durable storage and a certificate you provide; ngstone does not
+obtain one for you. Raw TCP tunnels are addressed by port, not by name.
+
+1. Register the name for an existing tunnel. It starts as `pending` and
+   serves nothing:
+
+   ```
+   ngstone admin domains add --domain app.example.org --tunnel-id <id>
+   ```
+
+2. Point the name's DNS at every edge (A or AAAA records).
+3. For an HTTP tunnel, obtain a certificate for the name yourself and put
+   `<name>.crt` and `<name>.key` in the directory given to `ngstoned
+   -custom-certs` (or `NGSTONE_CUSTOM_CERTS_DIR`) on **every** edge. Keys must
+   not be group or world readable (mode `0600`). Restart the edges one at a
+   time. A TLS tunnel needs no edge certificate: its local service presents
+   the certificate for the custom name.
+4. An administrator verifies outside ngstone that the requester controls the
+   name, then runs `ngstone admin domains activate <id>`.
+5. Test with `curl https://app.example.org/`. `ngstone admin domains disable
+   <id>` stops it again.
+
+Registering is open to operators for their own tunnels. Activating and
+disabling are administrator-only.
+
+Limits:
+
+- No automatic certificates; you renew them and restart the edges.
+- No ownership verification. Activation is the trust decision.
+- Certificates are per edge and are read at start-up, so a change needs a
+  restart. An expired, unreadable, mismatched or unsafely permissioned
+  certificate stops the edge from starting.
+- A tunnel that requires visitor sign-in (`--oidc`) answers 403 on its custom
+  domain.
+- Activation reaches other edges within 5 seconds and disabling within 30.
+- Register internationalised names in `xn--` form.
+- No `Strict-Transport-Security` header is set on custom domains.
+
+Edges forward custom-domain traffic to the owning edge like any other tunnel
+(see [Inter-edge forwarding](#inter-edge-forwarding)). See
+[deploy/README.md](deploy/README.md#custom-domains) for the systemd and
+Docker layouts.
 
 ### Visitor login (OIDC)
 

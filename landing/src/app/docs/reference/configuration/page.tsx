@@ -283,6 +283,14 @@ export default function ConfigurationPage() {
           <code>certmagic.FileStorage</code> path; must match the systemd{" "}
           <code>StateDirectory</code>.
         </Property>
+        <Property name="-custom-certs" type="string">
+          Directory of <code>&lt;name&gt;.crt</code> and{" "}
+          <code>&lt;name&gt;.key</code> pairs served for active custom
+          domains. Keys must be mode <code>0600</code>. Needs durable
+          storage and a TLS public listener. Read at start-up, so changes
+          need a restart; an expired or unreadable pair stops the edge.
+          Also <code>$NGSTONE_CUSTOM_CERTS_DIR</code>.
+        </Property>
         <Property name="-dns-provider" type="string" defaultValue="cloudflare">
           DNS provider used for the DNS-01 certificate challenges:{" "}
           <code>cloudflare</code>, <code>route53</code>,{" "}
@@ -362,6 +370,10 @@ export default function ConfigurationPage() {
         <Property name="NGSTONE_CREDENTIALS_FILE" type="edge env">
           Compatibility path to the scoped credential file. Use the durable
           database backend for new deployments.
+        </Property>
+        <Property name="NGSTONE_CUSTOM_CERTS_DIR" type="edge env">
+          Directory for <code>-custom-certs</code>; the environment value
+          wins over the flag.
         </Property>
         <Property name="NGSTONE_DATABASE_URL" type="edge env">
           Durable SQLite or PostgreSQL URL. SQLite is the default when neither
