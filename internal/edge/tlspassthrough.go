@@ -271,6 +271,9 @@ func (l *sniListener) classify(c net.Conn) {
 		case state == aliasRefused:
 			c.Close()
 			return
+		case state == aliasRemote && l.srv.peers != nil && l.srv.peers.eligible(target.Hostname):
+			l.srv.peers.forward(replay, target.Hostname)
+			return
 		}
 	}
 	l.deliver(replay)
@@ -290,8 +293,17 @@ func (l *sniListener) classifyForwarded(c net.Conn) {
 		return
 	}
 	if _, local := l.srv.registry.Route(serverName); !local {
-		l.refuse(c)
-		return
+		target, b, state := l.srv.localAlias(serverName, remoteIP(c))
+		if state != aliasLocal {
+			l.refuse(c)
+			return
+		}
+		if target.Kind == "tls" {
+			if l.acceptForwarded(c) {
+				l.srv.serveTLSPassthrough(b, target.Hostname, replay, l.sem)
+			}
+			return
+		}
 	}
 	replay.forwarded = true
 	if l.acceptForwarded(c) {
