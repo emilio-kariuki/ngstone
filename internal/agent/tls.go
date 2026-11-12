@@ -105,6 +105,10 @@ func quicTLSConfig(cfg Config) (*tls.Config, error) {
 	return tlsCfg, nil
 }
 
+func DialQUICControl(ctx context.Context, cfg Config) (net.Conn, error) {
+	return dialQUICControl(ctx, cfg)
+}
+
 func dialQUICControl(ctx context.Context, cfg Config) (net.Conn, error) {
 	tlsCfg, err := quicTLSConfig(cfg)
 	if err != nil {

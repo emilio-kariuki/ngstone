@@ -52,6 +52,7 @@ type doctorOptions struct {
 	JSON        bool
 	LookupHost  func(context.Context, string) ([]string, error)
 	DialContext func(context.Context, string, string) (net.Conn, error)
+	DialQUIC    func(context.Context, agent.Config) (net.Conn, error)
 	Verify      func(context.Context, agent.Config) error
 	HTTPClient  *http.Client
 }
@@ -107,6 +108,9 @@ func runDoctor(opts doctorOptions, out, _ io.Writer) (int, doctorReport) {
 	}
 	if opts.DialContext == nil {
 		opts.DialContext = (&net.Dialer{Timeout: opts.Timeout}).DialContext
+	}
+	if opts.DialQUIC == nil {
+		opts.DialQUIC = agent.DialQUICControl
 	}
 	if opts.Verify == nil {
 		opts.Verify = agent.Verify
@@ -230,12 +234,22 @@ func checkDoctorEndpoint(opts doctorOptions, server string) doctorCheck {
 		return doctorCheck{Status: doctorFail, Name: "control.dns", Message: "control plane hostname could not be resolved", Details: map[string]string{"host": host}}
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), opts.Timeout)
-	conn, err := opts.DialContext(ctx, "tcp", server)
+	var conn net.Conn
+	overQUIC := strings.EqualFold(strings.TrimSpace(opts.Transport), agent.TransportQUIC)
+	if overQUIC {
+		conn, err = opts.DialQUIC(ctx, agent.Config{ControlAddr: server, Insecure: opts.Insecure, ServerName: opts.ServerName, Pin: opts.Pin})
+	} else {
+		conn, err = opts.DialContext(ctx, "tcp", server)
+	}
 	cancel()
 	if err != nil {
 		return doctorCheck{Status: doctorFail, Name: "control.network", Message: "control plane port is not reachable", Details: map[string]string{"address": server}}
 	}
-	conn.Close()
+	if overQUIC {
+		go conn.Close()
+	} else {
+		conn.Close()
+	}
 	return doctorCheck{Status: doctorPass, Name: "control.network", Message: "control plane hostname and port are reachable", Details: map[string]string{"host": host, "addresses": strings.Join(addresses, ",")}}
 }
 
