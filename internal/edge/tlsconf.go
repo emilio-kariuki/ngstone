@@ -91,8 +91,10 @@ func NewTLSManager(cfg TLSConfig) (*TLSManager, error) {
 	return m, nil
 }
 
+var newMagicCache = certmagic.NewCache
+
 func newMagicConfigs() (managed, custom *certmagic.Config) {
-	cache := certmagic.NewCache(certmagic.CacheOptions{
+	cache := newMagicCache(certmagic.CacheOptions{
 		GetConfigForCert: func(c certmagic.Certificate) (*certmagic.Config, error) {
 			return configForCert(c, managed, custom), nil
 		},

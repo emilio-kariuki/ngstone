@@ -504,6 +504,59 @@ func TestAddCustomCertificatesNeverFetchesOCSP(t *testing.T) {
 	}
 }
 
+func TestCacheMaintenanceConfigDisablesStaplingOnlyForOperatorCertificates(t *testing.T) {
+	var opts certmagic.CacheOptions
+	var cache *certmagic.Cache
+	original := newMagicCache
+	newMagicCache = func(o certmagic.CacheOptions) *certmagic.Cache {
+		opts = o
+		cache = certmagic.NewCache(o)
+		return cache
+	}
+	t.Cleanup(func() {
+		newMagicCache = original
+		if cache != nil {
+			cache.Stop()
+		}
+	})
+	mgr := newTestApexManager(t, "example.com")
+
+	dir := filepath.Join(t.TempDir(), "certs")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeCustomPair(t, dir, "app", []string{"app.example.org"}, time.Now().Add(24*time.Hour*30))
+	certs, err := loadCustomCertificates(dir, func(name string) bool { return hostMatchesDomain(name, "example.com") }, "example.com", time.Now())
+	if err != nil {
+		t.Fatalf("loadCustomCertificates: %v", err)
+	}
+	if err := mgr.AddCustomCertificates(t.Context(), certs); err != nil {
+		t.Fatalf("AddCustomCertificates: %v", err)
+	}
+	if _, err := mgr.magic.CacheUnmanagedTLSCertificate(t.Context(), newTestLeafCert(t, "managed.example.com", time.Now().Add(24*time.Hour*30)), nil); err != nil {
+		t.Fatalf("cache managed certificate: %v", err)
+	}
+
+	resolve := func(name string) *certmagic.Config {
+		t.Helper()
+		found := cache.AllMatchingCertificates(name)
+		if len(found) != 1 {
+			t.Fatalf("certificates matching %q = %d, want 1", name, len(found))
+		}
+		cfg, err := opts.GetConfigForCert(found[0])
+		if err != nil {
+			t.Fatalf("GetConfigForCert(%q): %v", name, err)
+		}
+		return cfg
+	}
+	if !resolve("app.example.org").OCSP.DisableStapling {
+		t.Fatal("the cache would run OCSP maintenance for an operator certificate")
+	}
+	if resolve("managed.example.com").OCSP.DisableStapling {
+		t.Fatal("the cache would skip OCSP maintenance for a managed certificate")
+	}
+}
+
 func TestConfigForCertKeepsManagedStapling(t *testing.T) {
 	managed, custom := newMagicConfigs()
 	if managed.OCSP.DisableStapling {

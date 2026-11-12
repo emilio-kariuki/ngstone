@@ -368,6 +368,88 @@ func TestAliasRefreshAfterAdminCallSurvivesClientDisconnect(t *testing.T) {
 	}
 }
 
+type gatedDomainStore struct {
+	calls   atomic.Int32
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedDomainStore) ActiveCustomDomains(context.Context, int) ([]storage.ActiveCustomDomain, error) {
+	if g.calls.Add(1) == 1 {
+		close(g.entered)
+		<-g.release
+		return []storage.ActiveCustomDomain{{Domain: "old.example.org", Hostname: "old.example.com", Kind: "http", OwnerID: "alice"}}, nil
+	}
+	return []storage.ActiveCustomDomain{{Domain: "new.example.org", Hostname: "new.example.com", Kind: "http", OwnerID: "alice"}}, nil
+}
+
+func TestAliasLoadNeverLetsOlderResultOverwriteNewer(t *testing.T) {
+	store := &gatedDomainStore{entered: make(chan struct{}), release: make(chan struct{})}
+	resolver := newTestResolver(store, func(string) bool { return false })
+	now := time.Now()
+	first := make(chan struct{})
+	go func() {
+		defer close(first)
+		resolver.load(t.Context(), now)
+	}()
+	<-store.entered
+	second := make(chan struct{})
+	go func() {
+		defer close(second)
+		resolver.load(t.Context(), now)
+	}()
+	select {
+	case <-second:
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(store.release)
+	<-first
+	<-second
+	if _, ok := resolver.resolve("new.example.org"); !ok {
+		t.Fatal("the newer load result was overwritten by an older one")
+	}
+	if _, ok := resolver.resolve("old.example.org"); ok {
+		t.Fatal("the older load result replaced the newer snapshot")
+	}
+}
+
+func TestRunLoadsCustomDomainsBeforeServing(t *testing.T) {
+	store := openAliasStore(t)
+	activateRow(t, store, "app.example.org", "web.example.com", "alice", true)
+	controlAddr, publicAddr := freeTCPAddr(t), freeTCPAddr(t)
+	s, err := New(Config{ControlAddr: controlAddr, PublicAddr: publicAddr, Domain: "example.com", TokenSHA256: sumToken("tok"), PublicScheme: "http", Insecure: true, Storage: store})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runErr := make(chan error, 1)
+	go func() { runErr <- s.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runErr:
+		case <-time.After(20 * time.Second):
+			t.Error("edge did not stop")
+		}
+	})
+	waitTCPUpOrRunErr(t, publicAddr, runErr)
+	alice := ownedSession(t, "alice", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "routed") })
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "web.example.com", Session: alice}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	req, _ := http.NewRequest(http.MethodGet, "http://"+publicAddr+"/", nil)
+	req.Host = "app.example.org"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "routed" {
+		t.Fatalf("first request after start-up = %d %q, want 200 routed without waiting for a poll", resp.StatusCode, body)
+	}
+}
+
 func TestRedirectToHTTPSForActiveCustomDomain(t *testing.T) {
 	s := newAliasServer(t)
 	registerActiveDomain(t, s, "app.example.org", "web.example.com", "http", "alice")
