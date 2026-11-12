@@ -189,6 +189,14 @@ func migrate(ctx context.Context, db *sql.DB, driver string) error {
 			return err
 		}
 	}
+	if applied < 8 {
+		statements := []string{
+			`CREATE INDEX IF NOT EXISTS idx_share_directory_owner ON share_directory(owner_id)`,
+		}
+		if err := applyMigration(ctx, db, driver, 8, statements); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

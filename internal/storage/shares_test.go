@@ -267,8 +267,8 @@ func TestShareDirectoryColumns(t *testing.T) {
 func TestMigrationCreatesShareDirectoryFresh(t *testing.T) {
 	forEachPeerStore(t, func(t *testing.T, s *Store) {
 		var applied int
-		if err := s.db.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&applied); err != nil || applied != 7 {
-			t.Fatalf("applied migrations = %d, %v, want 7", applied, err)
+		if err := s.db.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&applied); err != nil || applied != 8 {
+			t.Fatalf("applied migrations = %d, %v, want 8", applied, err)
 		}
 		seedPeer(t, s, "edge-b", time.Now().Add(time.Hour))
 		seedLiveShare(t, s, "key-1", "share-1", "edge-b", "owner-a")
@@ -294,8 +294,8 @@ func TestMigrationUpgradesFromVersion5(t *testing.T) {
 	check := func(t *testing.T, s *Store) {
 		t.Helper()
 		var applied int
-		if err := s.db.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&applied); err != nil || applied != 7 {
-			t.Fatalf("applied migrations = %d, %v, want 7", applied, err)
+		if err := s.db.QueryRowContext(context.Background(), `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&applied); err != nil || applied != 8 {
+			t.Fatalf("applied migrations = %d, %v, want 8", applied, err)
 		}
 		seedLiveShare(t, s, "key-1", "share-1", "edge-b", "owner-a")
 		if _, ok, err := s.LookupShareEdge(context.Background(), "key-1", "edge-a", time.Now()); err != nil || !ok {
@@ -437,6 +437,88 @@ func TestPublishShareSameShareFromOtherEdgeDoesNotRepoint(t *testing.T) {
 		}
 		if edgeID, shareID, _ := shareRow(t, s, "key-1"); edgeID != "edge-b" || shareID != "share-1" {
 			t.Fatalf("row after the refused publish = %s %s, want edge-b share-1", edgeID, shareID)
+		}
+	})
+}
+
+func TestLookupShareEdgeByIDFiltersOwner(t *testing.T) {
+	forEachPeerStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Now()
+		seedPeer(t, s, "edge-b", now.Add(3*time.Hour))
+		seedPeer(t, s, "edge-gone", now.Add(-time.Minute))
+		seedLiveShare(t, s, "key-1", "share-1", "edge-b", "owner-a")
+		peer, ok, err := s.LookupShareEdgeByID(ctx, "share-1", "owner-a", "edge-a", now)
+		if err != nil || !ok || peer.EdgeID != "edge-b" || peer.PeerAddr != "edge-b.internal:7443" {
+			t.Fatalf("lookup by owner = %+v, %v, %v", peer, ok, err)
+		}
+		if _, ok, err := s.LookupShareEdgeByID(ctx, "share-1", "owner-b", "edge-a", now); err != nil || ok {
+			t.Fatalf("lookup by another owner = %v, %v, want not found", ok, err)
+		}
+		if _, ok, err := s.LookupShareEdgeByID(ctx, "share-1", "owner-a", "edge-b", now); err != nil || ok {
+			t.Fatalf("lookup excluding the holding edge = %v, %v, want not found", ok, err)
+		}
+		if _, ok, err := s.LookupShareEdgeByID(ctx, "share-1", "owner-a", "edge-a", now.Add(2*time.Hour)); err != nil || ok {
+			t.Fatalf("lookup after the share expired = %v, %v, want not found", ok, err)
+		}
+		if _, ok, err := s.LookupShareEdgeByID(ctx, "share-unknown", "owner-a", "edge-a", now); err != nil || ok {
+			t.Fatalf("lookup of an unknown share = %v, %v, want not found", ok, err)
+		}
+		seedLiveShare(t, s, "key-2", "share-2", "edge-gone", "owner-a")
+		if _, ok, err := s.LookupShareEdgeByID(ctx, "share-2", "owner-a", "edge-a", now); err != nil || ok {
+			t.Fatalf("lookup through an expired peer = %v, %v, want not found", ok, err)
+		}
+		if revoked, err := s.RevokeShare(ctx, "share-1", "owner-a", now); err != nil || !revoked {
+			t.Fatalf("revoke = %v, %v", revoked, err)
+		}
+		if _, ok, err := s.LookupShareEdgeByID(ctx, "share-1", "owner-a", "edge-a", now); err != nil || ok {
+			t.Fatalf("lookup of a revoked share = %v, %v, want not found", ok, err)
+		}
+	})
+}
+
+func TestShareEdgesForOwnerDistinctAndLimited(t *testing.T) {
+	forEachPeerStore(t, func(t *testing.T, s *Store) {
+		ctx := context.Background()
+		now := time.Now()
+		for _, id := range []string{"edge-a", "edge-b", "edge-c", "edge-d"} {
+			seedPeer(t, s, id, now.Add(3*time.Hour))
+		}
+		seedPeer(t, s, "edge-gone", now.Add(-time.Minute))
+		seedLiveShare(t, s, "key-1", "share-1", "edge-b", "owner-a")
+		seedLiveShare(t, s, "key-2", "share-2", "edge-b", "owner-a")
+		seedLiveShare(t, s, "key-3", "share-3", "edge-c", "owner-a")
+		seedLiveShare(t, s, "key-4", "share-4", "edge-d", "owner-a")
+		seedLiveShare(t, s, "key-5", "share-5", "edge-d", "owner-b")
+		seedLiveShare(t, s, "key-6", "share-6", "edge-gone", "owner-a")
+		seedLiveShare(t, s, "key-7", "share-7", "edge-a", "owner-a")
+		ids := func(peers []EdgePeer) []string {
+			var out []string
+			for _, p := range peers {
+				out = append(out, p.EdgeID)
+			}
+			return out
+		}
+		peers, err := s.ShareEdgesForOwner(ctx, "owner-a", "edge-a", now, 10)
+		if err != nil || !reflect.DeepEqual(ids(peers), []string{"edge-b", "edge-c", "edge-d"}) {
+			t.Fatalf("edges for owner = %v, %v, want edge-b edge-c edge-d once each", ids(peers), err)
+		}
+		peers, err = s.ShareEdgesForOwner(ctx, "owner-a", "edge-a", now, 2)
+		if err != nil || !reflect.DeepEqual(ids(peers), []string{"edge-b", "edge-c"}) {
+			t.Fatalf("limited edges for owner = %v, %v, want edge-b edge-c", ids(peers), err)
+		}
+		if peers, err := s.ShareEdgesForOwner(ctx, "owner-c", "edge-a", now, 10); err != nil || len(peers) != 0 {
+			t.Fatalf("edges for an owner without shares = %v, %v", ids(peers), err)
+		}
+		if peers, err := s.ShareEdgesForOwner(ctx, "owner-a", "edge-a", now.Add(2*time.Hour), 10); err != nil || len(peers) != 0 {
+			t.Fatalf("edges after every share expired = %v, %v", ids(peers), err)
+		}
+		if revoked, err := s.RevokeShare(ctx, "share-3", "owner-a", now); err != nil || !revoked {
+			t.Fatalf("revoke = %v, %v", revoked, err)
+		}
+		peers, err = s.ShareEdgesForOwner(ctx, "owner-a", "edge-a", now, 10)
+		if err != nil || !reflect.DeepEqual(ids(peers), []string{"edge-b", "edge-d"}) {
+			t.Fatalf("edges after a revoke = %v, %v, want edge-b edge-d", ids(peers), err)
 		}
 	})
 }

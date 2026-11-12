@@ -115,3 +115,35 @@ func (s *Store) LookupShareEdge(ctx context.Context, dirKey, excludeEdgeID strin
 	}
 	return peer, true, nil
 }
+
+func (s *Store) LookupShareEdgeByID(ctx context.Context, shareID, ownerID, excludeEdgeID string, now time.Time) (EdgePeer, bool, error) {
+	row := s.db.QueryRowContext(ctx, s.bind(`SELECT e.edge_id, e.peer_addr, e.spki_sha256, e.expires_at FROM share_directory d JOIN edge_peers e ON e.edge_id = d.edge_id WHERE d.share_id = $1 AND d.owner_id = $2 AND d.revoked = 0 AND d.expires_at > $3 AND e.expires_at > $3 AND d.edge_id <> $4 LIMIT 1`), shareID, ownerID, nowString(now), excludeEdgeID)
+	peer, err := scanEdgePeer(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return EdgePeer{}, false, nil
+		}
+		return EdgePeer{}, false, fmt.Errorf("storage: lookup share edge by id: %w", err)
+	}
+	return peer, true, nil
+}
+
+func (s *Store) ShareEdgesForOwner(ctx context.Context, ownerID, excludeEdgeID string, now time.Time, limit int) ([]EdgePeer, error) {
+	rows, err := s.db.QueryContext(ctx, s.bind(`SELECT DISTINCT e.edge_id, e.peer_addr, e.spki_sha256, e.expires_at FROM share_directory d JOIN edge_peers e ON e.edge_id = d.edge_id WHERE d.owner_id = $1 AND d.revoked = 0 AND d.expires_at > $2 AND e.expires_at > $2 AND d.edge_id <> $3 ORDER BY e.edge_id LIMIT $4`), ownerID, nowString(now), excludeEdgeID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list share edges for owner: %w", err)
+	}
+	defer rows.Close()
+	var out []EdgePeer
+	for rows.Next() {
+		peer, err := scanEdgePeer(rows)
+		if err != nil {
+			return nil, fmt.Errorf("storage: list share edges for owner: %w", err)
+		}
+		out = append(out, peer)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list share edges for owner: %w", err)
+	}
+	return out, nil
+}
