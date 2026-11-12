@@ -64,6 +64,7 @@ func main() {
 	proxyProtocol := flag.Bool("proxy-protocol", false, "require a PROXY protocol v1/v2 header on every connection to the public listener, and use the address it carries as the client address; enable this only when the public port is reachable solely from a trusted TCP proxy (see deploy/README.md), and enable it on both sides at once")
 	proxyProtocolTrusted := flag.String("proxy-protocol-trusted", "", "comma-separated CIDRs trusted to originate PROXY protocol headers on the public listener (only meaningful with -proxy-protocol); connections from any other peer are closed immediately. If empty, PROXY headers are accepted from any peer and --allow-cidr per-tunnel checks cannot be trusted unless the public port is firewalled to the proxy")
 
+	quicControl := flag.Bool("quic", false, "also accept agent control connections over QUIC (UDP) on the -control port")
 	insecure := flag.Bool("insecure", false, "run with no TLS anywhere and no certificate management (dev/test only)")
 	acmeCA := flag.String("acme-ca", edge.ACMECAStaging, "ACME CA to use: \"staging\" (default) or \"production\"; a config mistake against production can rate-limit the domain for a week")
 	certEmail := flag.String("cert-email", "", "ACME account email (required unless -insecure)")
@@ -328,6 +329,7 @@ func main() {
 		ShareAuditLogPath: *shareAuditLog,
 
 		Insecure:             *insecure,
+		QUIC:                 *quicControl,
 		ProxyProtocol:        *proxyProtocol,
 		ProxyProtocolTrusted: proxyProtocolTrustedList,
 		ACMECA:               *acmeCA,
@@ -366,7 +368,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA, "dns-provider", *dnsProvider, "proxy-protocol", *proxyProtocol, "scoped_credentials", credentialsFile != "", "durable_storage", databaseURL != "", "peer_addr", resolvedPeerAddr, "peer_listen", resolvedPeerListen, "admin_bearer", adminTokenSHA256HexVal != "", "oidc", oidcConfig != nil, "admin_mtls", resolvedAdminMTLSAddr != "")
+	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "quic", *quicControl, "acme-ca", *acmeCA, "dns-provider", *dnsProvider, "proxy-protocol", *proxyProtocol, "scoped_credentials", credentialsFile != "", "durable_storage", databaseURL != "", "peer_addr", resolvedPeerAddr, "peer_listen", resolvedPeerListen, "admin_bearer", adminTokenSHA256HexVal != "", "oidc", oidcConfig != nil, "admin_mtls", resolvedAdminMTLSAddr != "")
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("ngstoned: exited with error", "err", err)
 		os.Exit(1)

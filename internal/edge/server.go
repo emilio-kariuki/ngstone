@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"github.com/quic-go/quic-go"
 	"golang.org/x/sync/errgroup"
 
 	"ngstone/internal/credentials"
@@ -66,6 +67,7 @@ type Config struct {
 	PeerListen      string
 	PublicTLSConfig *tls.Config
 	CustomCertDir   string
+	QUIC            bool
 
 	TCPPortRange string
 	TCPBindAddr  string
@@ -206,6 +208,10 @@ func New(cfg Config) (*Server, error) {
 	if cfg.PublicTLSConfig != nil && cfg.Insecure {
 		closeOpenedStorage()
 		return nil, errors.New("edge: a public TLS config cannot be combined with insecure mode")
+	}
+	if cfg.QUIC && cfg.PublicTLSConfig != nil {
+		closeOpenedStorage()
+		return nil, errors.New("edge: QUIC control needs managed certificates or insecure mode")
 	}
 	if cfg.CustomCertDir != "" {
 		switch {
@@ -442,8 +448,21 @@ func (s *Server) Run(ctx context.Context) error {
 	var opsLn net.Listener
 	var adminMTLSLn net.Listener
 	var peerLn net.Listener
+	var quicTr *quic.Transport
+	var quicLn *quic.Listener
+
+	closeQUIC := func() {
+		if quicLn != nil {
+			quicLn.Close()
+		}
+		if quicTr != nil {
+			quicTr.Close()
+			quicTr.Conn.Close()
+		}
+	}
 
 	closeAll := func() {
+		closeQUIC()
 		controlLn.Close()
 		publicLn.Close()
 		if httpLn != nil {
@@ -457,6 +476,14 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		if peerLn != nil {
 			peerLn.Close()
+		}
+	}
+
+	if s.cfg.QUIC {
+		quicTr, quicLn, err = s.listenQUIC(controlLn.Addr().(*net.TCPAddr))
+		if err != nil {
+			closeAll()
+			return err
 		}
 	}
 
@@ -565,6 +592,9 @@ func (s *Server) Run(ctx context.Context) error {
 		s.controlDraining = true
 		s.controlMu.Unlock()
 		controlLn.Close()
+		if quicLn != nil {
+			quicLn.Close()
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout+5*time.Second)
 		defer cancel()
 		publicSrv.Shutdown(shutdownCtx)
@@ -588,6 +618,16 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		return err
 	})
+
+	if quicLn != nil {
+		g.Go(func() error {
+			err := s.serveQUIC(gctx, quicLn)
+			if gctx.Err() != nil {
+				return nil
+			}
+			return err
+		})
+	}
 
 	g.Go(func() error {
 		err := publicSrv.Serve(publicLn)
@@ -635,7 +675,7 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	}
 
-	slog.Info("ngstoned: listeners up", "control", s.cfg.ControlAddr, "public", s.cfg.PublicAddr, "insecure", s.cfg.Insecure, "proxy_protocol", s.cfg.ProxyProtocol, "peer_addr", s.cfg.PeerAddr, "peer_listen", s.cfg.PeerListen, "admin_mtls", s.cfg.AdminMTLSAddr)
+	slog.Info("ngstoned: listeners up", "control", s.cfg.ControlAddr, "public", s.cfg.PublicAddr, "insecure", s.cfg.Insecure, "proxy_protocol", s.cfg.ProxyProtocol, "peer_addr", s.cfg.PeerAddr, "peer_listen", s.cfg.PeerListen, "admin_mtls", s.cfg.AdminMTLSAddr, "quic", s.cfg.QUIC)
 	s.recordEvent("info", "listeners up", map[string]string{
 		"control": s.cfg.ControlAddr,
 		"public":  s.cfg.PublicAddr,
@@ -643,6 +683,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	err = g.Wait()
 	s.waitControlSessions(controlShutdownGrace)
+	closeQUIC()
 	s.shareAudit.close()
 	return err
 }
