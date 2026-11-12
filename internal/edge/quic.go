@@ -175,16 +175,20 @@ func quicRemoteIP(qc *quic.Conn) string {
 func (s *Server) handleQUICConn(ctx context.Context, qc *quic.Conn, adm *quicAdmission) {
 	leave := sync.OnceFunc(s.controlConns.Done)
 	defer leave()
+	hardStop := time.AfterFunc(time.Until(adm.deadline), func() {
+		if !adm.authed.Load() {
+			qc.CloseWithError(0, "")
+		}
+	})
+	defer hardStop.Stop()
 	actx, cancel := context.WithDeadline(ctx, adm.deadline)
 	nc, err := tunnel.AcceptQUIC(actx, qc)
 	cancel()
 	if err != nil {
-		adm.releaseUnauth()
 		slog.Warn("edge: quic control stream failed", "ip", quicRemoteIP(qc), "err", err)
 		return
 	}
 	s.handleControlConnTransport(ctx, nc, adm.authenticated, controlTransport{leave: leave, deadline: adm.deadline, name: "quic"})
-	adm.releaseUnauth()
 	nc.Close()
 	t := time.NewTimer(quicConnCloseWait)
 	defer t.Stop()

@@ -1,6 +1,7 @@
 package edge
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -514,6 +515,46 @@ func TestQUICUnauthLifetimeBoundedAfterLateSilentStream(t *testing.T) {
 		t.Fatalf("partial hello: %v", err)
 	}
 	requireUnauthSlotHeldThenFreedWithin(t, s, start, authDeadline+300*time.Millisecond)
+}
+
+func TestQUICFailedAuthHoldsSlotUntilConnectionCloses(t *testing.T) {
+	shortenAuthDeadline(t, time.Second)
+	s, controlAddr, _ := startQUICEdgeForTest(t, LimitsConfig{UnauthSessions: 1})
+	start := time.Now()
+	qc, err := dialQUICRaw(t, controlAddr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st, err := qc.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatalf("open stream: %v", err)
+	}
+	if _, err := st.Write(bytes.Repeat([]byte{0xff}, 64)); err != nil {
+		t.Fatalf("write garbage: %v", err)
+	}
+	st.SetReadDeadline(start.Add(authDeadline))
+	if _, err := io.Copy(io.Discard, st); err != nil {
+		t.Fatalf("edge did not finish the failed control stream before the deadline: %v", err)
+	}
+	select {
+	case <-qc.Context().Done():
+		t.Fatal("connection was already closed when the second dial was attempted")
+	default:
+	}
+	if quicSlotFree(s.unauthSem) {
+		t.Fatal("unauthenticated slot released while the failed connection was still open")
+	}
+	if _, err := dialQUICRaw(t, controlAddr); err == nil {
+		t.Fatal("second connection was admitted while the failed one was still open")
+	}
+	select {
+	case <-qc.Context().Done():
+	case <-time.After(time.Until(start.Add(authDeadline + 500*time.Millisecond))):
+		t.Fatalf("edge left a failed-auth connection open past %v", authDeadline+500*time.Millisecond)
+	}
+	waitQUICSlotFree(t, "unauthenticated", s.unauthSem)
 }
 
 func TestQUICTLSConfigClonesManagedConfig(t *testing.T) {
