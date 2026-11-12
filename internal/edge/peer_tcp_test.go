@@ -579,3 +579,83 @@ func TestForwardTCPSplicesToOwner(t *testing.T) {
 	c.Close()
 	peerEventually(t, "forward gauge to drain", func() bool { return metricActivePeerForwards.Value() == 0 })
 }
+
+func TestPollTCPEvictsSessionWhosePortAnotherEdgeLeases(t *testing.T) {
+	pc := newPeerCluster(t)
+	a, recA := pc.tcpEdge(t, "edge-a", "127.0.0.1")
+	b, _ := pc.tcpEdge(t, "edge-b", "127.0.0.1")
+	registerPeers(t, a, b)
+	mgr := a.srv.tcpMgr
+	port, _, err := mgr.bind(recA.fx.as, 0, "example.com", nil, false)
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	mgr.setTunnelID(recA.fx.as, port, "tunnel-a")
+	t.Cleanup(func() { mgr.reconcileRemote(nil, a.srv.peers.forwardTCP) })
+	b.leaseTCP(t, port)
+
+	a.srv.peers.pollTCP(context.Background(), time.Now())
+
+	recA.fx.agent.Control().SetReadDeadline(time.Now().Add(3 * time.Second))
+	msg, err := recA.fx.agent.Control().Read()
+	if err != nil {
+		t.Fatalf("agent read: %v", err)
+	}
+	if msg.Type != proto.TypeEvicted {
+		t.Fatalf("agent got %q, want %q", msg.Type, proto.TypeEvicted)
+	}
+	ev, err := proto.Decode[proto.Evicted](msg)
+	if err != nil {
+		t.Fatalf("decode evicted: %v", err)
+	}
+	if want := "tcp://example.com:" + strconv.Itoa(port); ev.Hostname != want || ev.Reason != "takeover" {
+		t.Fatalf("evicted = %+v, want hostname %s reason takeover", ev, want)
+	}
+	waitDead(t, recA.fx.as)
+
+	mgr.releaseSession(recA.fx.as)
+	a.srv.peers.pollTCP(context.Background(), time.Now())
+	mgr.mu.Lock()
+	_, proxied := mgr.remote[port]
+	mgr.mu.Unlock()
+	if !proxied {
+		t.Fatalf("port %d is not proxied to the new owner after the local session was released", port)
+	}
+}
+
+func TestPollTCPKeepsTunnelWithoutLeaseOrBoundAfterPoll(t *testing.T) {
+	pc := newPeerCluster(t)
+	a, recA := pc.tcpEdge(t, "edge-a", "127.0.0.1")
+	b, _ := pc.tcpEdge(t, "edge-b", "127.0.0.1")
+	registerPeers(t, a, b)
+	mgr := a.srv.tcpMgr
+	t.Cleanup(func() { mgr.reconcileRemote(nil, a.srv.peers.forwardTCP) })
+
+	noLease, _, err := mgr.bind(recA.fx.as, 0, "example.com", nil, false)
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	b.leaseTCP(t, noLease)
+	a.srv.peers.pollTCP(context.Background(), time.Now())
+	if lost := mgr.lostToPeers(map[int]struct{}{noLease: {}}, time.Now()); len(lost) != 0 {
+		t.Fatalf("a tunnel without a lease was marked lost: %v", lost)
+	}
+
+	leased, _, err := mgr.bind(recA.fx.as, 0, "example.com", nil, false)
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	mgr.setTunnelID(recA.fx.as, leased, "tunnel-a")
+	b.leaseTCP(t, leased)
+	mgr.mu.Lock()
+	bound := mgr.byPort[leased].boundAt
+	mgr.mu.Unlock()
+	before := bound.Add(-time.Second)
+	a.srv.peers.pollTCP(context.Background(), before)
+	if lost := mgr.lostToPeers(map[int]struct{}{leased: {}}, before); len(lost) != 0 {
+		t.Fatalf("a tunnel bound after the poll started was marked lost: %v", lost)
+	}
+	if isSessionDead(recA.fx.as) {
+		t.Fatal("session was evicted by a tunnel it holds without a lease or bound after the poll")
+	}
+}

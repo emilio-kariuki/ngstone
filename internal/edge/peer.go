@@ -959,6 +959,10 @@ func (p *peerForwarder) pollTCP(ctx context.Context, now time.Time) {
 	for port := range ports {
 		want[port] = struct{}{}
 	}
+	for as, port := range mgr.lostToPeers(want, now) {
+		slog.Warn("edge: tcp port leased by another edge, evicting local session", "port", port, "session_id", as.ID)
+		go evict(as, "tcp://"+p.srv.cfg.Domain+":"+strconv.Itoa(port))
+	}
 	mgr.reconcileRemote(want, p.forwardTCP)
 }
 

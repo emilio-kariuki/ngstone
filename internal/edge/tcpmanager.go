@@ -510,6 +510,25 @@ func (tm *tcpManager) closeRemoteLocked(port int) {
 	}
 }
 
+func (tm *tcpManager) lostToPeers(remote map[int]struct{}, since time.Time) map[*AgentSession]int {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	lost := make(map[*AgentSession]int)
+	for port := range remote {
+		tt := tm.byPort[port]
+		if tt == nil || !tt.boundAt.Before(since) {
+			continue
+		}
+		if id, _ := tt.durableID.Load().(string); id == "" {
+			continue
+		}
+		if cur, ok := lost[tt.session]; !ok || port < cur {
+			lost[tt.session] = port
+		}
+	}
+	return lost
+}
+
 func (tm *tcpManager) reconcileRemote(want map[int]struct{}, accept func(port int, c net.Conn)) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
