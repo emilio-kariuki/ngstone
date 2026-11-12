@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const customCertCacheTimeout = 10 * time.Second
+const customCertTag = "custom"
 
 type customCert struct {
 	cert     tls.Certificate
@@ -146,10 +146,7 @@ func checkCustomCertName(name string, reserved func(string) bool, edgeDomain str
 
 func (m *TLSManager) AddCustomCertificates(ctx context.Context, certs []customCert) error {
 	for _, c := range certs {
-		cctx, cancel := context.WithTimeout(ctx, customCertCacheTimeout)
-		_, err := m.magic.CacheUnmanagedTLSCertificate(cctx, c.cert, []string{"custom"})
-		cancel()
-		if err != nil {
+		if _, err := m.custom.CacheUnmanagedTLSCertificate(ctx, c.cert, []string{customCertTag}); err != nil {
 			return fmt.Errorf("loading custom certificate %s: %w", c.file, err)
 		}
 		slog.Info("ngstoned: custom certificate loaded", "file", c.file, "names", c.names, "not_after", c.notAfter.UTC().Format(time.RFC3339))

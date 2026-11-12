@@ -10,10 +10,13 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -388,11 +391,7 @@ func TestCustomCertificateSNISelection(t *testing.T) {
 		t.Fatalf("loadCustomCertificates: %v", err)
 	}
 
-	var magic *certmagic.Config
-	cache := certmagic.NewCache(certmagic.CacheOptions{GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) { return magic, nil }})
-	t.Cleanup(cache.Stop)
-	magic = certmagic.New(cache, certmagic.Config{})
-	mgr := &TLSManager{magic: magic}
+	mgr := newTestApexManager(t, "example.com")
 	if err := mgr.AddCustomCertificates(t.Context(), certs); err != nil {
 		t.Fatalf("AddCustomCertificates: %v", err)
 	}
@@ -411,5 +410,64 @@ func TestCustomCertificateSNISelection(t *testing.T) {
 		if err == nil && got != nil && string(got.Certificate[0]) == string(leaf) {
 			t.Fatalf("SNI %q was served the custom leaf", sni)
 		}
+	}
+}
+
+func TestAddCustomCertificatesNeverFetchesOCSP(t *testing.T) {
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	dir := filepath.Join(t.TempDir(), "certs")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tmpl := customCertTemplate([]string{"app.example.org"}, nil, time.Now().Add(24*time.Hour*30))
+	tmpl.OCSPServer = []string{srv.URL}
+	tmpl.IssuingCertificateURL = []string{srv.URL}
+	writeCustomTemplate(t, dir, "app", tmpl)
+	certs, err := loadCustomCertificates(dir, func(name string) bool { return hostMatchesDomain(name, "example.com") }, "example.com", time.Now())
+	if err != nil {
+		t.Fatalf("loadCustomCertificates: %v", err)
+	}
+
+	mgr := newTestApexManager(t, "example.com")
+	if err := mgr.AddCustomCertificates(t.Context(), certs); err != nil {
+		t.Fatalf("AddCustomCertificates: %v", err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("custom certificate loading made %d outbound requests, want 0", got)
+	}
+
+	conn, other := net.Pipe()
+	t.Cleanup(func() { conn.Close(); other.Close() })
+	got, err := mgr.PublicTLSConfig().GetCertificate(&tls.ClientHelloInfo{ServerName: "app.example.org", Conn: conn})
+	if err != nil || got == nil || string(got.Certificate[0]) != string(certs[0].cert.Leaf.Raw) {
+		t.Fatalf("custom certificate not served: cert=%v err=%v", got != nil, err)
+	}
+	if got.OCSPStaple != nil {
+		t.Fatal("custom certificate carries an OCSP staple")
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("serving the custom certificate made %d outbound requests, want 0", got)
+	}
+}
+
+func TestConfigForCertKeepsManagedStapling(t *testing.T) {
+	managed, custom := newMagicConfigs()
+	if managed.OCSP.DisableStapling {
+		t.Fatal("managed config has OCSP stapling disabled")
+	}
+	if !custom.OCSP.DisableStapling {
+		t.Fatal("custom config has OCSP stapling enabled")
+	}
+	if got := configForCert(certmagic.Certificate{Tags: []string{customCertTag}}, managed, custom); got != custom {
+		t.Fatal("a custom-tagged certificate is maintained by the managed config")
+	}
+	if got := configForCert(certmagic.Certificate{}, managed, custom); got != managed {
+		t.Fatal("an untagged certificate is maintained by the custom config")
 	}
 }

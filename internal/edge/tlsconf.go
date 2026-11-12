@@ -31,6 +31,7 @@ type TLSManager struct {
 	apexDomain     string
 	wildcardDomain string
 	magic          *certmagic.Config
+	custom         *certmagic.Config
 	caURL          string
 	apexTLSConfig  *tls.Config
 }
@@ -70,12 +71,13 @@ func NewTLSManager(cfg TLSConfig) (*TLSManager, error) {
 		},
 	}
 
-	magic := certmagic.NewDefault()
+	magic, custom := newMagicConfigs()
 
 	m := &TLSManager{
 		apexDomain:     cfg.Domain,
 		wildcardDomain: "*." + cfg.Domain,
 		magic:          magic,
+		custom:         custom,
 		caURL:          caURL,
 	}
 	m.apexTLSConfig = &tls.Config{
@@ -87,6 +89,27 @@ func NewTLSManager(cfg TLSConfig) (*TLSManager, error) {
 		},
 	}
 	return m, nil
+}
+
+func newMagicConfigs() (managed, custom *certmagic.Config) {
+	cache := certmagic.NewCache(certmagic.CacheOptions{
+		GetConfigForCert: func(c certmagic.Certificate) (*certmagic.Config, error) {
+			return configForCert(c, managed, custom), nil
+		},
+		Logger: certmagic.Default.Logger,
+	})
+	managed = certmagic.New(cache, certmagic.Default)
+	unstapled := certmagic.Default
+	unstapled.OCSP.DisableStapling = true
+	custom = certmagic.New(cache, unstapled)
+	return managed, custom
+}
+
+func configForCert(c certmagic.Certificate, managed, custom *certmagic.Config) *certmagic.Config {
+	if c.HasTag(customCertTag) {
+		return custom
+	}
+	return managed
 }
 
 func (m *TLSManager) ManageCerts(ctx context.Context) error {
