@@ -209,6 +209,12 @@ func TestQUICControlSilentUDPHint(t *testing.T) {
 	}
 }
 
+func TestQUICDialTimeoutCoversTwoHandshakeWaits(t *testing.T) {
+	if quicDialTimeout != 20*time.Second {
+		t.Fatalf("quicDialTimeout = %v, want 20s so that a blackholed first address still leaves a full 10 s handshake wait for the second", quicDialTimeout)
+	}
+}
+
 func TestQUICDialErrorHint(t *testing.T) {
 	const addr = "edge.example.com:4443"
 	hint := "no answer from " + addr + " over UDP"

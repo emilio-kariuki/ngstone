@@ -17,7 +17,10 @@ import (
 	"ngstone/internal/tunnel"
 )
 
-const tlsHandshakeTimeout = 10 * time.Second
+const (
+	tlsHandshakeTimeout = 10 * time.Second
+	quicDialTimeout     = 20 * time.Second
+)
 
 // tlsServerName picks the name the edge's certificate is verified against:
 // the explicit override when set, otherwise the host part of the control
@@ -114,7 +117,7 @@ func dialQUICControl(ctx context.Context, cfg Config) (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	dctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
+	dctx, cancel := context.WithTimeout(ctx, quicDialTimeout)
 	defer cancel()
 	conn, err := tunnel.DialQUIC(dctx, cfg.ControlAddr, tlsCfg)
 	if err != nil {
