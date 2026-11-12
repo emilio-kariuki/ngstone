@@ -296,5 +296,5 @@ func (s *Server) admitForwardedControl(ctx context.Context, pc net.Conn) {
 		return
 	}
 	metricPeerAcceptedConns.Add(1)
-	s.handleControlConnTransport(ctx, pc, release, controlTransport{forwarded: true, leave: leave})
+	s.handleControlConnTransport(ctx, pc, release, controlTransport{forwarded: true, leave: leave, name: "peer"})
 }

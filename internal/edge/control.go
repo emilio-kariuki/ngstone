@@ -279,7 +279,7 @@ func (s *Server) serveControl(ctx context.Context, ln net.Listener) error {
 }
 
 func (s *Server) handleControlConn(ctx context.Context, conn net.Conn, releaseUnauth, leave func()) {
-	s.handleControlConnTransport(ctx, conn, releaseUnauth, controlTransport{tls: s.tlsMgr != nil, leave: leave})
+	s.handleControlConnTransport(ctx, conn, releaseUnauth, controlTransport{tls: s.tlsMgr != nil, leave: leave, name: "tcp"})
 }
 
 type controlTransport struct {
@@ -287,6 +287,7 @@ type controlTransport struct {
 	forwarded bool
 	leave     func()
 	deadline  time.Time
+	name      string
 }
 
 func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, releaseUnauth func(), tr controlTransport) {
@@ -348,6 +349,7 @@ func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, 
 		return
 	}
 	releaseUnauth()
+	slog.Info("edge: auth attempt", "ip", ip, "result", "ok", "transport", tr.name, "scope", as.Scope, "instance_id", as.InstanceID, "session_id", as.ID)
 
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		sess.Close("clear read deadline failed")
@@ -489,7 +491,6 @@ func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip strin
 		return nil, err
 	}
 
-	slog.Info("edge: auth attempt", "ip", ip, "result", "ok", "scope", scope, "instance_id", auth.InstanceID, "session_id", as.ID)
 	s.recordEvent("info", "agent authenticated", map[string]string{
 		"session_id":  as.ID,
 		"instance_id": as.InstanceID,

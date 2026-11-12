@@ -183,8 +183,7 @@ func (s *Server) handleQUICConn(ctx context.Context, qc *quic.Conn, adm *quicAdm
 		slog.Warn("edge: quic control stream failed", "ip", quicRemoteIP(qc), "err", err)
 		return
 	}
-	slog.Info("edge: quic control stream accepted", "ip", quicRemoteIP(qc))
-	s.handleControlConnTransport(ctx, nc, adm.authenticated, controlTransport{leave: leave, deadline: adm.deadline})
+	s.handleControlConnTransport(ctx, nc, adm.authenticated, controlTransport{leave: leave, deadline: adm.deadline, name: "quic"})
 	adm.releaseUnauth()
 	nc.Close()
 	t := time.NewTimer(quicConnCloseWait)

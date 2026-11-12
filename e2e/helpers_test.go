@@ -30,7 +30,7 @@ func mustSHA256(s string) []byte {
 	return sum[:]
 }
 
-const quicStreamMarker = "edge: quic control stream accepted"
+const quicStreamMarker = "result=ok transport=quic"
 
 var (
 	quicControl       bool
@@ -58,7 +58,7 @@ func useQUIC(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 		}
 		if got := strings.Count(quicEdgeLog.String(), quicStreamMarker); got < want {
-			t.Errorf("edge accepted %d QUIC control streams for %d agents started in QUIC mode", got, want)
+			t.Errorf("edge authenticated %d QUIC control sessions for %d agents started in QUIC mode", got, want)
 		}
 	})
 }
