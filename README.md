@@ -898,7 +898,10 @@ link (`ngstone share postgres redis:6380`), and connectors can name
 themselves (`--as alice`). From any terminal with the token, `ngstone
 shares` lists live shares (`--watch` tails their events), `ngstone extend`
 moves an expiry, `ngstone kick` drops a connector and `ngstone unshare`
-revokes. The full design is in [docs/SHARE-DESIGN.md](docs/SHARE-DESIGN.md).
+revokes. With several edges sharing a database, `shares`, `extend` and `kick`
+reach every edge holding your shares: the listing has an `EDGE` column and
+names any edge that did not answer within 3 seconds, and `approve` and
+`--watch` work only on the edge holding the share. The full design is in [docs/SHARE-DESIGN.md](docs/SHARE-DESIGN.md).
 
 ## Run it locally, no TLS
 

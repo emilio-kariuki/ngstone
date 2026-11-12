@@ -353,10 +353,11 @@ connection reaching an edge without the connector is forwarded in one hop:
    down. Lookups are coalesced per hostname, and a global cap bounds the
    concurrent database queries, not the waiters.
 3. It dials the owner over TLS 1.3 with mutual authentication, ALPN
-   `ngstone-peer-2` (or `ngstone-peer-1`), no session resumption, and the
+   `ngstone-peer-3` (or `ngstone-peer-2`, `ngstone-peer-1`), no session resumption, and the
    peer's certificate pinned to the SPKI hash stored in `edge_peers`.
-4. It writes, in one write, the frame: for `ngstone-peer-2` a type byte
-   (`0x01` SNI, `0x02` TCP followed by a big-endian port, `0x03` control), then
+4. It writes, in one write, the frame: for `ngstone-peer-2` and `ngstone-peer-3` a type byte
+   (`0x01` SNI, `0x02` TCP followed by a big-endian port, `0x03` control, and on
+   peer-3 only `0x04` admin), then
    a PROXY v1 line carrying the real client address, then the buffered
    ClientHello. `ngstone-peer-1` omits the type byte and carries SNI
    connections only.
@@ -372,6 +373,30 @@ configured for, and closes on any other type. Peer-1
 remains accepted so edges can be upgraded one at a time: an ingress that
 would need a peer-2 frame skips a peer-1 owner without marking it down and
 counts it in `ngstoned_peer_version_skew_total`.
+
+Peer-3 adds the admin frame (`0x04`, a PROXY v1 line carrying the operator's
+real address and an empty payload), used to manage a share held by another
+edge. After the accept status both sides run yamux, and the ingress is the
+yamux client: it sends `auth` with the operator's token, then exactly one
+request (`share_update`, `kick` or `list_shares`), reads the reply and says
+goodbye. The holder authenticates the token itself as a normal operator
+session, accepts token authentication only (an `auth` carrying a share secret
+is malformed), keys its auth rate limiter on the operator address from the
+PROXY line, and flags the session so that only `share_update`, `kick`,
+`list_shares`, `ping`, `pong` and `goodbye` are served and nothing is forwarded
+again. A peer-2 owner never receives a 0x04 frame and closes one without a
+status byte if it ever does.
+
+| Ingress | Owner | Behaviour |
+|---|---|---|
+| peer-3 | peer-3 | Admin frames work. |
+| peer-3 | peer-2 or peer-1 | The ingress does not send an admin frame, counts it in `ngstoned_peer_version_skew_total`, and tells the operator the holder "runs an older ngstoned". A list shows the edge as not answering. |
+| peer-2 or peer-1 | peer-3 | The owner negotiates the lower protocol; SNI, TCP and control frames work as before and no admin frames are sent. |
+
+An admin call has a 3 second budget in total. A list asks at most 32 edges, 4
+at a time, and reports the edges that missed the budget. The ingress edge holds
+the operator's token in memory for the life of the operator session, only for
+the legacy token or a `share` credential, and never logs it.
 
 Two 421 rules apply when forwarding is enabled: a route miss on a forwarded
 connection, and a route miss on a TLS connection whose SNI differs from the

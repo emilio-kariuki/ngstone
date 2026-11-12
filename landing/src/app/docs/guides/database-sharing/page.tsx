@@ -286,7 +286,9 @@ y alice
           <strong>Revocation.</strong> Ctrl-C on the sharer, or{" "}
           <code>ngstone unshare</code> from anywhere, tells every connector{" "}
           <code>revoked</code>. <code>kick</code> does the same for one
-          connector. Same exit codes as expiry.
+          connector, and <code>extend</code>, <code>kick</code> and{" "}
+          <code>shares</code> reach shares held by any edge in a multi-edge
+          deployment. Same exit codes as expiry.
         </li>
         <li>
           <strong>Idle.</strong> With <code>--idle</code>, a share with no

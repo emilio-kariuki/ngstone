@@ -1094,6 +1094,16 @@ $ ngstone unshare sh_7f3a...     # revoke`}
         terminal says <code>share revoked by another terminal</code> and
         exits 0.
       </p>
+      <p>
+        With several edges sharing a database, <code>shares</code>,{" "}
+        <code>extend</code> and <code>kick</code> act on every edge that
+        holds your shares, whichever edge you reach. <code>shares</code> adds
+        an <code>EDGE</code> column and names any edge that did not answer
+        within 3 seconds; it asks at most 32 edges. An edge running an older
+        ngstoned answers <code>share_not_found</code> saying so.{" "}
+        <code>--watch</code> and approvals work only on the edge holding the
+        share.
+      </p>
 
       <Anchor id="ngstone-config">ngstone config</Anchor>
       <p>Read or change the local config file without hand-editing JSON.</p>
