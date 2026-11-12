@@ -97,6 +97,31 @@ func doctorAdminEndpointMust(raw, path string, allowInsecure bool) string {
 	return value
 }
 
+func TestDoctorEndpointHintsAtUDPWhenQUICDialRunsOutOfTime(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	addr := pc.LocalAddr().String()
+	opts := doctorOptions{
+		Transport: "quic",
+		Timeout:   300 * time.Millisecond,
+		Insecure:  true,
+		LookupHost: func(context.Context, string) ([]string, error) {
+			return []string{"127.0.0.1"}, nil
+		},
+		DialQUIC: agent.DialQUICControl,
+	}
+	check := checkDoctorEndpoint(opts, addr)
+	if check.Status != doctorFail || check.Name != "control.network" {
+		t.Fatalf("check = %+v", check)
+	}
+	if !strings.Contains(check.Message, "no answer from "+addr+" over UDP") || !strings.Contains(check.Message, "-quic") {
+		t.Fatalf("doctor message lacks the UDP hint: %q", check.Message)
+	}
+}
+
 func TestDoctorEndpointProbesOverQUICWhenTransportIsQUIC(t *testing.T) {
 	var quicCfg agent.Config
 	quicCalls := 0

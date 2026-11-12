@@ -118,14 +118,18 @@ func dialQUICControl(ctx context.Context, cfg Config) (net.Conn, error) {
 	defer cancel()
 	conn, err := tunnel.DialQUIC(dctx, cfg.ControlAddr, tlsCfg)
 	if err != nil {
-		var idle *quic.IdleTimeoutError
-		var hs *quic.HandshakeTimeoutError
-		if errors.As(err, &idle) || errors.As(err, &hs) {
-			return nil, fmt.Errorf("agent: quic control: no answer from %s over UDP; the edge must run with -quic and UDP must be reachable: %w", cfg.ControlAddr, err)
-		}
-		return nil, fmt.Errorf("agent: quic control: %w", err)
+		return nil, quicDialError(cfg.ControlAddr, err)
 	}
 	return conn, nil
+}
+
+func quicDialError(addr string, err error) error {
+	var idle *quic.IdleTimeoutError
+	var hs *quic.HandshakeTimeoutError
+	if errors.As(err, &idle) || errors.As(err, &hs) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("agent: quic control: no answer from %s over UDP; the edge must run with -quic and UDP must be reachable: %w", addr, err)
+	}
+	return fmt.Errorf("agent: quic control: %w", err)
 }
 
 func parsePin(s string) ([sha256.Size]byte, error) {

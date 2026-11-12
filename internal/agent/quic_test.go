@@ -6,6 +6,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -204,6 +206,35 @@ func TestQUICControlSilentUDPHint(t *testing.T) {
 	}
 	if time.Since(start) > 8*time.Second {
 		t.Fatalf("silent UDP took %v to fail", time.Since(start))
+	}
+}
+
+func TestQUICDialErrorHint(t *testing.T) {
+	const addr = "edge.example.com:4443"
+	hint := "no answer from " + addr + " over UDP"
+	unrelated := errors.New("certificate rejected")
+	cases := []struct {
+		name     string
+		err      error
+		wantHint bool
+	}{
+		{"idle timeout", &quic.IdleTimeoutError{}, true},
+		{"handshake timeout", &quic.HandshakeTimeoutError{}, true},
+		{"deadline exceeded", context.DeadlineExceeded, true},
+		{"wrapped deadline exceeded", fmt.Errorf("dial: %w", context.DeadlineExceeded), true},
+		{"joined idle timeout", errors.Join(unrelated, &quic.IdleTimeoutError{}), true},
+		{"joined deadline exceeded", errors.Join(unrelated, context.DeadlineExceeded), true},
+		{"unrelated", unrelated, false},
+		{"canceled", context.Canceled, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := quicDialError(addr, tc.err)
+			has := strings.Contains(got.Error(), hint) && strings.Contains(got.Error(), "-quic")
+			if has != tc.wantHint {
+				t.Fatalf("error = %q, hint present = %v, want %v", got, has, tc.wantHint)
+			}
+		})
 	}
 }
 
