@@ -199,7 +199,17 @@ export default function LimitsTimeoutsPage() {
           Guards against an unauthenticated handshake flood.
         </Property>
         <Property name=":4443 unauthenticated sessions" type="int" defaultValue="32">
-          Guards against slow-auth session hoarding.
+          Guards against slow-auth session hoarding. QUIC connections share
+          both caps with TCP.
+        </Property>
+        <Property name="QUIC handshake idle timeout" type="duration" defaultValue="5s">
+          Applies only with <code>-quic</code>. A QUIC handshake that stalls
+          is dropped.
+        </Property>
+        <Property name="QUIC max idle timeout" type="duration" defaultValue="60s">
+          Applies only with <code>-quic</code>. QUIC keepalive is off, so a
+          peer killed without a clean close is noticed only when this
+          expires.
         </Property>
       </ParamTable>
     </DocsArticle>

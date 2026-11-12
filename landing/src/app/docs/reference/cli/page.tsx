@@ -114,7 +114,9 @@ verified against ngstone.site:4443 and saved`} />
           Control transport. <code>auto</code> tries raw TLS first and falls
           back to the authenticated WebSocket endpoint on HTTPS port{" "}
           <code>443</code>; use <code>raw</code> or{" "}
-          <code>websocket</code> to force one path.
+          <code>websocket</code> to force one path. <code>quic</code> carries
+          the session over UDP to an edge started with <code>-quic</code>; it
+          is never part of <code>auto</code> and never falls back.
         </Property>
         <Property name="--insecure" type="bool" defaultValue="false">
           Dial the control plane in plaintext. Dev/test only — no
@@ -196,7 +198,8 @@ $ ngstone doctor --json`}
         </Property>
         <Property name="--transport" type="string" defaultValue="auto">
           Control transport to validate and use for authentication:
-          <code>auto</code>, <code>raw</code>, or <code>websocket</code>.
+          <code>auto</code>, <code>raw</code>, <code>websocket</code>, or{" "}
+          <code>quic</code>.
         </Property>
         <Property name="--admin-server" type="string">
           Optional management API URL. HTTPS is required outside loopback
@@ -587,7 +590,9 @@ $ ngstone port 3000 --subdomain demo --multi-connector`}
           Control transport. <code>auto</code> tries raw TLS first and falls
           back to the authenticated WebSocket endpoint on HTTPS port{" "}
           <code>443</code>; use <code>raw</code> or{" "}
-          <code>websocket</code> to force one path.
+          <code>websocket</code> to force one path. <code>quic</code> carries
+          the session over UDP to an edge started with <code>-quic</code>; it
+          is never part of <code>auto</code> and never falls back.
         </Property>
         <Property name="--token" type="string">
           Auth token override. Defaults to <code>NGSTONE_TOKEN</code> or the
@@ -707,7 +712,8 @@ $ ngstone tcp db.local:5432 --remote-port 15432`}
         <Property name="--transport" type="string" defaultValue="auto">
           Control transport. <code>auto</code> tries raw TLS first and falls
           back to the authenticated WebSocket endpoint on HTTPS port{" "}
-          <code>443</code>.
+          <code>443</code>. <code>quic</code> needs an edge started with{" "}
+          <code>-quic</code> and is never part of <code>auto</code>.
         </Property>
         <Property name="--token" type="string">
           Auth token override. Defaults to <code>NGSTONE_TOKEN</code> or the

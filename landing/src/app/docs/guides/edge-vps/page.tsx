@@ -108,6 +108,15 @@ $ sudo ./deploy/install-edge.sh \\
           and <code>--tcp-ports off</code> removes it. It must lie within{" "}
           <code>1024-65535</code> and must not include <code>4443</code>.
         </Property>
+        <Property name="--quic" type="on|off" defaultValue="off">
+          Run <code>ngstoned</code> with <code>-quic</code> so agents can use{" "}
+          <code>--transport quic</code>. Opens <code>4443/udp</code> in UFW
+          and writes <code>/etc/sysctl.d/99-ngstone-quic.conf</code> with
+          larger UDP socket buffers (<code>net.core.rmem_max</code> and{" "}
+          <code>net.core.wmem_max</code> of <code>7500000</code>). A rerun
+          keeps the current value; <code>off</code> removes the flag, the
+          rule and the file.
+        </Property>
         <Property name="--from-source" type="bool">
           Build <code>ngstoned</code> from the checkout with Go instead of
           downloading a release. Needed for providers other than Cloudflare
@@ -156,8 +165,9 @@ $ sudo ./deploy/install-edge.sh \\
       />
       <Callout variant="warning" title="SSH access is kept">
         The firewall option removes matching allow rules for only{" "}
-        <code>80/tcp</code>, <code>443/tcp</code>, <code>4443/tcp</code>,
-        and the TCP tunnel range if one is configured.
+        <code>80/tcp</code>, <code>443/tcp</code>, <code>4443/tcp</code>,{" "}
+        <code>4443/udp</code> if QUIC was enabled, and the TCP tunnel range
+        if one is configured.
         SSH rules and the source checkout are left in place. If another
         service uses the same allow rule, review it before selecting this
         option. Use <code>--yes</code> only for a deliberate non-interactive
@@ -275,7 +285,9 @@ $ docker compose logs -f ngstoned`}
         <code>--transport auto</code> can fall back to the authenticated
         WebSocket control endpoint on HTTPS <code>:443</code> when WebSockets
         are enabled. Use DNS-only records when forcing{" "}
-        <code>--transport raw</code> or when you want the simplest path.
+        <code>--transport raw</code> or when you want the simplest path.{" "}
+        <code>--transport quic</code> needs UDP on <code>4443</code> and
+        cannot pass through the proxy.
       </Callout>
 
       <Anchor id="dns-provider">Choosing a DNS provider</Anchor>
@@ -645,6 +657,11 @@ $ systemctl status ngstoned`}
           Raw control plane. Must be reachable from wherever agents run when
           using <code>--transport raw</code>; <code>--transport auto</code>{" "}
           can fall back through the public <code>:443</code> WebSocket path.
+        </Property>
+        <Property name="-quic" type="bool" defaultValue="false">
+          Also accept agent control connections over QUIC on UDP at the{" "}
+          <code>-control</code> address. Open <code>4443/udp</code>; agents
+          opt in with <code>--transport quic</code>.
         </Property>
         <Property name="-http" type="string" defaultValue=":80">
           Plain HTTP, which only issues <code>301</code> redirects to HTTPS.

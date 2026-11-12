@@ -34,6 +34,15 @@ range in UFW (`--tcp-ports off` removes it), and `--from-source` builds
 release that predates a provider cannot use it; the installer checks this
 before replacing the installed binary.
 
+`--quic on` runs `ngstoned` with `-quic`, so agents can use
+`--transport quic` over UDP on the control port. It opens `4443/udp` in UFW and
+writes `/etc/sysctl.d/99-ngstone-quic.conf` (`net.core.rmem_max` and
+`net.core.wmem_max` of 7500000) so QUIC can use larger UDP socket buffers.
+`--quic off` (the default) removes the `-quic` flag, the UFW rule and that
+file; leaving the option out keeps the current setting. After `kill -9` of one
+side, QUIC detects the dead peer only after its 60 s idle timeout, about 55 to
+60 s, against about 45 s over TCP.
+
 For a disposable VPS, the same installer can be fetched directly after
 reviewing the script:
 
@@ -56,7 +65,8 @@ the Compose plugin. The [DNS records](#dns-records) and
 [provider credentials](#dns-provider-credentials) are the same as for the
 systemd install, and the host's firewall must allow `80`, `443` and `4443`
 (plus any TCP tunnel range). The installer's UFW and DNS checks do not run,
-so do those yourself.
+so do those yourself. QUIC is not enabled in the Compose file; to use it, add
+`-quic` to the command and publish `4443/udp` as well.
 
 Copy [`docker/compose.yaml`](docker/compose.yaml) and
 [`docker/.env.example`](docker/.env.example) into a directory on the host,
@@ -170,8 +180,9 @@ sudo ./deploy/uninstall.sh --remove-state --remove-firewall-rules
 ```
 
 `--remove-firewall-rules` removes matching allow rules for only `80/tcp`,
-`443/tcp`, `4443/tcp` and the TCP tunnel range, if one was configured; it
-leaves SSH rules alone. If another service
+`443/tcp`, `4443/tcp`, `4443/udp` if QUIC was enabled, and the TCP tunnel
+range, if one was configured; it leaves SSH rules alone. The uninstaller also
+removes `/etc/sysctl.d/99-ngstone-quic.conf`. If another service
 uses the same allow rule, review it before selecting this option. The source
 checkout is never removed. Use `--yes` only when running the uninstall
 non-interactively.
@@ -190,7 +201,9 @@ The agent's default `--transport auto` first uses the raw control listener on
 `:4443`, then falls back to the authenticated WebSocket control endpoint on
 HTTPS `:443`. A proxied Cloudflare record can therefore support the fallback
 when WebSockets are enabled, but DNS-only records remain the least surprising
-setup and are required when forcing `--transport raw`.
+setup and are required when forcing `--transport raw`. `--transport quic` is
+separate: it is never tried by `auto`, needs `4443/udp` and the edge's `-quic`,
+and cannot go through a proxied record.
 
 ## DNS provider credentials
 

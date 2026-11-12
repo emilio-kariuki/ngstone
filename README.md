@@ -1162,6 +1162,10 @@ endpoint on HTTPS `:443`, which can traverse a proxy when WebSockets are
 enabled. Keeping both records DNS-only remains the simplest deployment and
 also supports explicit `--transport raw`.
 
+QUIC is an opt-in transport: run the edge with `-quic` and the agent with
+`--transport quic`. It needs UDP on the control port (`4443/udp`) and does not
+pass through Cloudflare's proxy.
+
 To remove the edge later, run `sudo ./deploy/uninstall.sh` from the checkout.
 It removes the service, binaries, and secrets while preserving certificates
 and default SQLite control-plane state. See
@@ -1206,7 +1210,8 @@ connections, so there's nothing to open on your home firewall or NAT. By
 default it tries one TLS yamux connection to `:4443`, then falls back to the
 same yamux session inside an authenticated WebSocket upgrade at
 `/_ngstone/control` on `:443`. Use `--transport raw` or
-`--transport websocket` to force one path. Every proxied HTTP request gets its
+`--transport websocket` to force one path, or `--transport quic` (with the
+edge's `-quic`) to carry the same session over one QUIC stream on UDP. Every proxied HTTP request gets its
 own yamux stream inside the selected session, opened by the edge and read by
 the agent. A `tls` tunnel's connections are routed by ClientHello SNI before
 the edge terminates TLS and ride their stream as raw bytes. Certificates for both the apex and the wildcard are issued and
@@ -1220,8 +1225,24 @@ The default `--transport auto` tries raw TCP/TLS on the configured control
 address first, then retries the same agent session over WebSocket/TLS on port
 443. In insecure development mode the fallback uses plain WebSocket on port
 443. `--transport raw` and `--transport websocket` are available when an
-operator needs a deterministic path; QUIC is intentionally reserved for a
-later transport mode.
+operator needs a deterministic path.
+
+`--transport quic` is never part of `auto` and never falls back to another
+transport. The edge must run with `-quic`; it then listens on UDP at the same
+address and port as `-control` and runs the same yamux session over a single
+bidirectional QUIC stream. Every QUIC connection goes through address
+validation (Retry) before the edge spends handshake work on it. The edge
+serves its managed apex certificate, or an ephemeral self-signed certificate
+in insecure mode; a caller-supplied public TLS config is rejected with
+`-quic`. A handshake that gets no answer times out after 5 s, with a
+hint to check that the edge runs with `-quic` and that UDP is reachable.
+
+QUIC has no peer-death signal like a TCP reset: after `kill -9` of one side,
+the other notices only when the connection's 60 s idle timeout expires
+(measured 55 to 59 s), against about 45 s of control pings on TCP. Graceful
+shutdown is unaffected. `--transport quic` is a flag of the root form, `port`,
+`tcp`, `tls`, `start` and `doctor`; `share`, `connect` and the operator
+commands do not take it.
 
 Reconnects use decorrelated exponential jitter from 500 ms to a 30 s cap.
 The edge and agent exchange control pings, skip connectors that have exceeded

@@ -88,8 +88,16 @@ export default function ReconnectionTakeoverPage() {
         falls back to an authenticated WebSocket carrying the same yamux
         session through <code>/_ngstone/control</code> on HTTPS{" "}
         <code>:443</code>. Use <code>--transport raw</code> or{" "}
-        <code>--transport websocket</code> to force a path. QUIC is reserved
-        for a later transport mode.
+        <code>--transport websocket</code> to force a path.
+      </p>
+      <p>
+        <code>--transport quic</code> is opt-in: start the edge with{" "}
+        <code>-quic</code> and open <code>4443/udp</code>. The same yamux
+        session runs over one bidirectional QUIC stream, every connection is
+        address-validated with Retry, and the agent never falls back to
+        another transport. QUIC gives no reset when a peer is killed with{" "}
+        <code>kill -9</code>, so the surviving side notices only when the 60 s
+        idle timeout expires, measured at 55 to 59 s.
       </p>
 
       <Anchor id="reconnect-backoff">Reconnect backoff</Anchor>
