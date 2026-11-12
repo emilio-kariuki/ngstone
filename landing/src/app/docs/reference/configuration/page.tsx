@@ -284,6 +284,8 @@ export default function ConfigurationPage() {
           <code>StateDirectory</code>.
         </Property>
         <Property name="-custom-certs" type="string">
+          Optional. Operator certificates for active custom domains; they
+          take precedence over certificates the edge obtains automatically.
           Directory of <code>&lt;name&gt;.crt</code> and{" "}
           <code>&lt;name&gt;.key</code> pairs served for active custom
           domains. Keys must be mode <code>0600</code>. Needs durable

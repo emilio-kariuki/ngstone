@@ -336,10 +336,9 @@ POST   /api/v1/tunnels/{hostname}/drain`}
           Register a custom domain for an HTTP or TLS tunnel with{" "}
           <code>add --domain NAME --tunnel-id ID</code>; it stays{" "}
           <code>pending</code> and serves nothing. <code>activate</code> and{" "}
-          <code>disable</code> need the administrator role. The edge also
-          needs a certificate for the name in its <code>-custom-certs</code>{" "}
-          directory (HTTP tunnels); see <code>deploy/README.md</code>,
-          Custom domains.
+          <code>disable</code> need the administrator role. For HTTP tunnels
+          the edge obtains a certificate automatically, or uses one from{" "}
+          <code>-custom-certs</code>; see the README, Custom domains.
         </Property>
         <Property name="credentials issue" type="subcommand">
           Issue a scoped HTTP, TCP, or TLS credential. Use <code>--kind tcp</code>{" "}

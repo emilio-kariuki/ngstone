@@ -160,6 +160,7 @@ Requirements:
 - Each edge needs its own certificate for the same domain and wildcard.
   Issuing a certificate per edge can hit the ACME duplicate-certificate rate
   limit, so share certificate storage or use one certificate on every edge.
+  The same applies to automatic custom-domain certificates.
 - Visitor-login settings (`NGSTONE_VISITOR_OIDC_*`), including
   `NGSTONE_VISITOR_OIDC_COOKIE_SECRET`, must be identical on every edge.
 
@@ -592,8 +593,9 @@ private.
 
 An HTTP or TLS tunnel can also answer on a name you own, such as
 `app.example.org`, in addition to its `subdomain.example.com` name. Custom
-domains need durable storage and a certificate you provide; ngstone does not
-obtain one for you. Raw TCP tunnels are addressed by port, not by name.
+domains need durable storage. For an HTTP tunnel the edge obtains a
+certificate from its ACME CA (`-acme-ca`) on the first visit, unless you
+provide one. Raw TCP tunnels are addressed by port, not by name.
 
 1. Register the name for an existing tunnel. It starts as `pending` and
    serves nothing:
@@ -603,12 +605,15 @@ obtain one for you. Raw TCP tunnels are addressed by port, not by name.
    ```
 
 2. Point the name's DNS at every edge (A or AAAA records).
-3. For an HTTP tunnel, obtain a certificate for the name yourself and put
+3. For an HTTP tunnel, nothing to do: the edge that holds the tunnel obtains
+   a certificate with the TLS-ALPN-01 challenge on the first HTTPS request, so
+   port 443 on every edge must be reachable from the internet without a
+   TLS-terminating proxy. To use your own certificate instead, put
    `<name>.crt` and `<name>.key` in the directory given to `ngstoned
-   -custom-certs` (or `NGSTONE_CUSTOM_CERTS_DIR`) on **every** edge. Keys must
-   not be group or world readable (mode `0600`). Restart the edges one at a
-   time. A TLS tunnel needs no edge certificate: its local service presents
-   the certificate for the custom name.
+   -custom-certs` (or `NGSTONE_CUSTOM_CERTS_DIR`) on every edge (mode
+   `0600`) and restart the edges one at a time; it takes precedence. A TLS
+   tunnel needs no edge certificate: its local service presents the
+   certificate for the custom name.
 4. An administrator verifies outside ngstone that the requester controls the
    name, then runs `ngstone admin domains activate <id>`.
 5. Test with `curl https://app.example.org/`. `ngstone admin domains disable
@@ -619,10 +624,30 @@ disabling are administrator-only.
 
 Limits:
 
-- No automatic certificates; you renew them and restart the edges.
+- Automatic certificates use the TLS-ALPN-01 challenge only; the edge must
+  receive TLS on port 443 directly.
+- The first HTTPS request to a new domain waits for issuance; if that takes
+  longer than the read-header timeout (10 s default) that request fails and
+  the next one succeeds. A failed first issuance holds that request for about
+  a minute before it fails.
+- A failed issuance is retried no sooner than 15 minutes later for that name,
+  and at most about 30 new certificates are ordered per hour per edge (burst
+  20); renewals are not counted.
+- With several edges, only the edge that holds the tunnel obtains a
+  certificate; the others forward the visitor. Edges that do not share
+  `-cert-storage` each obtain their own certificate, which counts against the
+  CA's duplicate-certificate limit. A tunnel connected to several edges at
+  once needs shared certificate storage, or validation can fail. Multi-edge
+  automatic certificates need peering (`-peer-addr`): without it every edge
+  tries to issue.
+- With peering, a domain whose tunnel is offline fails the TLS handshake
+  unless an operator certificate covers it.
+- Disabling or deleting a domain stops its certificate from being presented
+  within one poll interval and stops renewal. The certificate files stay in
+  `-cert-storage`; ngstone does not revoke or delete them.
 - No ownership verification. Activation is the trust decision.
-- Certificates are per edge and are read at start-up, so a change needs a
-  restart. An expired, unreadable, mismatched or unsafely permissioned
+- Operator certificates are per edge and are read at start-up, so a change
+  needs a restart. An expired, unreadable, mismatched or unsafely permissioned
   certificate stops the edge from starting, before certificate management
   begins.
 - A tunnel that requires visitor sign-in (`--oidc`) answers 403 on its custom
@@ -643,12 +668,13 @@ Limits:
 - Any operator can register a name, with or without a tunnel, and leave it
   `pending`. The real owner then gets a conflict until an administrator
   deletes that row.
-- An active custom domain for an HTTP tunnel with no certificate in the
-  `-custom-certs` directory fails the TLS handshake; there is no default
-  certificate.
+- An active custom domain for an HTTP tunnel with no operator certificate is
+  served with an automatic certificate; until one is issued the TLS handshake
+  fails.
 - A certificate's common name must be empty or equal to one of its DNS names,
   and it must not carry IP, e-mail or URI names. OCSP stapling is not done
-  for these certificates.
+  for these certificates. OCSP stapling is not disabled for automatic
+  certificates.
 - Register internationalised names in `xn--` form.
 - No `Strict-Transport-Security` header is set on custom domains.
 
