@@ -107,7 +107,7 @@ func dialTCPFrame(t *testing.T, from, to *peerEdge, port int, src string) *tls.C
 func TestAcceptForwardedUnknownPortRefused(t *testing.T) {
 	fx := newTCPFixture(t, echoHandler)
 	defer fx.cleanup()
-	bound, err := fx.mgr.bind(fx.as, 20001, "example.com", nil)
+	bound, _, err := fx.mgr.bind(fx.as, 20001, "example.com", nil, false)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestAcceptForwardedAllowCIDRUsesProxySource(t *testing.T) {
 	a, _ := pc.tcpEdge(t, "edge-a", "127.0.0.1")
 	b, rec := pc.tcpEdge(t, "edge-b", "127.0.0.1")
 	registerPeers(t, a, b)
-	port, err := rec.fx.mgr.bind(rec.fx.as, 0, "example.com", []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")})
+	port, _, err := rec.fx.mgr.bind(rec.fx.as, 0, "example.com", []netip.Prefix{netip.MustParsePrefix("203.0.113.0/24")}, false)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestPeerTCPPortOutOfRangeRefused(t *testing.T) {
 		mgr.mu.Unlock()
 		go mgr.acceptLoop(tt)
 	}
-	inside, err := mgr.bind(rec.fx.as, 0, "example.com", nil)
+	inside, _, err := mgr.bind(rec.fx.as, 0, "example.com", nil, false)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -348,7 +348,7 @@ func TestRequestedBindYieldsRemoteListener(t *testing.T) {
 	if _, ok := fx.mgr.remote[20007]; !ok {
 		t.Fatal("remote listener did not open")
 	}
-	port, err := fx.mgr.bind(fx.as, 20007, "example.com", nil)
+	port, _, err := fx.mgr.bind(fx.as, 20007, "example.com", nil, false)
 	if err != nil || port != 20007 {
 		t.Fatalf("bind = %d, %v; want the requested port", port, err)
 	}
@@ -387,7 +387,7 @@ func TestAutoAllocSkipsRemote(t *testing.T) {
 		fx.mgr.mu.Unlock()
 	})
 
-	port, err := fx.mgr.bind(fx.as, 0, "example.com", nil)
+	port, _, err := fx.mgr.bind(fx.as, 0, "example.com", nil, false)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}
@@ -547,7 +547,7 @@ func TestForwardTCPSplicesToOwner(t *testing.T) {
 	a, _ := pc.tcpEdge(t, "edge-a", "::1")
 	b, rec := pc.tcpEdge(t, "edge-b", "127.0.0.1")
 	registerPeers(t, a, b)
-	port, err := rec.fx.mgr.bind(rec.fx.as, 0, "example.com", nil)
+	port, _, err := rec.fx.mgr.bind(rec.fx.as, 0, "example.com", nil, false)
 	if err != nil {
 		t.Fatalf("bind: %v", err)
 	}

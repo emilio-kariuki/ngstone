@@ -535,13 +535,7 @@ func (s *Server) bindTLSHost(as *AgentSession, bind proto.Bind, hostname string,
 }
 
 func (s *Server) finishBindTLS(as *AgentSession, ctrl *proto.Conn, id uint64, hostname string, evicted *AgentSession) {
-	if evicted != nil {
-		evicted.Sess.Control().Write(proto.TypeEvicted, evicted.IDGen.Next(), proto.Evicted{
-			Hostname: hostname,
-			Reason:   "takeover",
-		})
-		evicted.Sess.Close("takeover")
-	}
+	evict(evicted, hostname)
 	ctrl.Write(proto.TypeBindOK, id, proto.BindOK{
 		Hostname: hostname,
 		URL:      tlsTunnelURL(hostname, s.cfg.PublicAddr),

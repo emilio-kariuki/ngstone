@@ -40,8 +40,12 @@ var (
 )
 
 type tcpConn struct {
-	client net.Conn
-	stream net.Conn
+	client    net.Conn
+	stream    net.Conn
+	session   *AgentSession
+	hostname  string
+	durableID string
+	allow     []netip.Prefix
 }
 
 type tcpTunnel struct {
@@ -295,19 +299,58 @@ func (tm *tcpManager) observabilityTargetsForSession(as *AgentSession) []observa
 	return targets
 }
 
-func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string, allow []netip.Prefix) (int, error) {
+func (tm *tcpManager) claimHeldLocked(as *AgentSession, tt *tcpTunnel, hostname string, allow []netip.Prefix, takeover bool) (*AgentSession, error) {
+	old := tt.session
+	if old == as {
+		tt.hostname = hostname
+		tt.allow = allow
+		return nil, nil
+	}
+	if !sameSessionOwner(old, as) {
+		return nil, errPortUnavailable
+	}
+	if old.InstanceID != as.InstanceID && !(takeover && isSessionDead(old)) {
+		return nil, errPortUnavailable
+	}
+	if len(tm.bySession[as]) >= maxBindsPerSession {
+		metricTCPRejectedBindCap.Add(1)
+		return nil, errTooManyBinds
+	}
+	if ports, ok := tm.bySession[old]; ok {
+		delete(ports, tt.port)
+	}
+	if tm.bySession[as] == nil {
+		tm.bySession[as] = make(map[int]struct{})
+	}
+	tm.bySession[as][tt.port] = struct{}{}
+	tt.session = as
+	tt.hostname = hostname
+	tt.allow = allow
+	tt.boundAt = time.Now()
+	return old, nil
+}
+
+func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string, allow []netip.Prefix, takeover bool) (int, *AgentSession, error) {
 	tm.mu.Lock()
+	if tt, held := tm.byPort[requested]; requested != 0 && held {
+		evicted, err := tm.claimHeldLocked(as, tt, hostname, allow, takeover)
+		tm.mu.Unlock()
+		if err != nil {
+			return 0, nil, err
+		}
+		return requested, evicted, nil
+	}
 	if len(tm.bySession[as]) >= maxBindsPerSession {
 		tm.mu.Unlock()
 		metricTCPRejectedBindCap.Add(1)
-		return 0, errTooManyBinds
+		return 0, nil, errTooManyBinds
 	}
 
 	if requested != 0 {
 		port, err := tm.reserveLocked(requested)
 		if err != nil {
 			tm.mu.Unlock()
-			return 0, err
+			return 0, nil, err
 		}
 
 		tm.closeRemoteLocked(port)
@@ -315,14 +358,14 @@ func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string, all
 		if err != nil {
 			delete(tm.allocated, port)
 			tm.mu.Unlock()
-			return 0, err
+			return 0, nil, err
 		}
 
 		tt := tm.registerTunnelLocked(as, port, hostname, ln, allow)
 		tm.mu.Unlock()
 
 		go tm.acceptLoop(tt)
-		return port, nil
+		return port, nil, nil
 	}
 	tm.mu.Unlock()
 
@@ -368,20 +411,20 @@ func (tm *tcpManager) bind(as *AgentSession, requested int, hostname string, all
 	}
 	if !found {
 		tm.mu.Unlock()
-		return 0, errPortUnavailable
+		return 0, nil, errPortUnavailable
 	}
 	if len(tm.bySession[as]) >= maxBindsPerSession {
 		delete(tm.allocated, port)
 		tm.mu.Unlock()
 		ln.Close()
 		metricTCPRejectedBindCap.Add(1)
-		return 0, errTooManyBinds
+		return 0, nil, errTooManyBinds
 	}
 	tt := tm.registerTunnelLocked(as, port, hostname, ln, allow)
 	tm.mu.Unlock()
 
 	go tm.acceptLoop(tt)
-	return port, nil
+	return port, nil, nil
 }
 
 func (tm *tcpManager) acceptLoop(tt *tcpTunnel) {
@@ -412,7 +455,7 @@ func (tm *tcpManager) acceptLoop(tt *tcpTunnel) {
 		backoff = 5 * time.Millisecond
 
 		tc := tm.admit(tt, c)
-		go tm.serveAdmitted(tt, tc)
+		go tm.serveAdmitted(tc)
 	}
 }
 
@@ -423,31 +466,30 @@ func (tm *tcpManager) admit(tt *tcpTunnel, c net.Conn) *tcpConn {
 }
 
 func (tm *tcpManager) admitLocked(tt *tcpTunnel, c net.Conn) *tcpConn {
-	tc := &tcpConn{client: c}
-	tt.session.inflight.Add(1)
-	tm.registerLocked(tt.session, tc)
+	id, _ := tt.durableID.Load().(string)
+	tc := &tcpConn{client: c, session: tt.session, hostname: tt.hostname, durableID: id, allow: tt.allow}
+	tc.session.inflight.Add(1)
+	tm.registerLocked(tc.session, tc)
 	return tc
 }
 
-func (tm *tcpManager) serveAdmitted(tt *tcpTunnel, tc *tcpConn) {
-	durableID, _ := tt.durableID.Load().(string)
-	tm.handleConn(tt.session, tt.hostname, durableID, tt.allow, tc)
+func (tm *tcpManager) serveAdmitted(tc *tcpConn) {
+	tm.handleConn(tc.session, tc.hostname, tc.durableID, tc.allow, tc)
 }
 
 type forwardedConn struct {
 	tm *tcpManager
-	tt *tcpTunnel
 	tc *tcpConn
 }
 
 func (f *forwardedConn) serve() {
-	f.tm.serveAdmitted(f.tt, f.tc)
+	f.tm.serveAdmitted(f.tc)
 }
 
 func (f *forwardedConn) abort() {
 	f.tc.client.Close()
-	f.tt.session.inflight.Done()
-	f.tm.deregister(f.tt.session, f.tc)
+	f.tc.session.inflight.Done()
+	f.tm.deregister(f.tc.session, f.tc)
 }
 
 func (tm *tcpManager) acceptForwarded(port int, c net.Conn) (*forwardedConn, bool) {
@@ -457,7 +499,7 @@ func (tm *tcpManager) acceptForwarded(port int, c net.Conn) (*forwardedConn, boo
 	if tt == nil {
 		return nil, false
 	}
-	return &forwardedConn{tm: tm, tt: tt, tc: tm.admitLocked(tt, c)}, true
+	return &forwardedConn{tm: tm, tc: tm.admitLocked(tt, c)}, true
 }
 
 func (tm *tcpManager) closeRemoteLocked(port int) {

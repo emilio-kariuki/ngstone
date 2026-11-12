@@ -1114,7 +1114,7 @@ func (s *Server) handleBindTCP(as *AgentSession, ctrl *proto.Conn, id uint64, bi
 			return
 		}
 	}
-	port, err := s.tcpMgr.bind(as, bind.RemotePort, s.cfg.Domain, ac.prefixes())
+	port, evicted, err := s.tcpMgr.bind(as, bind.RemotePort, s.cfg.Domain, ac.prefixes(), bind.Takeover)
 	if err != nil {
 		if lease.ID != "" {
 			s.releaseDurableLease(as, durableLeaseKey("tcp", s.cfg.Domain, bind.RemotePort), lease.ID)
@@ -1148,9 +1148,11 @@ func (s *Server) handleBindTCP(as *AgentSession, ctrl *proto.Conn, id uint64, bi
 	}
 	as.rememberDurableLease(durableLeaseKey("tcp", s.cfg.Domain, port), lease.ID)
 	s.recordLeaseAcquired(as, lease)
+	url := "tcp://" + s.cfg.Domain + ":" + strconv.Itoa(port)
+	evict(evicted, url)
 	ctrl.Write(proto.TypeBindOK, id, proto.BindOK{
 		Hostname: s.cfg.Domain,
-		URL:      "tcp://" + s.cfg.Domain + ":" + strconv.Itoa(port),
+		URL:      url,
 		Port:     port,
 	})
 	s.recordEvent("info", "tcp tunnel bound", map[string]string{
@@ -1172,14 +1174,19 @@ type finishBindOptions struct {
 	OIDC           bool
 }
 
-func (s *Server) finishBind(opts finishBindOptions) {
-	if opts.Evicted != nil {
-		opts.Evicted.Sess.Control().Write(proto.TypeEvicted, opts.Evicted.IDGen.Next(), proto.Evicted{
-			Hostname: opts.Hostname,
-			Reason:   "takeover",
-		})
-		opts.Evicted.Sess.Close("takeover")
+func evict(evicted *AgentSession, hostname string) {
+	if evicted == nil {
+		return
 	}
+	evicted.Sess.Control().Write(proto.TypeEvicted, evicted.IDGen.Next(), proto.Evicted{
+		Hostname: hostname,
+		Reason:   "takeover",
+	})
+	evicted.Sess.Close("takeover")
+}
+
+func (s *Server) finishBind(opts finishBindOptions) {
+	evict(opts.Evicted, opts.Hostname)
 	opts.Control.Write(proto.TypeBindOK, opts.ID, proto.BindOK{
 		Hostname:       opts.Hostname,
 		URL:            s.cfg.PublicScheme + "://" + opts.Hostname,
