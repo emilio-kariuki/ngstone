@@ -365,10 +365,10 @@ func TestQUICConfigBounds(t *testing.T) {
 		if cfg.HandshakeIdleTimeout != 5*time.Second {
 			t.Errorf("server=%v HandshakeIdleTimeout = %v", server, cfg.HandshakeIdleTimeout)
 		}
-		if cfg.MaxIdleTimeout != 60*time.Second {
+		if cfg.MaxIdleTimeout != 15*time.Second {
 			t.Errorf("server=%v MaxIdleTimeout = %v", server, cfg.MaxIdleTimeout)
 		}
-		if cfg.KeepAlivePeriod != 0 {
+		if cfg.KeepAlivePeriod != 5*time.Second {
 			t.Errorf("server=%v KeepAlivePeriod = %v", server, cfg.KeepAlivePeriod)
 		}
 		if cfg.InitialStreamReceiveWindow != 64<<10 || cfg.InitialConnectionReceiveWindow != 64<<10 {

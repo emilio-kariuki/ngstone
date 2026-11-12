@@ -22,7 +22,8 @@ const (
 	quicInitialWindow        = 64 << 10
 	quicMaxWindow            = 1 << 20
 	quicHandshakeIdleTimeout = 5 * time.Second
-	quicMaxIdleTimeout       = 60 * time.Second
+	quicMaxIdleTimeout       = 15 * time.Second
+	quicKeepAlivePeriod      = 5 * time.Second
 	quicStreamAcceptTimeout  = 5 * time.Second
 	quicCloseLinger          = 3 * time.Second
 )
@@ -31,7 +32,7 @@ func quicConfig(server bool, gate func(*quic.Conn, uint64) bool) *quic.Config {
 	cfg := &quic.Config{
 		HandshakeIdleTimeout:           quicHandshakeIdleTimeout,
 		MaxIdleTimeout:                 quicMaxIdleTimeout,
-		KeepAlivePeriod:                0,
+		KeepAlivePeriod:                quicKeepAlivePeriod,
 		InitialStreamReceiveWindow:     quicInitialWindow,
 		MaxStreamReceiveWindow:         quicMaxWindow,
 		InitialConnectionReceiveWindow: quicInitialWindow,
