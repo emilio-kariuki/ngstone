@@ -1158,6 +1158,170 @@ func TestForwardShareLink(t *testing.T) {
 	})
 }
 
+func TestForwardShareManagement(t *testing.T) {
+	forEachForwardStorage(t, func(t *testing.T, dsn string) {
+		p := startForwardedPair(t, dsn)
+		echoAddr := startTCPEcho(t)
+		echoPort := tcpPort(t, echoAddr)
+
+		issue := func(owner string) string {
+			issued, err := p.a.store.Issue(credentials.Spec{Kind: credentials.KindShare, OwnerID: owner}, time.Hour)
+			if err != nil {
+				t.Fatalf("issue share credential for %s: %v", owner, err)
+			}
+			return issued.Token
+		}
+		operator := func(token string) *agent.Operator {
+			return agent.NewOperator(agent.Config{ControlAddr: p.a.controlAddr, Token: token, Insecure: true})
+		}
+		ownerToken, otherToken := issue("e2e-owner"), issue("other-owner")
+
+		secret, digest, err := agent.NewShareSecret()
+		if err != nil {
+			t.Fatal(err)
+		}
+		spec := &agent.ShareSpec{
+			Label: "e2e db",
+			Targets: []agent.ShareTargetSpec{{
+				ShareTarget: proto.ShareTarget{ID: "t1", Preset: "tcp", Label: "tcp", DefaultPort: echoPort},
+				Addr:        echoAddr,
+			}},
+			SecretSHA256:  digest,
+			ExpiresAt:     time.Now().Add(10 * time.Minute),
+			MaxConns:      16,
+			MaxConnectors: 8,
+		}
+		sharerEvents := make(chan agent.StatusEvent, 32)
+		shareEvents := make(chan proto.ShareEvent, 64)
+		sharerCtx, stopSharer := context.WithCancel(context.Background())
+		sharerDone := make(chan struct{})
+		go func() {
+			agent.New(agent.Config{
+				ControlAddr: p.b.controlAddr,
+				Token:       ownerToken,
+				Kind:        proto.KindTCP,
+				TargetURL:   echoAddr,
+				InstanceID:  "e2e-sharer",
+				Insecure:    true,
+				Share:       spec,
+				Events:      sharerEvents,
+				ShareEvents: shareEvents,
+			}).Run(sharerCtx)
+			close(sharerDone)
+		}()
+		t.Cleanup(func() {
+			stopSharer()
+			select {
+			case <-sharerDone:
+			case <-time.After(fwdStopBudget):
+				t.Errorf("sharer did not stop within %s", fwdStopBudget)
+			}
+		})
+		var shareID string
+		for shareID == "" {
+			select {
+			case ev := <-sharerEvents:
+				if ev.State == agent.StateOnline {
+					shareID = ev.ShareID
+				}
+			case <-time.After(fwdWaitBudget):
+				t.Fatal("sharer did not register its share on edge-b")
+			}
+		}
+
+		connEvents := make(chan agent.ConnectEvent, 32)
+		connCtx, stopConn := context.WithCancel(context.Background())
+		defer stopConn()
+		connDone := make(chan error, 1)
+		go func() {
+			connDone <- agent.NewConnector(agent.ConnectConfig{
+				ControlAddr: p.a.controlAddr,
+				Secret:      secret,
+				InstanceID:  "e2e-connector",
+				Insecure:    true,
+				Events:      connEvents,
+			}).Run(connCtx)
+		}()
+		var connectorID string
+		for connectorID == "" {
+			select {
+			case ev := <-connEvents:
+				if ev.State == agent.StateOnline && ev.ShareID == shareID {
+					connectorID = ev.ConnectorID
+				}
+			case err := <-connDone:
+				t.Fatalf("connector through edge-a ended before joining: %v", err)
+			case <-time.After(fwdWaitBudget):
+				t.Fatal("connector through edge-a never joined the share on edge-b")
+			}
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), fwdWaitBudget)
+		defer cancel()
+		listed, err := operator(ownerToken).ListSharesOK(ctx)
+		if err != nil {
+			t.Fatalf("list through edge-a: %v", err)
+		}
+		if !listed.Group || len(listed.Unreached) != 0 || len(listed.Shares) != 1 || listed.Shares[0].ShareID != shareID || listed.Shares[0].Edge != p.b.id {
+			t.Fatalf("list through edge-a = %+v, want the share on %s with Group set", listed, p.b.id)
+		}
+
+		until := time.Now().Add(30 * time.Minute)
+		got, err := operator(ownerToken).Extend(ctx, shareID, until)
+		if err != nil {
+			t.Fatalf("extend through edge-a: %v", err)
+		}
+		if got.UnixMilli() != until.UnixMilli() {
+			t.Fatalf("extend returned %s, want %s", got, until)
+		}
+		for extended := false; !extended; {
+			select {
+			case ev := <-shareEvents:
+				extended = ev.Event == proto.ShareEventExtended && ev.ExpiresAtMS == until.UnixMilli()
+			case <-time.After(fwdWaitBudget):
+				t.Fatal("sharer on edge-b never saw the extension")
+			}
+		}
+		for updated := false; !updated; {
+			select {
+			case ev := <-connEvents:
+				updated = ev.State == agent.StateUpdated && ev.ExpiresAt.UnixMilli() == until.UnixMilli()
+			case err := <-connDone:
+				t.Fatalf("connector ended during extend: %v", err)
+			case <-time.After(fwdWaitBudget):
+				t.Fatal("connector never saw the extension")
+			}
+		}
+
+		if _, err := operator(otherToken).Extend(ctx, shareID, until.Add(time.Hour)); !errors.Is(err, agent.ErrShareNotFound) {
+			t.Fatalf("extend by another owner through edge-a: err = %v, want ErrShareNotFound", err)
+		}
+		if err := operator(otherToken).Kick(ctx, shareID, connectorID); !errors.Is(err, agent.ErrShareNotFound) {
+			t.Fatalf("kick by another owner through edge-a: err = %v, want ErrShareNotFound", err)
+		}
+
+		if err := operator(ownerToken).Kick(ctx, shareID, connectorID); err != nil {
+			t.Fatalf("kick through edge-a: %v", err)
+		}
+		select {
+		case err := <-connDone:
+			if !errors.Is(err, agent.ErrShareClosed) || agent.CloseReason(err) != proto.ShareReasonKicked {
+				t.Fatalf("connector ended with %v, want a kicked share", err)
+			}
+		case <-time.After(fwdWaitBudget):
+			t.Fatal("connector was not removed by the kick")
+		}
+		for left := false; !left; {
+			select {
+			case ev := <-shareEvents:
+				left = ev.Event == proto.ShareEventConnectorLeft && ev.ConnectorID == connectorID && ev.Reason == proto.ShareReasonKicked
+			case <-time.After(fwdWaitBudget):
+				t.Fatal("sharer never logged the kick")
+			}
+		}
+	})
+}
+
 func tcpPort(t *testing.T, addr string) int {
 	t.Helper()
 	_, portStr, err := net.SplitHostPort(addr)
