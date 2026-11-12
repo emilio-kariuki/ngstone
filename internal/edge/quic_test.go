@@ -413,3 +413,47 @@ func TestQUICDrainRefusesNewConnections(t *testing.T) {
 	waitQUICSlotFree(t, "handshake", s.handshakeSem)
 	waitQUICSlotFree(t, "unauthenticated", s.unauthSem)
 }
+
+func TestQUICWindowGateOnRealConn(t *testing.T) {
+	s := quicTestServer(1)
+	tr, ln, err := s.listenQUIC(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("listenQUIC: %v", err)
+	}
+	t.Cleanup(func() {
+		ln.Close()
+		tr.Close()
+		tr.Conn.Close()
+	})
+	if _, err := dialQUICRaw(t, tr.Conn.LocalAddr().String()); err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	actx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	qc, err := ln.Accept(actx)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	adm := quicAdmissionFrom(qc.Context())
+	if adm == nil {
+		t.Fatal("listener-accepted connection carries no admission record")
+	}
+	if quicWindowGate(qc, 1<<20) {
+		t.Fatal("window gate open before authentication")
+	}
+	adm.authenticated()
+	if !quicWindowGate(qc, 1<<20) {
+		t.Fatal("window gate closed after authentication")
+	}
+}
+
+func TestQUICHandshakeSlotReleasedAfterAccept(t *testing.T) {
+	_, controlAddr, _ := startQUICEdgeForTest(t, LimitsConfig{HandshakeConcurrency: 1})
+	for i := 0; i < 2; i++ {
+		sess := dialQUICSession(t, controlAddr)
+		defer sess.Close("done")
+		if typ, err := quicAuth(sess, "tok", fmt.Sprintf("agent-%d", i)); err != nil || typ != proto.TypeAuthOK {
+			t.Fatalf("auth %d with another authenticated session open: %q, %v", i, typ, err)
+		}
+	}
+}
