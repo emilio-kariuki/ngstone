@@ -215,6 +215,26 @@ func TestCustomDomainRoutesTLSPassthroughAcrossEdges(t *testing.T) {
 	})
 }
 
+func (p *fwdPair) waitStatusOf(t *testing.T, e *fwdEdge, host string, want int, within time.Duration) time.Duration {
+	t.Helper()
+	started := time.Now()
+	deadline := started.Add(within)
+	for {
+		resp, err := p.clientTo(e, 5*time.Second).Get(fwdURL(e, host, fwdReadyPath))
+		if err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == want {
+				return time.Since(started)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s via %s did not reach status %d within %s", host, e.id, want, within)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
 func TestCustomDomainLifecycle(t *testing.T) {
 	forEachForwardStorage(t, func(t *testing.T, dsn string) {
 		p := startCustomDomainPair(t, dsn, []string{customDomainName})
@@ -223,6 +243,7 @@ func TestCustomDomainLifecycle(t *testing.T) {
 		id := p.tunnelID(t, h.hostname)
 		alice := p.adminClient(t, p.b, "alice", oidc.RoleOperator)
 		root := p.adminClient(t, p.b, "root", oidc.RoleAdmin)
+		otherEdgeBound := 2*5*time.Second + 2*time.Second
 
 		domain := p.registerPending(t, alice, customDomainName, id)
 		if got := p.statusOf(t, p.b, customDomainName, fwdReadyPath); got != http.StatusNotFound {
@@ -232,14 +253,27 @@ func TestCustomDomainLifecycle(t *testing.T) {
 		if got := p.statusOf(t, p.b, customDomainName, fwdReadyPath); got != http.StatusOK {
 			t.Fatalf("active domain status = %d, want 200 immediately after activation", got)
 		}
+		t.Logf("activation reached the other edge after %s", p.waitStatusOf(t, p.a, customDomainName, http.StatusOK, otherEdgeBound))
+
 		p.setStatus(t, root, domain.ID, "disabled")
 		if got := p.statusOf(t, p.b, customDomainName, fwdReadyPath); got != http.StatusNotFound {
 			t.Fatalf("disabled domain status = %d, want 404 immediately after disabling", got)
 		}
+		t.Logf("disabling reached the other edge after %s", p.waitStatusOf(t, p.a, customDomainName, http.StatusNotFound, otherEdgeBound))
+
 		p.setStatus(t, root, domain.ID, "active")
 		if got := p.statusOf(t, p.b, customDomainName, fwdReadyPath); got != http.StatusOK {
 			t.Fatalf("re-activated domain status = %d, want 200", got)
 		}
+		p.waitStatusOf(t, p.a, customDomainName, http.StatusOK, otherEdgeBound)
+
+		if err := alice.Delete(adminapi.APIPrefix + "/domains/" + domain.ID); err != nil {
+			t.Fatalf("delete domain: %v", err)
+		}
+		if got := p.statusOf(t, p.b, customDomainName, fwdReadyPath); got != http.StatusNotFound {
+			t.Fatalf("deleted domain status = %d, want 404 immediately after deletion", got)
+		}
+		t.Logf("deletion reached the other edge after %s", p.waitStatusOf(t, p.a, customDomainName, http.StatusNotFound, otherEdgeBound))
 	})
 }
 
@@ -274,12 +308,12 @@ func TestCustomDomainOwnership(t *testing.T) {
 	})
 }
 
-func TestCustomDomainRandomHostsAreBounded(t *testing.T) {
+func TestCustomDomainRandomHostsNeverQueryStorage(t *testing.T) {
 	forEachForwardStorage(t, func(t *testing.T, dsn string) {
 		p := startCustomDomainPair(t, dsn, nil)
 		const requests = 500
 		const workers = 8
-		lookupsBefore := expvarCount(t, "ngstoned_custom_domain_lookups_total")
+		lookupErrorsBefore := expvarCount(t, "ngstoned_custom_domain_lookup_errors_total")
 		ownerLookupsBefore := expvarCount(t, "ngstoned_peer_lookups_total")
 		client := &http.Client{
 			Timeout: 5 * time.Second,
@@ -317,14 +351,11 @@ func TestCustomDomainRandomHostsAreBounded(t *testing.T) {
 			}()
 		}
 		wg.Wait()
-		elapsed := time.Since(start)
 		if routed.Load() != 0 {
 			t.Fatalf("%d random hosts were routed, want 0", routed.Load())
 		}
-		lookups := expvarCount(t, "ngstoned_custom_domain_lookups_total") - lookupsBefore
-		limit := int64(10 + 2*int(elapsed.Seconds()) + 8)
-		if lookups < 1 || lookups > limit {
-			t.Fatalf("custom domain lookups for %d random hosts over %s = %d, want between 1 and %d", requests, elapsed, lookups, limit)
+		if got := expvarCount(t, "ngstoned_custom_domain_lookup_errors_total") - lookupErrorsBefore; got != 0 {
+			t.Fatalf("custom domain lookup errors during %d random hosts over %s = %d, want 0", requests, time.Since(start), got)
 		}
 		if got := expvarCount(t, "ngstoned_peer_lookups_total") - ownerLookupsBefore; got != 0 {
 			t.Fatalf("owner lookups caused by random hosts = %d, want 0", got)

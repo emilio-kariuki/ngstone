@@ -458,7 +458,7 @@ func (s *Server) handleAdminDomain(w http.ResponseWriter, r *http.Request, rawID
 		writeAdminError(w, http.StatusInternalServerError, "internal_error", "could not delete custom domain")
 		return
 	}
-	s.aliases.purge()
+	s.aliases.refresh(r.Context())
 	s.recordAdminEvent(r, "management custom domain deleted", map[string]string{"domain_id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -520,7 +520,7 @@ func (s *Server) handleAdminDomainStatus(w http.ResponseWriter, r *http.Request,
 		}
 		return
 	}
-	s.aliases.purge()
+	s.aliases.refresh(r.Context())
 	s.recordAdminEvent(r, "management custom domain status changed", map[string]string{"domain_id": domain.ID, "domain": domain.Domain, "status": domain.Status})
 	writeAdminData(w, http.StatusOK, domain)
 }

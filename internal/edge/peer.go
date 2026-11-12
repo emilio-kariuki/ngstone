@@ -292,7 +292,11 @@ func (p *peerForwarder) refreshPins() {
 }
 
 func (p *peerForwarder) leaseTTL() time.Duration {
-	if ttl := p.srv.cfg.LeaseTTL; ttl > 0 {
+	return p.srv.leaseTTL()
+}
+
+func (s *Server) leaseTTL() time.Duration {
+	if ttl := s.cfg.LeaseTTL; ttl > 0 {
 		return ttl
 	}
 	return storage.DefaultLeaseTTL

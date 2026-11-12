@@ -328,7 +328,7 @@ func New(cfg Config) (*Server, error) {
 		shareSem:          newGlobalSemaphore(maxGlobalShareConns),
 	}
 	if durableStore != nil {
-		srv.aliases = newAliasResolver(durableStore, srv.customDomainReserved)
+		srv.aliases = newAliasResolver(durableStore, srv.customDomainReserved, srv.leaseTTL)
 	}
 	if cfg.PeerAddr != "" {
 		srv.peers, err = newPeerForwarder(srv)
@@ -424,6 +424,8 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		s.tlsMgr = mgr
 	}
+
+	s.aliases.refresh(ctx)
 
 	controlLn, err := net.Listen("tcp", s.cfg.ControlAddr)
 	if err != nil {
@@ -637,6 +639,10 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	})
 
+	if s.aliases != nil {
+		g.Go(func() error { return s.aliases.watch(gctx) })
+	}
+
 	if s.peers != nil {
 		g.Go(func() error { return s.peers.acceptLoop(gctx) })
 		g.Go(func() error { return s.peers.heartbeat(gctx) })
@@ -710,7 +716,7 @@ func (s *Server) waitControlSessions(grace time.Duration) {
 func (s *Server) redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
 	host := stripPort(r.Host)
 	if !hostMatchesDomain(host, s.cfg.Domain) {
-		if _, ok := s.aliases.resolve(host, stripPort(r.RemoteAddr)); !ok {
+		if _, ok := s.aliases.resolve(host); !ok {
 			http.NotFound(w, r)
 			return
 		}

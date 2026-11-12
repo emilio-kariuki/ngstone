@@ -150,7 +150,8 @@ type CustomDomain struct {
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
-type CustomDomainTarget struct {
+type ActiveCustomDomain struct {
+	Domain   string
 	Hostname string
 	Kind     string
 	OwnerID  string
@@ -1482,16 +1483,24 @@ func (s *Store) SetCustomDomainStatus(ctx context.Context, id, status string) (C
 	return value, nil
 }
 
-func (s *Store) LookupCustomDomainTarget(ctx context.Context, domain string) (CustomDomainTarget, bool, error) {
-	var target CustomDomainTarget
-	err := s.db.QueryRowContext(ctx, s.bind(`SELECT t.hostname, t.kind, d.owner_id FROM custom_domains d JOIN tunnels t ON t.id = d.tunnel_id WHERE d.domain = $1 AND d.status = 'active' AND d.activated_at IS NOT NULL AND t.kind IN ('http', 'tls') AND t.remote_port = 0 AND t.owner_id = d.owner_id`), domain).Scan(&target.Hostname, &target.Kind, &target.OwnerID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return CustomDomainTarget{}, false, nil
-	}
+func (s *Store) ActiveCustomDomains(ctx context.Context, limit int) ([]ActiveCustomDomain, error) {
+	rows, err := s.db.QueryContext(ctx, s.bind(`SELECT d.domain, t.hostname, t.kind, d.owner_id FROM custom_domains d JOIN tunnels t ON t.id = d.tunnel_id WHERE d.status = 'active' AND d.activated_at IS NOT NULL AND t.kind IN ('http', 'tls') AND t.remote_port = 0 AND t.owner_id = d.owner_id ORDER BY d.domain LIMIT $1`), limit)
 	if err != nil {
-		return CustomDomainTarget{}, false, fmt.Errorf("storage: lookup custom domain: %w", err)
+		return nil, fmt.Errorf("storage: list active custom domains: %w", err)
 	}
-	return target, true, nil
+	defer rows.Close()
+	var out []ActiveCustomDomain
+	for rows.Next() {
+		var value ActiveCustomDomain
+		if err := rows.Scan(&value.Domain, &value.Hostname, &value.Kind, &value.OwnerID); err != nil {
+			return nil, fmt.Errorf("storage: scan active custom domain: %w", err)
+		}
+		out = append(out, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list active custom domains: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Store) DeleteCustomDomain(ctx context.Context, id, ownerID string) error {

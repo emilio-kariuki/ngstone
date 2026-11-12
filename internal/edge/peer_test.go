@@ -105,7 +105,7 @@ func (pc *peerCluster) edgeWith(t *testing.T, edgeID string, mgr *tcpManager) *p
 
 	e := &peerEdge{id: edgeID, store: store, srv: newTestServer("tok")}
 	e.srv.storage = store
-	e.srv.aliases = newAliasResolver(store, e.srv.customDomainReserved)
+	e.srv.aliases = newAliasResolver(store, e.srv.customDomainReserved, e.srv.leaseTTL)
 	e.srv.tcpMgr = mgr
 	e.srv.cfg.PeerAddr = "127.0.0.1:1"
 	p, err := newPeerForwarder(e.srv)

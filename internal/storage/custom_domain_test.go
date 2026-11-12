@@ -224,7 +224,16 @@ func TestActivateSnapshotsTunnelOwner(t *testing.T) {
 	})
 }
 
-func TestLookupCustomDomainTargetRequiresOwnerMatch(t *testing.T) {
+func activeDomains(t *testing.T, s *Store, limit int) []ActiveCustomDomain {
+	t.Helper()
+	got, err := s.ActiveCustomDomains(t.Context(), limit)
+	if err != nil {
+		t.Fatalf("active custom domains: %v", err)
+	}
+	return got
+}
+
+func TestActiveCustomDomainsRequiresOwnerMatch(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, open func() *Store) {
 		s := open()
 		ctx := t.Context()
@@ -233,29 +242,26 @@ func TestLookupCustomDomainTargetRequiresOwnerMatch(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, ok, err := s.LookupCustomDomainTarget(ctx, "app.example.org"); err != nil || ok {
-			t.Fatalf("pending lookup = %v, %v; want miss", ok, err)
+		if got := activeDomains(t, s, 100); len(got) != 0 {
+			t.Fatalf("pending listed as active: %+v", got)
 		}
 		if _, err := s.SetCustomDomainStatus(ctx, domain.ID, "active"); err != nil {
 			t.Fatal(err)
 		}
-		target, ok, err := s.LookupCustomDomainTarget(ctx, "app.example.org")
-		if err != nil || !ok || target != (CustomDomainTarget{Hostname: "web.example.com", Kind: "http", OwnerID: "alice"}) {
-			t.Fatalf("active lookup = %+v, %v, %v", target, ok, err)
-		}
-		if _, ok, err := s.LookupCustomDomainTarget(ctx, "other.example.org"); err != nil || ok {
-			t.Fatalf("unknown lookup = %v, %v", ok, err)
+		got := activeDomains(t, s, 100)
+		if len(got) != 1 || got[0] != (ActiveCustomDomain{Domain: "app.example.org", Hostname: "web.example.com", Kind: "http", OwnerID: "alice"}) {
+			t.Fatalf("active domains = %+v", got)
 		}
 		if _, err := s.db.ExecContext(ctx, `UPDATE tunnels SET owner_id = 'mallory' WHERE hostname = 'web.example.com'`); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok, err := s.LookupCustomDomainTarget(ctx, "app.example.org"); err != nil || ok {
-			t.Fatalf("lookup after tunnel owner change = %v, %v; want miss", ok, err)
+		if got := activeDomains(t, s, 100); len(got) != 0 {
+			t.Fatalf("active domains after tunnel owner change = %+v, want none", got)
 		}
 	})
 }
 
-func TestLookupCustomDomainRequiresActivatedAt(t *testing.T) {
+func TestActiveCustomDomainsRequiresActivatedAt(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, open func() *Store) {
 		s := open()
 		ctx := t.Context()
@@ -267,28 +273,49 @@ func TestLookupCustomDomainRequiresActivatedAt(t *testing.T) {
 		if _, err := s.db.ExecContext(ctx, s.bind(`UPDATE custom_domains SET status = 'active' WHERE id = $1`), domain.ID); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok, err := s.LookupCustomDomainTarget(ctx, "app.example.org"); err != nil || ok {
-			t.Fatalf("active without activated_at = %v, %v; want miss", ok, err)
+		if got := activeDomains(t, s, 100); len(got) != 0 {
+			t.Fatalf("active without activated_at listed: %+v", got)
 		}
 		if _, err := s.SetCustomDomainStatus(ctx, domain.ID, "active"); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok, err := s.LookupCustomDomainTarget(ctx, "app.example.org"); err != nil || !ok {
-			t.Fatalf("activated lookup = %v, %v", ok, err)
+		if got := activeDomains(t, s, 100); len(got) != 1 {
+			t.Fatalf("activated domains = %+v, want one", got)
 		}
 		if _, err := s.SetCustomDomainStatus(ctx, domain.ID, "disabled"); err != nil {
 			t.Fatal(err)
 		}
-		if _, ok, err := s.LookupCustomDomainTarget(ctx, "app.example.org"); err != nil || ok {
-			t.Fatalf("disabled lookup = %v, %v; want miss", ok, err)
+		if got := activeDomains(t, s, 100); len(got) != 0 {
+			t.Fatalf("disabled listed: %+v", got)
 		}
 		for _, status := range []string{"disabled", "pending"} {
 			if _, err := s.db.ExecContext(ctx, s.bind(`UPDATE custom_domains SET status = $2, activated_at = $3 WHERE id = $1`), domain.ID, status, nowString(time.Now().UTC())); err != nil {
 				t.Fatal(err)
 			}
-			if _, ok, err := s.LookupCustomDomainTarget(ctx, "app.example.org"); err != nil || ok {
-				t.Fatalf("%s with activated_at lookup = %v, %v; want miss", status, ok, err)
+			if got := activeDomains(t, s, 100); len(got) != 0 {
+				t.Fatalf("%s with activated_at listed: %+v", status, got)
 			}
+		}
+	})
+}
+
+func TestActiveCustomDomainsOrdersAndLimits(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, open func() *Store) {
+		s := open()
+		ctx := t.Context()
+		tunnelID := createTunnel(t, s, "web.example.com", "http", "alice", 0)
+		for _, name := range []string{"c.example.org", "a.example.org", "b.example.org"} {
+			domain, err := s.CreateCustomDomain(ctx, CustomDomainSpec{Domain: name, OwnerID: "alice", TunnelID: tunnelID})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.SetCustomDomainStatus(ctx, domain.ID, "active"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got := activeDomains(t, s, 2)
+		if len(got) != 2 || got[0].Domain != "a.example.org" || got[1].Domain != "b.example.org" {
+			t.Fatalf("limited active domains = %+v, want a and b", got)
 		}
 	})
 }

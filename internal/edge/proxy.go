@@ -135,7 +135,7 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	b, ok := s.registry.Route(host)
 	aliased := false
 	if !ok {
-		target, aliasBinding, state := s.localAlias(host, ip)
+		target, aliasBinding, state := s.localAlias(host)
 		switch {
 		case state == aliasLocal && target.Kind == "tls":
 			writeError(rec, http.StatusMisdirectedRequest)

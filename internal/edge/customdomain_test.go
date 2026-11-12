@@ -6,15 +6,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"ngstone/internal/credentials"
+	"ngstone/internal/oidc"
 	"ngstone/internal/proto"
 	"ngstone/internal/storage"
 )
@@ -24,23 +28,21 @@ type countingDomainStore struct {
 	calls atomic.Int64
 }
 
-func (c *countingDomainStore) LookupCustomDomainTarget(ctx context.Context, domain string) (storage.CustomDomainTarget, bool, error) {
+func (c *countingDomainStore) ActiveCustomDomains(ctx context.Context, limit int) ([]storage.ActiveCustomDomain, error) {
 	c.calls.Add(1)
-	return c.inner.LookupCustomDomainTarget(ctx, domain)
+	return c.inner.ActiveCustomDomains(ctx, limit)
 }
 
 type flakyDomainStore struct {
 	inner customDomainStore
-	calls atomic.Int64
 	fail  atomic.Bool
 }
 
-func (f *flakyDomainStore) LookupCustomDomainTarget(ctx context.Context, domain string) (storage.CustomDomainTarget, bool, error) {
-	f.calls.Add(1)
+func (f *flakyDomainStore) ActiveCustomDomains(ctx context.Context, limit int) ([]storage.ActiveCustomDomain, error) {
 	if f.fail.Load() {
-		return storage.CustomDomainTarget{}, false, errors.New("storage unavailable")
+		return nil, errors.New("storage unavailable")
 	}
-	return f.inner.LookupCustomDomainTarget(ctx, domain)
+	return f.inner.ActiveCustomDomains(ctx, limit)
 }
 
 func openAliasStore(t *testing.T) *storage.Store {
@@ -58,12 +60,13 @@ func newAliasServer(t *testing.T) *Server {
 	s := newDomainTestServer(t)
 	s.perIPLimiter = newPerIPLimiter(1000, 1000, 100)
 	s.observability = newObservabilityRegistry()
-	s.aliases = newAliasResolver(s.storage, s.customDomainReserved)
+	s.aliases = newAliasResolver(s.storage, s.customDomainReserved, s.leaseTTL)
 	return s
 }
 
-func registerActiveDomain(t *testing.T, store *storage.Store, domain, hostname, kind, owner string) string {
+func registerActiveDomain(t *testing.T, s *Server, domain, hostname, kind, owner string) string {
 	t.Helper()
+	store := s.storage
 	lease, err := store.AcquireLease(t.Context(), storage.LeaseRequest{Hostname: hostname, Kind: kind, OwnerID: owner, InstanceID: hostname, SessionID: hostname})
 	if err != nil {
 		t.Fatalf("acquire lease %s: %v", hostname, err)
@@ -75,6 +78,7 @@ func registerActiveDomain(t *testing.T, store *storage.Store, domain, hostname, 
 	if _, err := store.SetCustomDomainStatus(t.Context(), created.ID, "active"); err != nil {
 		t.Fatalf("activate domain %s: %v", domain, err)
 	}
+	s.aliases.refresh(t.Context())
 	return lease.TunnelID
 }
 
@@ -93,64 +97,278 @@ func aliasGet(s *Server, host string) *httptest.ResponseRecorder {
 	return rec
 }
 
-func TestAliasResolverBoundsLookups(t *testing.T) {
-	store := openAliasStore(t)
-	counting := &countingDomainStore{inner: store}
-	reserved := func(name string) bool { return hostMatchesDomain(name, "example.com") }
-	resolver := newAliasResolver(counting, reserved)
+func newTestResolver(store customDomainStore, reserved func(string) bool) *aliasResolver {
+	return newAliasResolver(store, reserved, func() time.Duration { return 10 * time.Second })
+}
 
-	for i := 0; i < 100; i++ {
-		if _, ok := resolver.resolve("unknown.example.org", "1.1.1.1"); ok {
-			t.Fatal("unknown name resolved")
+func activateRow(t *testing.T, store *storage.Store, domain, hostname, owner string, activate bool) string {
+	t.Helper()
+	lease, err := store.AcquireLease(t.Context(), storage.LeaseRequest{Hostname: hostname, Kind: "http", OwnerID: owner, InstanceID: hostname, SessionID: hostname})
+	if err != nil {
+		t.Fatalf("acquire lease %s: %v", hostname, err)
+	}
+	created, err := store.CreateCustomDomain(t.Context(), storage.CustomDomainSpec{Domain: domain, OwnerID: owner, TunnelID: lease.TunnelID})
+	if err != nil {
+		t.Fatalf("create domain %s: %v", domain, err)
+	}
+	if activate {
+		if _, err := store.SetCustomDomainStatus(t.Context(), created.ID, "active"); err != nil {
+			t.Fatalf("activate domain %s: %v", domain, err)
 		}
 	}
-	if got := counting.calls.Load(); got != 1 {
-		t.Fatalf("lookups for one unknown name = %d, want 1", got)
-	}
+	return created.ID
+}
 
-	before := counting.calls.Load()
-	for i := 0; i < 100; i++ {
-		resolver.resolve(fmt.Sprintf("random-%d.example.org", i), "2.2.2.2")
+func TestAliasSnapshotRoutesOnlyActiveDomains(t *testing.T) {
+	store := openAliasStore(t)
+	activateRow(t, store, "live.example.org", "live.example.com", "alice", true)
+	activateRow(t, store, "pending.example.org", "pending.example.com", "alice", false)
+	disabledID := activateRow(t, store, "disabled.example.org", "disabled.example.com", "alice", true)
+	if _, err := store.SetCustomDomainStatus(t.Context(), disabledID, "disabled"); err != nil {
+		t.Fatal(err)
 	}
-	if got := counting.calls.Load() - before; got > aliasLimiterBurst {
-		t.Fatalf("lookups for 100 random names from one ip = %d, want at most %d", got, aliasLimiterBurst)
-	}
+	activateRow(t, store, "www.example.com", "reserved.example.net", "alice", true)
+	resolver := newTestResolver(store, func(name string) bool { return hostMatchesDomain(name, "example.com") })
+	resolver.refresh(t.Context())
 
-	before = counting.calls.Load()
-	for i := 0; i < 100; i++ {
-		resolver.resolve(fmt.Sprintf("n%d.example.com", i), "3.3.3.3")
-		resolver.resolve("example.com", "3.3.3.3")
+	cases := []struct {
+		host string
+		want bool
+	}{
+		{"live.example.org", true},
+		{"LIVE.Example.Org", true},
+		{"pending.example.org", false},
+		{"disabled.example.org", false},
+		{"unknown.example.org", false},
+		{"www.example.com", false},
 	}
-	if got := counting.calls.Load() - before; got != 0 {
-		t.Fatalf("lookups for names under the edge domain = %d, want 0", got)
+	for _, tc := range cases {
+		target, ok := resolver.resolve(tc.host)
+		if ok != tc.want {
+			t.Fatalf("resolve(%q) = %+v, %v; want %v", tc.host, target, ok, tc.want)
+		}
+	}
+	if target, _ := resolver.resolve("live.example.org"); target != (aliasTarget{Hostname: "live.example.com", Kind: "http", OwnerID: "alice"}) {
+		t.Fatalf("live target = %+v", target)
+	}
+	if got := metricCustomDomainsActive.Value(); got != 2 {
+		t.Fatalf("active gauge = %d, want 2 (live and the reserved name still in the snapshot)", got)
 	}
 }
 
-func TestAliasResolverDoesNotCacheStorageErrors(t *testing.T) {
+func TestAliasResolveNeverQueriesStorage(t *testing.T) {
 	store := openAliasStore(t)
-	registerActiveDomain(t, store, "app.example.org", "web.example.com", "http", "alice")
-	flaky := &flakyDomainStore{inner: store}
-	flaky.fail.Store(true)
-	resolver := newAliasResolver(flaky, func(string) bool { return false })
+	activateRow(t, store, "app.example.org", "web.example.com", "alice", true)
+	counting := &countingDomainStore{inner: store}
+	resolver := newTestResolver(counting, func(name string) bool { return hostMatchesDomain(name, "example.com") })
+	resolver.refresh(t.Context())
+	if got := counting.calls.Load(); got != 1 {
+		t.Fatalf("calls after first load = %d, want 1", got)
+	}
+	for i := 0; i < 1000; i++ {
+		resolver.resolve(fmt.Sprintf("random-%d.example.org", i))
+		resolver.resolve("app.example.org")
+		resolver.resolve(fmt.Sprintf("n%d.example.com", i))
+	}
+	if got := counting.calls.Load(); got != 1 {
+		t.Fatalf("storage calls after 3000 resolves = %d, want 1", got)
+	}
+}
 
-	if _, ok := resolver.resolve("app.example.org", "1.1.1.1"); ok {
-		t.Fatal("resolved while storage was failing")
+func TestAliasSnapshotFailsClosedAfterTTL(t *testing.T) {
+	store := openAliasStore(t)
+	activateRow(t, store, "app.example.org", "web.example.com", "alice", true)
+	flaky := &flakyDomainStore{inner: store}
+	resolver := newTestResolver(flaky, func(string) bool { return false })
+	errs := metricDelta(metricCustomDomainLookupErrors)
+	t0 := time.Now()
+
+	resolver.load(t.Context(), t0)
+	if _, ok := resolver.resolve("app.example.org"); !ok {
+		t.Fatal("domain not routed after a successful load")
+	}
+	flaky.fail.Store(true)
+	resolver.load(t.Context(), t0.Add(9*time.Second))
+	if _, ok := resolver.resolve("app.example.org"); !ok {
+		t.Fatal("snapshot dropped before the lease TTL elapsed")
+	}
+	resolver.load(t.Context(), t0.Add(11*time.Second))
+	if _, ok := resolver.resolve("app.example.org"); ok {
+		t.Fatal("stale snapshot still routes after the lease TTL")
+	}
+	if got := metricCustomDomainsActive.Value(); got != 0 {
+		t.Fatalf("active gauge after expiry = %d, want 0", got)
+	}
+	if errs() != 2 {
+		t.Fatalf("lookup errors = %d, want 2", errs())
 	}
 	flaky.fail.Store(false)
-	target, ok := resolver.resolve("app.example.org", "1.1.1.1")
-	if !ok || target.Hostname != "web.example.com" {
-		t.Fatalf("resolve after recovery = %+v, %v", target, ok)
+	resolver.load(t.Context(), t0.Add(12*time.Second))
+	if _, ok := resolver.resolve("app.example.org"); !ok {
+		t.Fatal("domain not routed after storage recovered")
 	}
-	if got := flaky.calls.Load(); got != 2 {
-		t.Fatalf("storage calls = %d, want 2", got)
+}
+
+func TestAliasSnapshotCap(t *testing.T) {
+	store := openAliasStore(t)
+	for _, name := range []string{"a.example.org", "b.example.org", "c.example.org"} {
+		activateRow(t, store, name, "host-"+name, "alice", true)
+	}
+	logs := &lockedBuffer{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	resolver := newTestResolver(store, func(string) bool { return false })
+	resolver.limit = 2
+	resolver.refresh(t.Context())
+
+	for host, want := range map[string]bool{"a.example.org": true, "b.example.org": true, "c.example.org": false} {
+		if _, ok := resolver.resolve(host); ok != want {
+			t.Fatalf("resolve(%q) = %v, want %v", host, ok, want)
+		}
+	}
+	if !strings.Contains(logs.String(), "routing cap") {
+		t.Fatalf("no cap warning in logs: %s", logs.String())
+	}
+
+	resolver.limit = 4
+	logs2 := &lockedBuffer{}
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs2, nil)))
+	resolver.refresh(t.Context())
+	if strings.Contains(logs2.String(), "routing cap") {
+		t.Fatalf("cap warning below the cap: %s", logs2.String())
+	}
+}
+
+func TestAliasRefreshAfterStatusChange(t *testing.T) {
+	s := newAliasServer(t)
+	lease, err := s.storage.AcquireLease(t.Context(), storage.LeaseRequest{Hostname: "web.example.com", Kind: "http", OwnerID: "alice", InstanceID: "i1", SessionID: "s1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := adminRequestAs(t, s, oidc.RoleOperator, "alice", http.MethodPost, "/api/v1/domains", []byte(`{"domain":"app.example.org","tunnel_id":"`+lease.TunnelID+`"}`))
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create = %d; body=%s", created.Code, created.Body.String())
+	}
+	id := decodeDomain(t, created).ID
+	path := "/api/v1/domains/" + id
+	routed := func() bool {
+		_, ok := s.aliases.resolve("app.example.org")
+		return ok
+	}
+	if routed() {
+		t.Fatal("pending domain routed")
+	}
+	if rec := adminRequestAs(t, s, oidc.RoleAdmin, "root", http.MethodPost, path+"/status", []byte(`{"status":"active"}`)); rec.Code != http.StatusOK {
+		t.Fatalf("activate = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if !routed() {
+		t.Fatal("activation did not take effect on the handling edge")
+	}
+	if rec := adminRequestAs(t, s, oidc.RoleAdmin, "root", http.MethodPost, path+"/status", []byte(`{"status":"disabled"}`)); rec.Code != http.StatusOK {
+		t.Fatalf("disable = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if routed() {
+		t.Fatal("disabling did not take effect on the handling edge")
+	}
+	if rec := adminRequestAs(t, s, oidc.RoleAdmin, "root", http.MethodPost, path+"/status", []byte(`{"status":"active"}`)); rec.Code != http.StatusOK || !routed() {
+		t.Fatalf("reactivate = %d routed=%v", rec.Code, routed())
+	}
+	if rec := adminRequestAs(t, s, oidc.RoleOperator, "alice", http.MethodDelete, path, nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	if routed() {
+		t.Fatal("deletion did not take effect on the handling edge")
+	}
+}
+
+func TestRedirectToHTTPSForActiveCustomDomain(t *testing.T) {
+	s := newAliasServer(t)
+	registerActiveDomain(t, s, "app.example.org", "web.example.com", "http", "alice")
+	activateRow(t, s.storage, "pending.example.org", "pending.example.com", "alice", false)
+	s.aliases.refresh(t.Context())
+
+	get := func(host string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "http://"+host+"/p?q=1", nil)
+		req.RemoteAddr = "9.9.9.9:4000"
+		rec := httptest.NewRecorder()
+		s.redirectToHTTPS(rec, req)
+		return rec
+	}
+	if rec := get("app.example.org"); rec.Code != http.StatusMovedPermanently || rec.Header().Get("Location") != "https://app.example.org/p?q=1" {
+		t.Fatalf("active custom domain redirect = %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	if rec := get("pending.example.org"); rec.Code != http.StatusNotFound {
+		t.Fatalf("pending custom domain redirect = %d, want 404", rec.Code)
+	}
+	if rec := get("unknown.example.org"); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown host redirect = %d, want 404", rec.Code)
+	}
+	if rec := get("anything.example.com"); rec.Code != http.StatusMovedPermanently {
+		t.Fatalf("edge domain redirect = %d, want 301", rec.Code)
+	}
+}
+
+func TestHandlePublicRefusesAliasOwnerMismatch(t *testing.T) {
+	s := newAliasServer(t)
+	registerActiveDomain(t, s, "app.example.org", "web.example.com", "http", "alice")
+	hits := atomic.Int64{}
+	mallory := ownedSession(t, "mallory", func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		io.WriteString(w, "origin-ok")
+	})
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "web.example.com", Session: mallory}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	mismatch := metricDelta(metricCustomDomainOwnerMismatch)
+	if rec := aliasGet(s, "app.example.org"); rec.Code != http.StatusNotFound {
+		t.Fatalf("owner mismatch status = %d, want 404", rec.Code)
+	}
+	if hits.Load() != 0 || mismatch() != 1 {
+		t.Fatalf("agent hits = %d, mismatch = %d; want 0, 1", hits.Load(), mismatch())
+	}
+}
+
+func TestClassifyRefusesAliasOwnerMismatch(t *testing.T) {
+	agentCert, agentPool := passthroughTestCert(t, "tls.example.org")
+	s := newAliasServer(t)
+	registerActiveDomain(t, s, "tls.example.org", "tls-tun.example.com", "tls", "alice")
+	var agentHits atomic.Int64
+	fx := newTCPFixture(t, func(conn net.Conn, pre proto.StreamOpen) {
+		defer conn.Close()
+		agentHits.Add(1)
+		tc := tls.Server(conn, &tls.Config{Certificates: []tls.Certificate{agentCert}})
+		if err := tc.Handshake(); err != nil {
+			return
+		}
+		io.Copy(tc, tc)
+	})
+	t.Cleanup(fx.cleanup)
+	fx.as.Credential = &credentials.Credential{ID: "cred-mallory", OwnerID: "mallory"}
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "tls-tun.example.com", Session: fx.as, TLS: true}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ln := s.newSNIListener(raw)
+	t.Cleanup(func() { ln.Close() })
+	mismatch := metricDelta(metricCustomDomainOwnerMismatch)
+
+	if _, err := dialTLSClient(t, raw.Addr().String(), nil, &tls.Config{ServerName: "tls.example.org", RootCAs: agentPool}); err == nil {
+		t.Fatal("handshake succeeded through an owner-mismatched custom domain")
+	}
+	if agentHits.Load() != 0 || mismatch() != 1 {
+		t.Fatalf("agent hits = %d, mismatch = %d; want 0, 1", agentHits.Load(), mismatch())
 	}
 }
 
 func TestLocalAliasRefusesOwnerMismatch(t *testing.T) {
 	s := newAliasServer(t)
-	registerActiveDomain(t, s.storage, "app.example.org", "web.example.com", "http", "alice")
+	registerActiveDomain(t, s, "app.example.org", "web.example.com", "http", "alice")
 
-	if _, b, state := s.localAlias("app.example.org", "1.1.1.1"); b != nil || state != aliasRemote {
+	if _, b, state := s.localAlias("app.example.org"); b != nil || state != aliasRemote {
 		t.Fatalf("unbound state = %v binding=%v, want aliasRemote", state, b)
 	}
 
@@ -158,7 +376,7 @@ func TestLocalAliasRefusesOwnerMismatch(t *testing.T) {
 	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "web.example.com", Session: mallory}); err != nil {
 		t.Fatalf("bind: %v", err)
 	}
-	if _, b, state := s.localAlias("app.example.org", "1.1.1.1"); b != nil || state != aliasRefused {
+	if _, b, state := s.localAlias("app.example.org"); b != nil || state != aliasRefused {
 		t.Fatalf("mismatched owner state = %v binding=%v, want aliasRefused", state, b)
 	}
 
@@ -167,14 +385,14 @@ func TestLocalAliasRefusesOwnerMismatch(t *testing.T) {
 	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "web.example.com", Session: alice}); err != nil {
 		t.Fatalf("rebind: %v", err)
 	}
-	if _, b, state := s.localAlias("app.example.org", "1.1.1.1"); b == nil || state != aliasLocal {
+	if _, b, state := s.localAlias("app.example.org"); b == nil || state != aliasLocal {
 		t.Fatalf("matching owner state = %v binding=%v, want aliasLocal", state, b)
 	}
 }
 
 func TestHandlePublicRoutesActiveCustomDomain(t *testing.T) {
 	s := newAliasServer(t)
-	registerActiveDomain(t, s.storage, "app.example.org", "web.example.com", "http", "alice")
+	registerActiveDomain(t, s, "app.example.org", "web.example.com", "http", "alice")
 	var mu sync.Mutex
 	var seenHost string
 	as := ownedSession(t, "alice", func(w http.ResponseWriter, r *http.Request) {
@@ -237,7 +455,7 @@ func TestHandlePublicPendingCustomDomain404(t *testing.T) {
 
 func TestHandlePublicCustomDomainTLSKind421(t *testing.T) {
 	s := newAliasServer(t)
-	registerActiveDomain(t, s.storage, "secure.example.org", "secure.example.com", "tls", "alice")
+	registerActiveDomain(t, s, "secure.example.org", "secure.example.com", "tls", "alice")
 	as := ownedSession(t, "alice", nil)
 	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "secure.example.com", Session: as, TLS: true}); err != nil {
 		t.Fatalf("bind: %v", err)
@@ -249,7 +467,7 @@ func TestHandlePublicCustomDomainTLSKind421(t *testing.T) {
 
 func TestHandlePublicCustomDomainLoginRule403(t *testing.T) {
 	s := newAliasServer(t)
-	registerActiveDomain(t, s.storage, "app.example.org", "login.example.com", "http", "alice")
+	registerActiveDomain(t, s, "app.example.org", "login.example.com", "http", "alice")
 	hits := atomic.Int64{}
 	as := ownedSession(t, "alice", func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
@@ -274,7 +492,7 @@ func TestHandlePublicCustomDomainLoginRule403(t *testing.T) {
 func TestClassifyRoutesCustomDomainPassthrough(t *testing.T) {
 	agentCert, agentPool := passthroughTestCert(t, "tls.example.org")
 	s := newAliasServer(t)
-	registerActiveDomain(t, s.storage, "tls.example.org", "tls-tun.example.com", "tls", "alice")
+	registerActiveDomain(t, s, "tls.example.org", "tls-tun.example.com", "tls", "alice")
 
 	var preamble atomic.Pointer[proto.StreamOpen]
 	fx := newTCPFixture(t, func(conn net.Conn, pre proto.StreamOpen) {

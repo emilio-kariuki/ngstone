@@ -2,26 +2,24 @@ package edge
 
 import (
 	"context"
+	"log/slog"
+	"sync"
+	"sync/atomic"
 	"time"
-
-	"github.com/hashicorp/golang-lru/v2/expirable"
-	"golang.org/x/sync/singleflight"
 
 	"ngstone/internal/storage"
 )
 
 const (
-	aliasHitCacheSize  = 4096
-	aliasHitCacheTTL   = 30 * time.Second
-	aliasMissCacheSize = 4096
-	aliasMissCacheTTL  = 5 * time.Second
-	maxAliasLookups    = 8
-	aliasLimiterRate   = 2
-	aliasLimiterBurst  = 10
-	aliasLimiterSize   = 10000
+	aliasPollInterval      = 5 * time.Second
+	maxActiveCustomDomains = 10000
 )
 
-type aliasTarget = storage.CustomDomainTarget
+type aliasTarget struct {
+	Hostname string
+	Kind     string
+	OwnerID  string
+}
 
 type aliasState int
 
@@ -33,46 +31,24 @@ const (
 )
 
 type customDomainStore interface {
-	LookupCustomDomainTarget(ctx context.Context, domain string) (storage.CustomDomainTarget, bool, error)
-}
-
-type aliasLookupResult struct {
-	target aliasTarget
-	found  bool
+	ActiveCustomDomains(ctx context.Context, limit int) ([]storage.ActiveCustomDomain, error)
 }
 
 type aliasResolver struct {
 	store    customDomainStore
 	reserved func(string) bool
-	hits     *expirable.LRU[string, aliasTarget]
-	misses   *expirable.LRU[string, struct{}]
-	flights  singleflight.Group
-	sem      *globalSemaphore
-	limiter  *perIPLimiter
+	ttl      func() time.Duration
+	limit    int
+	snapshot atomic.Pointer[map[string]aliasTarget]
+	fresh    atomic.Int64
+	mu       sync.Mutex
 }
 
-func newAliasResolver(store customDomainStore, reserved func(string) bool) *aliasResolver {
-	return &aliasResolver{
-		store:    store,
-		reserved: reserved,
-		hits:     expirable.NewLRU[string, aliasTarget](aliasHitCacheSize, nil, aliasHitCacheTTL),
-		misses:   expirable.NewLRU[string, struct{}](aliasMissCacheSize, nil, aliasMissCacheTTL),
-		sem:      newGlobalSemaphore(maxAliasLookups),
-		limiter:  newPerIPLimiter(aliasLimiterRate, aliasLimiterBurst, aliasLimiterSize),
-	}
+func newAliasResolver(store customDomainStore, reserved func(string) bool, ttl func() time.Duration) *aliasResolver {
+	return &aliasResolver{store: store, reserved: reserved, ttl: ttl, limit: maxActiveCustomDomains}
 }
 
-func (a *aliasResolver) cached(name string) (aliasLookupResult, bool) {
-	if target, ok := a.hits.Get(name); ok {
-		return aliasLookupResult{target: target, found: true}, true
-	}
-	if _, miss := a.misses.Get(name); miss {
-		return aliasLookupResult{}, true
-	}
-	return aliasLookupResult{}, false
-}
-
-func (a *aliasResolver) resolve(host, ip string) (aliasTarget, bool) {
+func (a *aliasResolver) resolve(host string) (aliasTarget, bool) {
 	if a == nil {
 		return aliasTarget{}, false
 	}
@@ -80,52 +56,66 @@ func (a *aliasResolver) resolve(host, ip string) (aliasTarget, bool) {
 	if !ok || a.reserved(name) {
 		return aliasTarget{}, false
 	}
-	if result, ok := a.cached(name); ok {
-		return result.target, result.found
-	}
-	if !a.limiter.allow(ip) {
-		metricCustomDomainRateLimited.Add(1)
+	snapshot := a.snapshot.Load()
+	if snapshot == nil {
 		return aliasTarget{}, false
 	}
-	value, _, _ := a.flights.Do(name, func() (any, error) {
-		return a.lookup(name), nil
-	})
-	result := value.(aliasLookupResult)
-	return result.target, result.found
+	target, ok := (*snapshot)[name]
+	return target, ok
 }
 
-func (a *aliasResolver) lookup(name string) aliasLookupResult {
-	if result, ok := a.cached(name); ok {
-		return result
+func (a *aliasResolver) watch(ctx context.Context) error {
+	ticker := time.NewTicker(aliasPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			a.load(ctx, time.Now())
+		}
 	}
-	if !a.sem.tryAcquire() {
-		metricCustomDomainRejectedLookupCap.Add(1)
-		return aliasLookupResult{}
-	}
-	defer a.sem.release()
-	metricCustomDomainLookups.Add(1)
-	ctx, cancel := context.WithTimeout(context.Background(), peerLookupTimeout)
-	defer cancel()
-	target, found, err := a.store.LookupCustomDomainTarget(ctx, name)
-	if err != nil {
-		metricCustomDomainLookupErrors.Add(1)
-		slogStorageError("lookup custom domain", err)
-		return aliasLookupResult{}
-	}
-	if !found {
-		a.misses.Add(name, struct{}{})
-		return aliasLookupResult{}
-	}
-	a.hits.Add(name, target)
-	return aliasLookupResult{target: target, found: true}
 }
 
-func (a *aliasResolver) purge() {
+func (a *aliasResolver) refresh(ctx context.Context) {
 	if a == nil {
 		return
 	}
-	a.hits.Purge()
-	a.misses.Purge()
+	a.load(ctx, time.Now())
+}
+
+func (a *aliasResolver) load(ctx context.Context, now time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	qctx, cancel := context.WithTimeout(ctx, peerLookupTimeout)
+	rows, err := a.store.ActiveCustomDomains(qctx, a.limit)
+	cancel()
+	if ctx.Err() != nil {
+		return
+	}
+	if err != nil {
+		metricCustomDomainLookupErrors.Add(1)
+		slogStorageError("load custom domains", err)
+		if last := a.fresh.Load(); last != 0 && now.Sub(time.Unix(0, last)) > a.ttl() {
+			a.fresh.Store(0)
+			a.replace(map[string]aliasTarget{})
+		}
+		return
+	}
+	if len(rows) >= a.limit {
+		slog.Warn("edge: active custom domains reached the routing cap; domains beyond it are not routed", "cap", a.limit)
+	}
+	snapshot := make(map[string]aliasTarget, len(rows))
+	for _, row := range rows {
+		snapshot[row.Domain] = aliasTarget{Hostname: row.Hostname, Kind: row.Kind, OwnerID: row.OwnerID}
+	}
+	a.fresh.Store(now.UnixNano())
+	a.replace(snapshot)
+}
+
+func (a *aliasResolver) replace(snapshot map[string]aliasTarget) {
+	a.snapshot.Store(&snapshot)
+	metricCustomDomainsActive.Set(int64(len(snapshot)))
 }
 
 func (b *Binding) ownerID() string {
@@ -137,11 +127,11 @@ func (b *Binding) ownerID() string {
 	return durableOwnerID(b.Sess)
 }
 
-func (s *Server) localAlias(host, ip string) (aliasTarget, *Binding, aliasState) {
+func (s *Server) localAlias(host string) (aliasTarget, *Binding, aliasState) {
 	if s.registry == nil {
 		return aliasTarget{}, nil, aliasNone
 	}
-	target, ok := s.aliases.resolve(host, ip)
+	target, ok := s.aliases.resolve(host)
 	if !ok {
 		return aliasTarget{}, nil, aliasNone
 	}

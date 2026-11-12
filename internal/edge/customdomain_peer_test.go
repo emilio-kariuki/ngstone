@@ -2,8 +2,6 @@ package edge
 
 import (
 	"context"
-	"crypto/tls"
-	"fmt"
 	"testing"
 	"time"
 
@@ -37,8 +35,9 @@ func (e *peerEdge) leaseFor(t *testing.T, host, owner string) string {
 	return lease.TunnelID
 }
 
-func activateDomainFor(t *testing.T, store *storage.Store, domain, tunnelID, owner string) {
+func activateDomainFor(t *testing.T, e *peerEdge, domain, tunnelID, owner string) {
 	t.Helper()
+	store := e.store
 	created, err := store.CreateCustomDomain(context.Background(), storage.CustomDomainSpec{Domain: domain, OwnerID: owner, TunnelID: tunnelID})
 	if err != nil {
 		t.Fatalf("create domain %s: %v", domain, err)
@@ -46,6 +45,7 @@ func activateDomainFor(t *testing.T, store *storage.Store, domain, tunnelID, own
 	if _, err := store.SetCustomDomainStatus(context.Background(), created.ID, "active"); err != nil {
 		t.Fatalf("activate domain %s: %v", domain, err)
 	}
+	e.srv.aliases.refresh(context.Background())
 }
 
 func newCustomDomainCluster(t *testing.T, names ...string) *peerCluster {
@@ -60,7 +60,8 @@ func TestClassifyForwardsCustomDomainToOwner(t *testing.T) {
 	a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
 	registerPeers(t, a, b)
 	tunnelID := b.bindTLSAs(t, peerTestHost, "owner", "owner")
-	activateDomainFor(t, b.store, "tls.example.org", tunnelID, "owner")
+	activateDomainFor(t, b, "tls.example.org", tunnelID, "owner")
+	a.srv.aliases.refresh(context.Background())
 	forwarded := metricDelta(metricPeerForwardedConns)
 
 	tc, err := dialIngress(t, a, "tls.example.org", pc.pool)
@@ -81,7 +82,8 @@ func TestClassifyForwardedCustomDomainNotOwnerWhenUnbound(t *testing.T) {
 	a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
 	registerPeers(t, a, b)
 	tunnelID := a.leaseFor(t, peerTestHost, "owner")
-	activateDomainFor(t, a.store, "tls.example.org", tunnelID, "owner")
+	activateDomainFor(t, a, "tls.example.org", tunnelID, "owner")
+	b.srv.aliases.refresh(context.Background())
 
 	tc, err := dialPeerTLS(t, a.srv.peers.clientTLS(b.pin()), b.peerAddr())
 	if err != nil {
@@ -100,7 +102,7 @@ func TestClassifyForwardedCustomDomainRefusesOwnerMismatch(t *testing.T) {
 	a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
 	registerPeers(t, a, b)
 	tunnelID := b.bindTLSAs(t, peerTestHost, "owner", "mallory")
-	activateDomainFor(t, b.store, "tls.example.org", tunnelID, "owner")
+	activateDomainFor(t, b, "tls.example.org", tunnelID, "owner")
 	mismatch := metricDelta(metricCustomDomainOwnerMismatch)
 
 	tc, err := dialPeerTLS(t, a.srv.peers.clientTLS(b.pin()), b.peerAddr())
@@ -112,31 +114,5 @@ func TestClassifyForwardedCustomDomainRefusesOwnerMismatch(t *testing.T) {
 	expectClosed(t, tc)
 	if b.agentHit.Load() != 0 || mismatch() != 1 {
 		t.Fatalf("agentHit=%d mismatch=%d, want 0, 1", b.agentHit.Load(), mismatch())
-	}
-}
-
-func TestCustomDomainFloodDoesNotQueryOwners(t *testing.T) {
-	pc := newPeerCluster(t)
-	a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
-	registerPeers(t, a, b)
-	b.bindTLS(t, peerTestHost)
-	ownerLookups := metricDelta(metricPeerLookups)
-	customLookups := metricDelta(metricCustomDomainLookups)
-	limited := metricDelta(metricCustomDomainRateLimited)
-	started := time.Now()
-
-	const flood = 500
-	for i := 0; i < flood; i++ {
-		sendRawHello(t, a.addr, captureClientHello(t, &tls.Config{ServerName: fmt.Sprintf("rnd-%d.example.org", i), InsecureSkipVerify: true}))
-	}
-	peerEventually(t, "every flood connection to be classified", func() bool {
-		return customLookups()+limited() >= flood
-	})
-	if got := ownerLookups(); got != 0 {
-		t.Fatalf("owner lookups = %d, want 0", got)
-	}
-	bound := int64(aliasLimiterBurst) + int64(time.Since(started).Seconds()*aliasLimiterRate) + 1
-	if got := customLookups(); got > bound {
-		t.Fatalf("custom domain lookups = %d, want at most %d", got, bound)
 	}
 }
