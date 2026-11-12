@@ -160,6 +160,21 @@ func unmapUDPAddr(a net.Addr) net.Addr {
 	return &net.UDPAddr{IP: ip, Port: ua.Port, Zone: ua.Zone}
 }
 
+func orderQUICCandidates(ips []netip.Addr) []netip.Addr {
+	out := make([]netip.Addr, 0, len(ips))
+	for _, ip := range ips {
+		if ip = ip.Unmap(); ip.Is4() {
+			out = append(out, ip)
+		}
+	}
+	for _, ip := range ips {
+		if ip = ip.Unmap(); !ip.Is4() {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
 func DialQUIC(ctx context.Context, addr string, tlsConf *tls.Config) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -169,26 +184,35 @@ func DialQUIC(ctx context.Context, addr string, tlsConf *tls.Config) (net.Conn, 
 	if err != nil {
 		return nil, err
 	}
-	var ip netip.Addr
+	var ips []netip.Addr
 	if lit, perr := netip.ParseAddr(host); perr == nil {
-		ip = lit.Unmap()
+		ips = []netip.Addr{lit}
 	} else {
-		ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+		ips, err = net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 		if err != nil {
 			return nil, err
 		}
-		if len(ips) == 0 {
-			return nil, fmt.Errorf("tunnel: no addresses for %q", host)
+	}
+	candidates := orderQUICCandidates(ips)
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("tunnel: no addresses for %q", host)
+	}
+	var lastErr error
+	for _, ip := range candidates {
+		conn, err := dialQUICAddr(ctx, net.JoinHostPort(ip.String(), strconv.Itoa(portNum)), tlsConf)
+		if err == nil {
+			return conn, nil
 		}
-		ip = ips[0].Unmap()
-		for _, cand := range ips {
-			if cand.Unmap().Is4() {
-				ip = cand.Unmap()
-				break
-			}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
 		}
 	}
-	qc, err := quic.DialAddr(ctx, net.JoinHostPort(ip.String(), strconv.Itoa(portNum)), tlsConf, quicClientConfig())
+	return nil, lastErr
+}
+
+func dialQUICAddr(ctx context.Context, addr string, tlsConf *tls.Config) (net.Conn, error) {
+	qc, err := quic.DialAddr(ctx, addr, tlsConf, quicClientConfig())
 	if err != nil {
 		return nil, err
 	}

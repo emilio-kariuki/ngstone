@@ -13,6 +13,7 @@ import (
 	"io"
 	"math/big"
 	"net"
+	"net/netip"
 	"strconv"
 	"testing"
 	"time"
@@ -681,5 +682,32 @@ func TestAcceptQUICClosesConnWithoutStream(t *testing.T) {
 	case <-sqc.Context().Done():
 	case <-time.After(2 * time.Second):
 		t.Fatal("connection left open after AcceptQUIC failed")
+	}
+}
+
+func TestOrderQUICCandidatesPutsIPv4First(t *testing.T) {
+	in := []netip.Addr{
+		netip.MustParseAddr("2001:db8::1"),
+		netip.MustParseAddr("::ffff:192.0.2.1"),
+		netip.MustParseAddr("2001:db8::2"),
+		netip.MustParseAddr("192.0.2.2"),
+	}
+	want := []netip.Addr{
+		netip.MustParseAddr("192.0.2.1"),
+		netip.MustParseAddr("192.0.2.2"),
+		netip.MustParseAddr("2001:db8::1"),
+		netip.MustParseAddr("2001:db8::2"),
+	}
+	got := orderQUICCandidates(in)
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+	if len(orderQUICCandidates(nil)) != 0 {
+		t.Fatal("no addresses must yield no candidates")
 	}
 }
