@@ -1484,7 +1484,7 @@ func (s *Store) SetCustomDomainStatus(ctx context.Context, id, status string) (C
 }
 
 func (s *Store) ActiveCustomDomains(ctx context.Context, limit int) ([]ActiveCustomDomain, error) {
-	rows, err := s.db.QueryContext(ctx, s.bind(`SELECT d.domain, t.hostname, t.kind, d.owner_id FROM custom_domains d JOIN tunnels t ON t.id = d.tunnel_id WHERE d.status = 'active' AND d.activated_at IS NOT NULL AND t.kind IN ('http', 'tls') AND t.remote_port = 0 AND t.owner_id = d.owner_id ORDER BY d.domain LIMIT $1`), limit)
+	rows, err := s.db.QueryContext(ctx, s.bind(`SELECT d.domain, t.hostname, t.kind, d.owner_id FROM custom_domains d JOIN tunnels t ON t.id = d.tunnel_id WHERE d.status = 'active' AND d.activated_at IS NOT NULL AND t.kind IN ('http', 'tls') AND t.remote_port = 0 AND t.owner_id = d.owner_id ORDER BY d.activated_at, d.domain LIMIT $1`), limit)
 	if err != nil {
 		return nil, fmt.Errorf("storage: list active custom domains: %w", err)
 	}

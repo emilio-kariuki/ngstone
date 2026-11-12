@@ -209,34 +209,66 @@ func TestAliasSnapshotFailsClosedAfterTTL(t *testing.T) {
 	}
 }
 
-func TestAliasSnapshotCap(t *testing.T) {
-	store := openAliasStore(t)
-	for _, name := range []string{"a.example.org", "b.example.org", "c.example.org"} {
-		activateRow(t, store, name, "host-"+name, "alice", true)
-	}
+func captureAliasLogs(t *testing.T) *lockedBuffer {
+	t.Helper()
 	logs := &lockedBuffer{}
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
+	return logs
+}
+
+func TestAliasSnapshotAtCapDropsNothing(t *testing.T) {
+	store := openAliasStore(t)
+	names := []string{"a.example.org", "b.example.org", "c.example.org"}
+	for _, name := range names {
+		activateRow(t, store, name, "host-"+name, "alice", true)
+	}
+	logs := captureAliasLogs(t)
+	resolver := newTestResolver(store, func(string) bool { return false })
+	resolver.limit = len(names)
+	resolver.refresh(t.Context())
+	for _, name := range names {
+		if _, ok := resolver.resolve(name); !ok {
+			t.Fatalf("resolve(%q) = false at exactly the cap", name)
+		}
+	}
+	if strings.Contains(logs.String(), "routing cap") {
+		t.Fatalf("cap message at exactly the cap: %s", logs.String())
+	}
+}
+
+func TestAliasSnapshotCapDropsNewestActivation(t *testing.T) {
+	store := openAliasStore(t)
+	for _, name := range []string{"z.example.org", "m.example.org", "a.example.org"} {
+		activateRow(t, store, name, "host-"+name, "alice", true)
+	}
+	logs := captureAliasLogs(t)
 	resolver := newTestResolver(store, func(string) bool { return false })
 	resolver.limit = 2
 	resolver.refresh(t.Context())
+	resolver.refresh(t.Context())
 
-	for host, want := range map[string]bool{"a.example.org": true, "b.example.org": true, "c.example.org": false} {
+	for host, want := range map[string]bool{"z.example.org": true, "m.example.org": true, "a.example.org": false} {
 		if _, ok := resolver.resolve(host); ok != want {
 			t.Fatalf("resolve(%q) = %v, want %v", host, ok, want)
 		}
 	}
-	if !strings.Contains(logs.String(), "routing cap") {
-		t.Fatalf("no cap warning in logs: %s", logs.String())
+	if got := strings.Count(logs.String(), "exceed the routing cap"); got != 1 {
+		t.Fatalf("over-cap warnings after two polls = %d, want 1: %s", got, logs.String())
 	}
 
-	resolver.limit = 4
-	logs2 := &lockedBuffer{}
-	slog.SetDefault(slog.New(slog.NewTextHandler(logs2, nil)))
+	resolver.limit = 3
 	resolver.refresh(t.Context())
-	if strings.Contains(logs2.String(), "routing cap") {
-		t.Fatalf("cap warning below the cap: %s", logs2.String())
+	resolver.refresh(t.Context())
+	if _, ok := resolver.resolve("a.example.org"); !ok {
+		t.Fatal("newest domain still unrouted after the cap cleared")
+	}
+	if got := strings.Count(logs.String(), "back within the routing cap"); got != 1 {
+		t.Fatalf("cleared messages = %d, want 1: %s", got, logs.String())
+	}
+	if got := strings.Count(logs.String(), "exceed the routing cap"); got != 1 {
+		t.Fatalf("over-cap warnings after clearing = %d, want 1: %s", got, logs.String())
 	}
 }
 

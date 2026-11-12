@@ -299,12 +299,18 @@ func TestActiveCustomDomainsRequiresActivatedAt(t *testing.T) {
 	})
 }
 
-func TestActiveCustomDomainsOrdersAndLimits(t *testing.T) {
+func TestActiveCustomDomainsOrdersByActivationAndLimits(t *testing.T) {
 	forEachDialect(t, func(t *testing.T, open func() *Store) {
 		s := open()
 		ctx := t.Context()
 		tunnelID := createTunnel(t, s, "web.example.com", "http", "alice", 0)
-		for _, name := range []string{"c.example.org", "a.example.org", "b.example.org"} {
+		activations := map[string]string{
+			"c.example.org": "2026-01-01T00:00:03.000000000Z",
+			"a.example.org": "2026-01-01T00:00:02.000000000Z",
+			"b.example.org": "2026-01-01T00:00:02.000000000Z",
+			"z.example.org": "2026-01-01T00:00:01.000000000Z",
+		}
+		for name, at := range activations {
 			domain, err := s.CreateCustomDomain(ctx, CustomDomainSpec{Domain: name, OwnerID: "alice", TunnelID: tunnelID})
 			if err != nil {
 				t.Fatal(err)
@@ -312,10 +318,45 @@ func TestActiveCustomDomainsOrdersAndLimits(t *testing.T) {
 			if _, err := s.SetCustomDomainStatus(ctx, domain.ID, "active"); err != nil {
 				t.Fatal(err)
 			}
+			if _, err := s.db.ExecContext(ctx, s.bind(`UPDATE custom_domains SET activated_at = $2 WHERE id = $1`), domain.ID, at); err != nil {
+				t.Fatal(err)
+			}
 		}
-		got := activeDomains(t, s, 2)
-		if len(got) != 2 || got[0].Domain != "a.example.org" || got[1].Domain != "b.example.org" {
-			t.Fatalf("limited active domains = %+v, want a and b", got)
+		want := []string{"z.example.org", "a.example.org", "b.example.org", "c.example.org"}
+		for limit := 1; limit <= len(want); limit++ {
+			got := activeDomains(t, s, limit)
+			if len(got) != limit {
+				t.Fatalf("limit %d returned %d rows", limit, len(got))
+			}
+			for i := range got {
+				if got[i].Domain != want[i] {
+					t.Fatalf("limit %d row %d = %q, want %q", limit, i, got[i].Domain, want[i])
+				}
+			}
+		}
+	})
+}
+
+func TestActiveCustomDomainsExcludesRawTCPTunnels(t *testing.T) {
+	forEachDialect(t, func(t *testing.T, open func() *Store) {
+		s := open()
+		ctx := t.Context()
+		tunnelID := createTunnel(t, s, "web.example.com", "http", "alice", 0)
+		domain, err := s.CreateCustomDomain(ctx, CustomDomainSpec{Domain: "app.example.org", OwnerID: "alice", TunnelID: tunnelID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SetCustomDomainStatus(ctx, domain.ID, "active"); err != nil {
+			t.Fatal(err)
+		}
+		if got := activeDomains(t, s, 10); len(got) != 1 {
+			t.Fatalf("active domains before the port change = %+v, want one", got)
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE tunnels SET remote_port = 20001 WHERE hostname = 'web.example.com'`); err != nil {
+			t.Fatal(err)
+		}
+		if got := activeDomains(t, s, 10); len(got) != 0 {
+			t.Fatalf("a tunnel with a remote port was returned: %+v", got)
 		}
 	})
 }

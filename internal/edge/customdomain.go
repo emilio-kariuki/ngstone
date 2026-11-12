@@ -42,6 +42,7 @@ type aliasResolver struct {
 	snapshot atomic.Pointer[map[string]aliasTarget]
 	fresh    atomic.Int64
 	mu       sync.Mutex
+	overCap  bool
 }
 
 func newAliasResolver(store customDomainStore, reserved func(string) bool, ttl func() time.Duration) *aliasResolver {
@@ -88,7 +89,7 @@ func (a *aliasResolver) load(ctx context.Context, now time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	qctx, cancel := context.WithTimeout(ctx, peerLookupTimeout)
-	rows, err := a.store.ActiveCustomDomains(qctx, a.limit)
+	rows, err := a.store.ActiveCustomDomains(qctx, a.limit+1)
 	cancel()
 	if ctx.Err() != nil {
 		return
@@ -102,8 +103,17 @@ func (a *aliasResolver) load(ctx context.Context, now time.Time) {
 		}
 		return
 	}
-	if len(rows) >= a.limit {
-		slog.Warn("edge: active custom domains reached the routing cap; domains beyond it are not routed", "cap", a.limit)
+	over := len(rows) > a.limit
+	if over {
+		rows = rows[:a.limit]
+	}
+	if over != a.overCap {
+		a.overCap = over
+		if over {
+			slog.Warn("edge: active custom domains exceed the routing cap; the most recently activated domains are not routed", "cap", a.limit)
+		} else {
+			slog.Info("edge: active custom domains are back within the routing cap", "cap", a.limit)
+		}
 	}
 	snapshot := make(map[string]aliasTarget, len(rows))
 	for _, row := range rows {
