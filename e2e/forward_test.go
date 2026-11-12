@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"ngstone/internal/adminapi/adminapitest"
 	"ngstone/internal/agent"
 	"ngstone/internal/credentials"
 	"ngstone/internal/edge"
@@ -46,6 +47,7 @@ type fwdEdge struct {
 	id          string
 	controlAddr string
 	publicAddr  string
+	adminAddr   string
 	store       *storage.Store
 }
 
@@ -54,6 +56,8 @@ type fwdConfig struct {
 	idp            *e2eIdP
 	separateListen bool
 	tcpLo, tcpHi   int
+	customNames    []string
+	adminMTLS      bool
 }
 
 type fwdOption func(*fwdConfig)
@@ -74,13 +78,24 @@ func withVisitorIdP(idp *e2eIdP) fwdOption {
 	return func(c *fwdConfig) { c.idp = idp }
 }
 
+func withCustomNames(names ...string) fwdOption {
+	return func(c *fwdConfig) { c.customNames = names }
+}
+
+func withAdminMTLS() fwdOption {
+	return func(c *fwdConfig) { c.adminMTLS = true }
+}
+
 type fwdPair struct {
-	dsn     string
-	cfg     fwdConfig
-	cert    tls.Certificate
-	pool    *x509.CertPool
-	aPublic string
-	a, b    *fwdEdge
+	dsn         string
+	cfg         fwdConfig
+	cert        tls.Certificate
+	pool        *x509.CertPool
+	aPublic     string
+	a, b        *fwdEdge
+	owner       string
+	adminCA     *adminapitest.CA
+	adminCAFile string
 }
 
 type fwdAgent struct {
@@ -106,7 +121,14 @@ func startForwardedPair(t *testing.T, dsn string, opts ...fwdOption) *fwdPair {
 	for _, opt := range opts {
 		opt(&p.cfg)
 	}
-	p.cert, p.pool = selfSignedTLSCert(t, fwdDomain, "*."+fwdDomain)
+	p.cert, p.pool = selfSignedTLSCert(t, fwdDomain, append([]string{"*." + fwdDomain}, p.cfg.customNames...)...)
+	if p.cfg.adminMTLS {
+		p.adminCA = adminapitest.NewCA(t)
+		p.adminCAFile = filepath.Join(t.TempDir(), "admin-ca.pem")
+		if err := os.WriteFile(p.adminCAFile, p.adminCA.PEM, 0o600); err != nil {
+			t.Fatalf("write admin client CA: %v", err)
+		}
+	}
 	p.aPublic = freeAddr(t)
 	p.a = p.startEdge(t, "edge-a", p.aPublic, p.cfg.proxySrc != "")
 	p.b = p.startEdge(t, "edge-b", freeAddr(t), false)
@@ -145,6 +167,11 @@ func (p *fwdPair) startEdge(t *testing.T, id, publicAddr string, proxyProtocol b
 			cfg.TCPBindAddr = "::1"
 		}
 	}
+	if p.cfg.adminMTLS {
+		e.adminAddr = freeAddr(t)
+		cfg.AdminMTLSAddr = e.adminAddr
+		cfg.AdminMTLSClientCAFile = p.adminCAFile
+	}
 	if proxyProtocol {
 		cfg.ProxyProtocol = true
 		cfg.ProxyProtocolTrusted = []string{"127.0.0.1/32"}
@@ -177,6 +204,9 @@ func (p *fwdPair) startEdge(t *testing.T, id, publicAddr string, proxyProtocol b
 	})
 	waitForPort(t, e.controlAddr)
 	waitForPort(t, e.publicAddr)
+	if e.adminAddr != "" {
+		waitForPort(t, e.adminAddr)
+	}
 	return e
 }
 
@@ -218,7 +248,11 @@ func portMap(t *testing.T, to string) string {
 
 func (p *fwdPair) startAgent(t *testing.T, e *fwdEdge, credKind, subdomain, target string, mutate func(*agent.Config)) *fwdAgent {
 	t.Helper()
-	issued, err := e.store.Issue(credentials.Spec{Kind: credKind, Subdomain: subdomain, OwnerID: "e2e-owner"}, time.Hour)
+	owner := "e2e-owner"
+	if p.owner != "" {
+		owner = p.owner
+	}
+	issued, err := e.store.Issue(credentials.Spec{Kind: credKind, Subdomain: subdomain, OwnerID: owner}, time.Hour)
 	if err != nil {
 		t.Fatalf("issue credential for %s: %v", subdomain, err)
 	}
