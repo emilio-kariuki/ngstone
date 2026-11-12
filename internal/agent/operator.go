@@ -27,13 +27,8 @@ var ErrShareNotFound = errors.New("agent: no such live share")
 // session dials, authenticates and returns the live session; the caller
 // says goodbye and closes it.
 func (o *Operator) session(ctx context.Context) (tunnel.Session, *proto.IDGen, error) {
-	conn, err := dialControl(ctx, o.cfg)
+	sess, err := dialControlSessionModes(ctx, o.cfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
-	}
-	sess, err := tunnel.Client(conn)
-	if err != nil {
-		conn.Close()
 		return nil, nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
 	}
 	a := New(o.cfg)

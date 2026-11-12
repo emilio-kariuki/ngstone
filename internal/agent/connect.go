@@ -71,6 +71,7 @@ type ConnectConfig struct {
 	ServerName string
 	Pin        string
 	RootCAs    *x509.CertPool
+	Transport  string
 
 	Events chan<- ConnectEvent
 }
@@ -182,6 +183,7 @@ func (c *Connector) dialConfig() Config {
 		ServerName:  c.cfg.ServerName,
 		Pin:         c.cfg.Pin,
 		RootCAs:     c.cfg.RootCAs,
+		Transport:   c.cfg.Transport,
 	}
 }
 
@@ -255,14 +257,9 @@ func (c *Connector) expired() bool {
 }
 
 func (c *Connector) runOnce(ctx context.Context, bo *backoff) error {
-	conn, err := dialControl(ctx, c.dialConfig())
+	sess, err := dialControlSessionModes(ctx, c.dialConfig())
 	if err != nil {
 		return err
-	}
-	sess, err := tunnel.Client(conn)
-	if err != nil {
-		conn.Close()
-		return fmt.Errorf("connector: session: %w", err)
 	}
 	defer sess.Close("connector session ended")
 

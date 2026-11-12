@@ -112,6 +112,31 @@ func controlHost(addr string) (string, error) {
 	return addr, nil
 }
 
+var dialControlSessionFn = dialControlSession
+
+func dialControlSessionModes(ctx context.Context, cfg Config) (tunnel.Session, error) {
+	modes, err := transportModes(cfg.Transport)
+	if err != nil {
+		return nil, err
+	}
+	var failed error
+	for _, mode := range modes {
+		sess, err := dialControlSessionFn(ctx, cfg, mode)
+		if err == nil {
+			return sess, nil
+		}
+		if failed == nil {
+			failed = err
+		} else {
+			failed = fmt.Errorf("%w; %w", failed, err)
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, failed
+}
+
 func dialControlSession(ctx context.Context, cfg Config, mode string) (tunnel.Session, error) {
 	conn, err := dialControlMode(ctx, cfg, mode)
 	if err != nil {
