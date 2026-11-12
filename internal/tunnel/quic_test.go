@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -67,6 +68,11 @@ func newQUICTestListener(t *testing.T, laddr string) (*quic.Listener, int) {
 	if err != nil {
 		t.Fatalf("udp listen %s: %v", laddr, err)
 	}
+	return newQUICTestListenerOn(t, pc)
+}
+
+func newQUICTestListenerOn(t *testing.T, pc *net.UDPConn) (*quic.Listener, int) {
+	t.Helper()
 	tr := &quic.Transport{Conn: pc}
 	ln, err := tr.Listen(&tls.Config{
 		Certificates: []tls.Certificate{quicTestCert(t)},
@@ -690,12 +696,25 @@ func TestQUICCloseUnblocksPendingRead(t *testing.T) {
 }
 
 func TestQUICRemoteAddrUnmapsIPv4(t *testing.T) {
-	probe, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv6unspecified})
-	if err != nil {
-		t.Skipf("host cannot listen on [::]:0: %v", err)
+	var pc *net.UDPConn
+	for i := 0; i < 5 && pc == nil; i++ {
+		reserve, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reserved := reserve.LocalAddr().(*net.UDPAddr).Port
+		reserve.Close()
+		c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv6unspecified, Port: reserved})
+		if err == nil {
+			pc = c
+		} else if !errors.Is(err, syscall.EADDRINUSE) {
+			t.Skipf("host cannot listen on [::]:%d: %v", reserved, err)
+		}
 	}
-	probe.Close()
-	ln, port := newQUICTestListener(t, "[::]:0")
+	if pc == nil {
+		t.Fatal("no free port for a dual-stack listener after 5 attempts")
+	}
+	ln, port := newQUICTestListenerOn(t, pc)
 	type result struct {
 		nc  net.Conn
 		qc  *quic.Conn
