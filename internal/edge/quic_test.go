@@ -714,6 +714,7 @@ func quicShareCluster(t *testing.T, unauthSlots int64) (*shareCluster, string) {
 	cl := newShareCluster(t)
 	cl.a.srv.handshakeSem = newGlobalSemaphore(4)
 	cl.a.srv.unauthSem = newGlobalSemaphore(unauthSlots)
+	cl.a.srv.unauthPerAddr = newPerIPInflight(8)
 	return cl, startQUICServeForTest(t, cl.a.srv, true)
 }
 
@@ -733,6 +734,7 @@ func TestQUICForwardedShareRejectedKeepsHardStop(t *testing.T) {
 	cl := newShareCluster(t)
 	cl.a.srv.handshakeSem = newGlobalSemaphore(4)
 	cl.a.srv.unauthSem = newGlobalSemaphore(1)
+	cl.a.srv.unauthPerAddr = newPerIPInflight(8)
 	publishStaleShareRow(t, cl.b, "stale-secret")
 	addr := startQUICServeForTest(t, cl.a.srv, true)
 
@@ -767,6 +769,9 @@ func TestQUICConnectorAcrossEdges(t *testing.T) {
 	}
 	if !quicSlotFree(cl.a.srv.unauthSem) {
 		t.Fatal("the ingress kept its unauthenticated slot after the holder accepted the link")
+	}
+	if got := cl.a.srv.unauthPerAddr.inUse("127.0.0.1"); got != 0 {
+		t.Fatalf("the ingress kept %d address slots after the holder accepted the link", got)
 	}
 	if err := sess.Control().Write(proto.TypeConnect, 5, proto.Connect{}); err != nil {
 		t.Fatal(err)
