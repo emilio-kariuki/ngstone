@@ -318,6 +318,7 @@ export default function ConfigurationPage() {
         <code>-per-session-inflight</code>, <code>-upgrade-inflight</code>,{" "}
         <code>-per-session-upgrade</code>,{" "}
         <code>-handshake-concurrency</code>, <code>-unauth-sessions</code>,{" "}
+        <code>-unauth-per-addr</code>,{" "}
         <code>-per-ip-inflight</code>, <code>-client-idle-timeout</code>,{" "}
         <code>-tcp-idle-timeout</code>, <code>-webhook-max-body-bytes</code>,{" "}
         <code>-webhook-buffer-bytes</code>, <code>-max-share-ttl</code>,{" "}
