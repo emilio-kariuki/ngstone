@@ -19,14 +19,13 @@ import (
 const (
 	QUICALPN = "ngstone-quic-1"
 
-	quicInitialWindow              = 64 << 10
-	quicMaxWindow                  = 1 << 20
-	quicHandshakeIdleTimeout       = 5 * time.Second
-	quicServerHandshakeIdleTimeout = 2500 * time.Millisecond
-	quicMaxIdleTimeout             = 15 * time.Second
-	quicKeepAlivePeriod            = 5 * time.Second
-	quicStreamAcceptTimeout        = 5 * time.Second
-	quicCloseLinger                = 3 * time.Second
+	quicInitialWindow        = 64 << 10
+	quicMaxWindow            = 1 << 20
+	quicHandshakeIdleTimeout = 5 * time.Second
+	quicMaxIdleTimeout       = 15 * time.Second
+	quicKeepAlivePeriod      = 5 * time.Second
+	quicStreamAcceptTimeout  = 5 * time.Second
+	quicCloseLinger          = 3 * time.Second
 )
 
 func quicBaseConfig() *quic.Config {
@@ -50,9 +49,9 @@ func quicClientConfig() *quic.Config {
 	return cfg
 }
 
-func QUICServerConfig(gate func(*quic.Conn, uint64) bool) *quic.Config {
+func QUICServerConfig(gate func(*quic.Conn, uint64) bool, budget time.Duration) *quic.Config {
 	cfg := quicBaseConfig()
-	cfg.HandshakeIdleTimeout = quicServerHandshakeIdleTimeout
+	cfg.HandshakeIdleTimeout = budget / 2
 	cfg.MaxIncomingStreams = 1
 	cfg.AllowConnectionWindowIncrease = gate
 	return cfg

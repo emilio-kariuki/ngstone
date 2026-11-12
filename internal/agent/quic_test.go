@@ -23,7 +23,7 @@ func startQUICTestServer(t *testing.T, cert tls.Certificate) (string, func()) {
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS13,
 		NextProtos:   []string{tunnel.QUICALPN},
-	}, tunnel.QUICServerConfig(nil))
+	}, tunnel.QUICServerConfig(nil, 5*time.Second))
 	if err != nil {
 		t.Fatalf("quic listen: %v", err)
 	}

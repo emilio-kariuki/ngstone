@@ -172,7 +172,7 @@ func startQUICServeForTest(t *testing.T, s *Server, withAdmission bool) string {
 		tr.VerifySourceAddress = func(net.Addr) bool { return true }
 		tr.ConnContext = s.admitQUIC
 	}
-	ln, err := tr.Listen(tlsConf, tunnel.QUICServerConfig(quicWindowGate))
+	ln, err := tr.Listen(tlsConf, tunnel.QUICServerConfig(quicWindowGate, authDeadline))
 	if err != nil {
 		pc.Close()
 		t.Fatal(err)

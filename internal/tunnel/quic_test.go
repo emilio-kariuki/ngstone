@@ -71,7 +71,7 @@ func newQUICTestListener(t *testing.T, laddr string) (*quic.Listener, int) {
 		Certificates: []tls.Certificate{quicTestCert(t)},
 		MinVersion:   tls.VersionTLS13,
 		NextProtos:   []string{QUICALPN},
-	}, QUICServerConfig(allowAllWindows))
+	}, QUICServerConfig(allowAllWindows, 5*time.Second))
 	if err != nil {
 		pc.Close()
 		t.Fatal(err)
@@ -382,8 +382,8 @@ func TestQUICConfigBounds(t *testing.T) {
 		cfg := quicClientConfig()
 		wantHandshake := 5 * time.Second
 		if server {
-			cfg = QUICServerConfig(g)
-			wantHandshake = 2500 * time.Millisecond
+			cfg = QUICServerConfig(g, 8*time.Second)
+			wantHandshake = 4 * time.Second
 		}
 		if cfg.HandshakeIdleTimeout != wantHandshake {
 			t.Errorf("server=%v HandshakeIdleTimeout = %v, want %v", server, cfg.HandshakeIdleTimeout, wantHandshake)
@@ -420,7 +420,7 @@ func TestQUICConfigBounds(t *testing.T) {
 			t.Errorf("server=%v AllowConnectionWindowIncrease set = %v", server, cfg.AllowConnectionWindowIncrease != nil)
 		}
 	}
-	denied := QUICServerConfig(func(*quic.Conn, uint64) bool { return false })
+	denied := QUICServerConfig(func(*quic.Conn, uint64) bool { return false }, time.Second)
 	if denied.AllowConnectionWindowIncrease(nil, 1) {
 		t.Error("QUICServerConfig did not install the gate")
 	}

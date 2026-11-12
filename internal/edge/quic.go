@@ -131,7 +131,7 @@ func (s *Server) listenQUIC(addr *net.TCPAddr) (*quic.Transport, *quic.Listener,
 		VerifySourceAddress: func(net.Addr) bool { return true },
 		ConnContext:         s.admitQUIC,
 	}
-	ln, err := tr.Listen(tlsConf, tunnel.QUICServerConfig(quicWindowGate))
+	ln, err := tr.Listen(tlsConf, tunnel.QUICServerConfig(quicWindowGate, authDeadline))
 	if err != nil {
 		tr.Close()
 		pc.Close()
