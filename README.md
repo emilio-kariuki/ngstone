@@ -1321,6 +1321,10 @@ IPv6 /64 that start at the same moment can hit the cap; they retry and
 connect as earlier ones authenticate, or you can raise the cap.
 
 Reconnects use decorrelated exponential jitter from 500 ms to a 30 s cap.
+An agent without `--remote-port` or `--subdomain` remembers the port or name the
+edge assigned and requests it again on reconnect, taking it over by agent
+identity even past a half-open connection; if it was taken meanwhile, the agent
+binds a new one in the same handshake. A restarted agent starts fresh.
 The edge and agent exchange control pings, skip connectors that have exceeded
 the heartbeat health window, and drain active HTTP/TCP streams before closing
 on shutdown, credential revocation, lease loss, or management drain.
