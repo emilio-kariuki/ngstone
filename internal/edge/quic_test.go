@@ -172,7 +172,7 @@ func startQUICServeForTest(t *testing.T, s *Server, withAdmission bool) string {
 		tr.VerifySourceAddress = func(net.Addr) bool { return true }
 		tr.ConnContext = s.admitQUIC
 	}
-	ln, err := tr.Listen(tlsConf, tunnel.QUICServerConfig(quicWindowGate, authDeadline))
+	ln, err := tr.Listen(tlsConf, s.quicConfig())
 	if err != nil {
 		pc.Close()
 		t.Fatal(err)
@@ -449,11 +449,15 @@ func TestQUICWindowGateOnRealConn(t *testing.T) {
 	if adm == nil {
 		t.Fatal("listener-accepted connection carries no admission record")
 	}
-	if quicWindowGate(qc, 1<<20) {
+	gate := s.quicConfig().AllowConnectionWindowIncrease
+	if gate == nil {
+		t.Fatal("listener config has no window gate installed")
+	}
+	if quicWindowGate(qc, 1<<20) || gate(qc, 1<<20) {
 		t.Fatal("window gate open before authentication")
 	}
 	adm.authenticated()
-	if !quicWindowGate(qc, 1<<20) {
+	if !quicWindowGate(qc, 1<<20) || !gate(qc, 1<<20) {
 		t.Fatal("window gate closed after authentication")
 	}
 }

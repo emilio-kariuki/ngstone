@@ -117,6 +117,10 @@ func (s *Server) quicTLSConfig() (*tls.Config, error) {
 	}, nil
 }
 
+func (s *Server) quicConfig() *quic.Config {
+	return tunnel.QUICServerConfig(quicWindowGate, authDeadline)
+}
+
 func (s *Server) listenQUIC(addr *net.TCPAddr) (*quic.Transport, *quic.Listener, error) {
 	tlsConf, err := s.quicTLSConfig()
 	if err != nil {
@@ -131,7 +135,7 @@ func (s *Server) listenQUIC(addr *net.TCPAddr) (*quic.Transport, *quic.Listener,
 		VerifySourceAddress: func(net.Addr) bool { return true },
 		ConnContext:         s.admitQUIC,
 	}
-	ln, err := tr.Listen(tlsConf, tunnel.QUICServerConfig(quicWindowGate, authDeadline))
+	ln, err := tr.Listen(tlsConf, s.quicConfig())
 	if err != nil {
 		tr.Close()
 		pc.Close()
