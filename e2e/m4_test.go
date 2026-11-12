@@ -91,6 +91,7 @@ func startInProcessWithAccess(t *testing.T, subdomain, targetURL string, maxBody
 		TokenSHA256:  mustSHA256(token),
 		PublicScheme: "http",
 		Insecure:     true,
+		QUIC:         quicControl,
 		Limits:       limits,
 	})
 	if err != nil {
@@ -109,6 +110,7 @@ func startInProcessWithAccess(t *testing.T, subdomain, targetURL string, maxBody
 		Subdomain:       subdomain,
 		TargetURL:       targetURL,
 		Insecure:        true,
+		Transport:       quicTransport(),
 		Store:           store,
 		BasicAuthSHA256: access.basicAuthSHA256,
 		BasicAuthRealm:  access.basicAuthRealm,

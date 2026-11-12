@@ -116,12 +116,12 @@ func TestTLSPassthroughEndToEnd(t *testing.T) {
 
 	startEdge(t, edgeBin, controlAddr, publicAddr, token, domain)
 
-	cmd := exec.Command(agentBin, "tls", localAddr,
+	cmd := quicAgent(exec.Command(agentBin, "tls", localAddr,
 		"--subdomain", "secure",
 		"--server", controlAddr,
 		"--token", token,
 		"--insecure",
-	)
+	))
 	agentSB := &syncBuf{}
 	cmd.Stdout = io.MultiWriter(os.Stderr, agentSB)
 	cmd.Stderr = io.MultiWriter(os.Stderr, agentSB)
@@ -206,13 +206,13 @@ func TestTLSPassthroughEndToEnd(t *testing.T) {
 	t.Run("http_bind_on_tls_hostname_is_rejected", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, agentBin, "port", origin.URL,
+		out, err := quicAgent(exec.CommandContext(ctx, agentBin, "port", origin.URL,
 			"--subdomain", "secure",
 			"--server", controlAddr,
 			"--token", token,
 			"--insecure",
 			"--no-tui",
-		).CombinedOutput()
+		)).CombinedOutput()
 		if err == nil {
 			t.Fatalf("http tunnel on a tls hostname exited cleanly:\n%s", out)
 		}
