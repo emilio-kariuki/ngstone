@@ -66,8 +66,9 @@ type AgentSession struct {
 	share        atomic.Pointer[share]
 	connectorID  string
 
-	relayToken string
-	viaPeer    bool
+	relayToken   string
+	viaPeer      bool
+	remoteShares *remoteShareCache
 }
 
 func (a *AgentSession) isConnector() bool {

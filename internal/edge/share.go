@@ -896,6 +896,9 @@ func (s *Server) handleUnshare(as *AgentSession, ctrl *proto.Conn, id uint64, re
 func (s *Server) handleShareUpdate(as *AgentSession, ctrl *proto.Conn, id uint64, req proto.ShareUpdate) {
 	sh, ok := s.shares.byShareID(req.ShareID)
 	if !ok || !shareVisibleTo(sh, as) {
+		if s.forwardShareAdmin(as, ctrl, id, proto.TypeShareUpdate, req.ShareID, req) {
+			return
+		}
 		ctrl.Write(proto.TypeShareErr, id, proto.ShareErr{Code: proto.CodeShareNotFound, Message: s.shareNotFoundMessage()})
 		return
 	}
@@ -929,6 +932,9 @@ func (s *Server) handleShareUpdate(as *AgentSession, ctrl *proto.Conn, id uint64
 func (s *Server) handleKick(as *AgentSession, ctrl *proto.Conn, id uint64, req proto.Kick) {
 	sh, ok := s.shares.byShareID(req.ShareID)
 	if !ok || !shareVisibleTo(sh, as) {
+		if s.forwardShareAdmin(as, ctrl, id, proto.TypeKick, req.ShareID, req) {
+			return
+		}
 		ctrl.Write(proto.TypeError, id, proto.Error{Code: proto.CodeShareNotFound, Message: s.shareNotFoundMessage()})
 		return
 	}
@@ -1005,6 +1011,21 @@ func (s *Server) handleListShares(as *AgentSession, ctrl *proto.Conn, id uint64)
 	ok := proto.SharesOK{Shares: s.shares.list(as)}
 	if s.peers != nil {
 		ok.Edge = s.peers.selfID
+	}
+	if remote, unreached, grouped := s.groupShares(as); grouped {
+		for i := range ok.Shares {
+			ok.Shares[i].Edge = s.peers.selfID
+		}
+		ok.Shares = append(ok.Shares, remote...)
+		sort.SliceStable(ok.Shares, func(i, j int) bool {
+			a, b := ok.Shares[i], ok.Shares[j]
+			if a.Edge != b.Edge {
+				return a.Edge < b.Edge
+			}
+			return a.ShareID < b.ShareID
+		})
+		ok.Group = true
+		ok.Unreached = unreached
 	}
 	ctrl.Write(proto.TypeSharesOK, id, ok)
 }

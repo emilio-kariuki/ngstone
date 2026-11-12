@@ -4,17 +4,31 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"net/netip"
+	"sort"
 	"sync"
 	"time"
 
 	"ngstone/internal/proto"
 	"ngstone/internal/storage"
+	"ngstone/internal/tunnel"
 )
+
+const (
+	remoteAdminBudget  = 3 * time.Second
+	remoteListMaxEdges = 32
+	remoteListFanout   = 4
+	remoteListCacheTTL = 2 * time.Second
+	adminRequestID     = 2
+	adminAuthRequestID = 1
+)
+
+var errAdminRejected = errors.New("edge: holder rejected the operator credential")
 
 func shareDirKey(digest []byte) string {
 	h := sha256.New()
@@ -327,4 +341,223 @@ func (s *Server) admitForwardedControl(ctx context.Context, pc net.Conn, origin 
 		name = "peer-admin"
 	}
 	s.handleControlConnTransport(ctx, pc, release, controlTransport{origin: origin, leave: leave, name: name})
+}
+
+type remoteShareCache struct {
+	at        time.Time
+	shares    []proto.ShareInfo
+	unreached []string
+}
+
+func (s *Server) remoteShareHolder(as *AgentSession, shareID string) (storage.EdgePeer, bool) {
+	if s.peers == nil || as.viaPeer || as.relayToken == "" {
+		return storage.EdgePeer{}, false
+	}
+	p := s.peers
+	if !p.lookupSem.tryAcquire() {
+		metricPeerRejectedLookupCap.Add(1)
+		return storage.EdgePeer{}, false
+	}
+	metricPeerLookups.Add(1)
+	ctx, cancel := context.WithTimeout(context.Background(), peerLookupTimeout)
+	holder, found, err := p.store.LookupShareEdgeByID(ctx, shareID, durableOwnerID(as), p.selfID, time.Now())
+	cancel()
+	p.lookupSem.release()
+	if err != nil {
+		metricPeerLookupErrors.Add(1)
+		slogStorageError("lookup share edge by id", err)
+		return storage.EdgePeer{}, false
+	}
+	return holder, found
+}
+
+func (p *peerForwarder) adminCall(as *AgentSession, holder storage.EdgePeer, req proto.Msg, budget time.Time) (proto.Msg, peerOutcome, error) {
+	if !as.Remote.IsValid() {
+		return proto.Msg{}, peerDown, errors.New("edge: operator address unknown")
+	}
+	release, ok := p.reserve(as.Remote.Addr().Unmap().String())
+	if !ok {
+		return proto.Msg{}, peerDown, errors.New("edge: peer forward capacity reached")
+	}
+	type result struct {
+		msg     proto.Msg
+		outcome peerOutcome
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		defer release()
+		msg, outcome, err := p.adminExchange(as, holder, req, budget)
+		done <- result{msg, outcome, err}
+	}()
+	timer := time.NewTimer(time.Until(budget))
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.msg, r.outcome, r.err
+	case <-timer.C:
+		return proto.Msg{}, peerDown, errors.New("edge: holder did not answer in time")
+	}
+}
+
+func (p *peerForwarder) adminExchange(as *AgentSession, holder storage.EdgePeer, req proto.Msg, budget time.Time) (proto.Msg, peerOutcome, error) {
+	pc, outcome := p.attempt(holder, peerFrame{kind: peerFrameAdmin, src: as.Remote})
+	if pc == nil {
+		return proto.Msg{}, outcome, errors.New("edge: holder unreachable")
+	}
+	if err := pc.SetDeadline(budget); err != nil {
+		pc.Close()
+		return proto.Msg{}, peerDown, err
+	}
+	sess, err := tunnel.Client(pc)
+	if err != nil {
+		pc.Close()
+		return proto.Msg{}, peerDown, err
+	}
+	defer sess.Close("admin call done")
+	ctrl := sess.Control()
+	if err := ctrl.Write(proto.TypeAuth, adminAuthRequestID, proto.Auth{Token: as.relayToken, ProtoVersions: proto.SupportedVersions}); err != nil {
+		return proto.Msg{}, peerDown, err
+	}
+	reply, err := readAdminReply(ctrl, adminAuthRequestID)
+	if err != nil {
+		return proto.Msg{}, peerDown, err
+	}
+	if reply.Type != proto.TypeAuthOK {
+		return proto.Msg{}, peerDown, errAdminRejected
+	}
+	var payload any
+	if len(req.Data) > 0 {
+		payload = req.Data
+	}
+	if err := ctrl.Write(req.Type, adminRequestID, payload); err != nil {
+		return proto.Msg{}, peerDown, err
+	}
+	reply, err = readAdminReply(ctrl, adminRequestID)
+	if err != nil {
+		return proto.Msg{}, peerDown, err
+	}
+	ctrl.Write(proto.TypeGoodbye, 3, nil)
+	return reply, peerOK, nil
+}
+
+func readAdminReply(ctrl *proto.Conn, id uint64) (proto.Msg, error) {
+	for {
+		m, err := ctrl.Read()
+		if err != nil {
+			return proto.Msg{}, err
+		}
+		if m.Type == proto.TypePing || m.ID != id {
+			continue
+		}
+		return m, nil
+	}
+}
+
+func (s *Server) forwardShareAdmin(as *AgentSession, ctrl *proto.Conn, id uint64, typ, shareID string, payload any) bool {
+	holder, ok := s.remoteShareHolder(as, shareID)
+	if !ok {
+		return false
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return false
+	}
+	as.remoteShares = nil
+	reply, outcome, err := s.peers.adminCall(as, holder, proto.Msg{Type: typ, Data: data}, time.Now().Add(remoteAdminBudget))
+	if err != nil {
+		reason, suffix := "unreachable", "which did not answer"
+		switch {
+		case outcome == peerSkew:
+			reason, suffix = "skew", "which runs an older ngstoned"
+		case errors.Is(err, errAdminRejected):
+			reason, suffix = "rejected_token", "which rejected this session's token"
+		}
+		slog.Info("edge: remote share admin", "op", typ, "share_id", shareID, "holder_edge", holder.EdgeID, "session", as.ID, "owner", durableOwnerID(as), "outcome", reason)
+		msg := "share " + shareID + " is on edge " + holder.EdgeID + " " + suffix
+		if typ == proto.TypeShareUpdate {
+			ctrl.Write(proto.TypeShareErr, id, proto.ShareErr{Code: proto.CodeShareNotFound, Message: msg})
+		} else {
+			ctrl.Write(proto.TypeError, id, proto.Error{Code: proto.CodeShareNotFound, Message: msg})
+		}
+		return true
+	}
+	slog.Info("edge: remote share admin", "op", typ, "share_id", shareID, "holder_edge", holder.EdgeID, "session", as.ID, "owner", durableOwnerID(as), "outcome", reply.Type)
+	var out any
+	if len(reply.Data) > 0 {
+		out = reply.Data
+	}
+	ctrl.Write(reply.Type, id, out)
+	return true
+}
+
+func (s *Server) groupShares(as *AgentSession) (shares []proto.ShareInfo, unreached []string, ok bool) {
+	if s.peers == nil || as.viaPeer || as.relayToken == "" {
+		return nil, nil, false
+	}
+	if c := as.remoteShares; c != nil && time.Since(c.at) < remoteListCacheTTL {
+		return c.shares, c.unreached, true
+	}
+	p := s.peers
+	if !p.lookupSem.tryAcquire() {
+		metricPeerRejectedLookupCap.Add(1)
+		return nil, nil, false
+	}
+	metricPeerLookups.Add(1)
+	ctx, cancel := context.WithTimeout(context.Background(), remoteAdminBudget)
+	defer cancel()
+	budget, _ := ctx.Deadline()
+	edges, err := p.store.ShareEdgesForOwner(ctx, durableOwnerID(as), p.selfID, time.Now(), remoteListMaxEdges)
+	p.lookupSem.release()
+	if err != nil {
+		metricPeerLookupErrors.Add(1)
+		slogStorageError("list share edges", err)
+		return nil, nil, false
+	}
+	type result struct {
+		shares []proto.ShareInfo
+		err    error
+	}
+	results := make([]result, len(edges))
+	sem := make(chan struct{}, remoteListFanout)
+	var wg sync.WaitGroup
+	for i, e := range edges {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				results[i].err = ctx.Err()
+				return
+			}
+			reply, _, err := p.adminCall(as, e, proto.Msg{Type: proto.TypeListShares}, budget)
+			if err == nil && reply.Type != proto.TypeSharesOK {
+				err = errors.New("edge: unexpected list reply " + reply.Type)
+			}
+			if err == nil {
+				var body proto.SharesOK
+				if body, err = proto.Decode[proto.SharesOK](reply); err == nil {
+					for j := range body.Shares {
+						body.Shares[j].Edge = e.EdgeID
+						body.Shares[j].Mine = false
+					}
+					results[i].shares = body.Shares
+				}
+			}
+			results[i].err = err
+		}()
+	}
+	wg.Wait()
+	for i, r := range results {
+		if r.err != nil {
+			unreached = append(unreached, edges[i].EdgeID)
+			continue
+		}
+		shares = append(shares, r.shares...)
+	}
+	sort.Strings(unreached)
+	as.remoteShares = &remoteShareCache{at: time.Now(), shares: shares, unreached: unreached}
+	return shares, unreached, true
 }

@@ -394,11 +394,14 @@ type ShareInfo struct {
 	E2E           bool            `json:"e2e,omitempty"`
 	Connectors    []ConnectorInfo `json:"connectors"`
 	OpenConns     int             `json:"open_conns"`
+	Edge          string          `json:"edge,omitempty"`
 }
 
 type SharesOK struct {
-	Shares []ShareInfo `json:"shares"`
-	Edge   string      `json:"edge,omitempty"`
+	Shares    []ShareInfo `json:"shares"`
+	Edge      string      `json:"edge,omitempty"`
+	Group     bool        `json:"group,omitempty"`
+	Unreached []string    `json:"unreached,omitempty"`
 }
 
 // WatchShares subscribes an operator session to every share's events.
