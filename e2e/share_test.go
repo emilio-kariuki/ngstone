@@ -153,7 +153,7 @@ func startEdgeExtra(t *testing.T, edgeBin, controlAddr, publicAddr, token, domai
 	}
 	args = append(args, extra...)
 	cmd := exec.Command(edgeBin, args...)
-	sb := &syncBuf{}
+	sb := edgeLogBuf()
 	cmd.Stdout = io.MultiWriter(os.Stderr, sb)
 	cmd.Stderr = io.MultiWriter(os.Stderr, sb)
 	p := newManagedProc(cmd)
