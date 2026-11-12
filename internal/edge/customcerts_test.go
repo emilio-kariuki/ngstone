@@ -558,17 +558,48 @@ func TestCacheMaintenanceConfigDisablesStaplingOnlyForOperatorCertificates(t *te
 }
 
 func TestConfigForCertKeepsManagedStapling(t *testing.T) {
-	managed, custom := newMagicConfigs()
+	_, managed, custom, auto := newMagicConfigs("example.com", nil, nil)
+	if auto != nil {
+		t.Fatal("auto config built without an on-demand configuration")
+	}
 	if managed.OCSP.DisableStapling {
 		t.Fatal("managed config has OCSP stapling disabled")
 	}
 	if !custom.OCSP.DisableStapling {
 		t.Fatal("custom config has OCSP stapling enabled")
 	}
-	if got := configForCert(certmagic.Certificate{Tags: []string{customCertTag}}, managed, custom); got != custom {
+	if got := configForCert(certmagic.Certificate{Tags: []string{customCertTag}}, managed, custom, auto, "example.com"); got != custom {
 		t.Fatal("a custom-tagged certificate is maintained by the managed config")
 	}
-	if got := configForCert(certmagic.Certificate{}, managed, custom); got != managed {
+	if got := configForCert(certmagic.Certificate{}, managed, custom, auto, "example.com"); got != managed {
 		t.Fatal("an untagged certificate is maintained by the custom config")
+	}
+}
+
+func TestConfigForCertRoutesCustomDomainCertsToOnDemand(t *testing.T) {
+	onDemand := &certmagic.OnDemandConfig{}
+	_, managed, custom, auto := newMagicConfigs("example.com", onDemand, nil)
+	if auto == nil {
+		t.Fatal("auto config not built")
+	}
+	cases := []struct {
+		name string
+		cert certmagic.Certificate
+		want *certmagic.Config
+	}{
+		{"custom domain", certmagic.Certificate{Names: []string{"app.example.org"}}, auto},
+		{"edge wildcard", certmagic.Certificate{Names: []string{"*.example.com"}}, managed},
+		{"edge apex", certmagic.Certificate{Names: []string{"example.com"}}, managed},
+		{"edge subdomain", certmagic.Certificate{Names: []string{"managed.example.com"}}, managed},
+		{"operator tagged", certmagic.Certificate{Names: []string{"app.example.org"}, Tags: []string{customCertTag}}, custom},
+		{"no names", certmagic.Certificate{}, managed},
+	}
+	for _, c := range cases {
+		if got := configForCert(c.cert, managed, custom, auto, "example.com"); got != c.want {
+			t.Errorf("%s: routed to the wrong config", c.name)
+		}
+	}
+	if got := configForCert(certmagic.Certificate{Names: []string{"app.example.org"}}, managed, custom, nil, "example.com"); got != managed {
+		t.Error("without auto, a custom domain certificate must map to managed")
 	}
 }

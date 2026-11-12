@@ -409,13 +409,18 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	if !s.cfg.Insecure && s.cfg.PublicTLSConfig == nil {
-		mgr, err := NewTLSManager(TLSConfig{
+		tlsCfg := TLSConfig{
 			Domain:      s.cfg.Domain,
 			DNSProvider: s.cfg.DNSProvider,
 			ACMEEmail:   s.cfg.ACMEEmail,
 			ACMECA:      s.cfg.ACMECA,
 			StoragePath: s.cfg.CertStoragePath,
-		})
+			PublicAddr:  s.cfg.PublicAddr,
+		}
+		if s.aliases != nil {
+			tlsCfg.CustomDomainAllowed = s.autoCertAllowed
+		}
+		mgr, err := NewTLSManager(tlsCfg)
 		if err != nil {
 			return fmt.Errorf("edge: tls setup: %w", err)
 		}

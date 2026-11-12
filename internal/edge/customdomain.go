@@ -160,3 +160,11 @@ func (s *Server) localAlias(host string) (aliasTarget, *Binding, aliasState) {
 	}
 	return target, b, aliasLocal
 }
+
+func (s *Server) autoCertAllowed(name string) bool {
+	target, _, state := s.localAlias(name)
+	if target.Kind == "tls" {
+		return false
+	}
+	return state == aliasLocal || (state == aliasRemote && s.peers == nil)
+}

@@ -701,3 +701,52 @@ func TestClassifyRoutesCustomDomainPassthrough(t *testing.T) {
 		t.Fatalf("agent preamble = %+v, want canonical host and tls kind", pre)
 	}
 }
+
+func TestAutoCertAllowedOnlyOnTerminatingEdge(t *testing.T) {
+	s := newAliasServer(t)
+	registerActiveDomain(t, s, "app.example.org", "web.example.com", "http", "alice")
+	registerActiveDomain(t, s, "secure.example.org", "secure.example.com", "tls", "alice")
+
+	if !s.autoCertAllowed("app.example.org") {
+		t.Fatal("remote name on a single edge must be allowed")
+	}
+	if s.autoCertAllowed("secure.example.org") {
+		t.Fatal("tls-kind name must not be allowed while unbound")
+	}
+	if s.autoCertAllowed("unregistered.example.org") {
+		t.Fatal("unregistered name must not be allowed")
+	}
+	if s.autoCertAllowed("x.example.com") {
+		t.Fatal("edge-domain name must not be allowed")
+	}
+
+	alice := ownedSession(t, "alice", nil)
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "web.example.com", Session: alice}); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	if !s.autoCertAllowed("app.example.org") {
+		t.Fatal("local http name must be allowed")
+	}
+	tlsSession := ownedSession(t, "alice", nil)
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "secure.example.com", Session: tlsSession, TLS: true}); err != nil {
+		t.Fatalf("bind tls: %v", err)
+	}
+	if s.autoCertAllowed("secure.example.org") {
+		t.Fatal("local tls-kind name must not be allowed")
+	}
+
+	s.registry.Unbind("web.example.com", alice)
+	s.peers = &peerForwarder{}
+	if s.autoCertAllowed("app.example.org") {
+		t.Fatal("remote name must not be allowed on a peered edge")
+	}
+	s.peers = nil
+
+	mallory := ownedSession(t, "mallory", nil)
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "web.example.com", Session: mallory}); err != nil {
+		t.Fatalf("bind mallory: %v", err)
+	}
+	if s.autoCertAllowed("app.example.org") {
+		t.Fatal("owner-mismatched name must not be allowed")
+	}
+}
