@@ -1,6 +1,7 @@
 package edge
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -311,6 +312,59 @@ func TestAliasRefreshAfterStatusChange(t *testing.T) {
 	}
 	if routed() {
 		t.Fatal("deletion did not take effect on the handling edge")
+	}
+}
+
+type cancelOnQueryStore struct {
+	inner  customDomainStore
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnQueryStore) ActiveCustomDomains(ctx context.Context, limit int) ([]storage.ActiveCustomDomain, error) {
+	c.cancel()
+	return c.inner.ActiveCustomDomains(ctx, limit)
+}
+
+func TestAliasRefreshAfterAdminCallSurvivesClientDisconnect(t *testing.T) {
+	s := newAliasServer(t)
+	hook := &cancelOnQueryStore{inner: s.storage}
+	s.aliases = newAliasResolver(hook, s.customDomainReserved, s.leaseTTL)
+	lease, err := s.storage.AcquireLease(t.Context(), storage.LeaseRequest{Hostname: "web.example.com", Kind: "http", OwnerID: "alice", InstanceID: "i1", SessionID: "s1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain, err := s.storage.CreateCustomDomain(t.Context(), storage.CustomDomainSpec{Domain: "app.example.org", OwnerID: "alice", TunnelID: lease.TunnelID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routed := func() bool {
+		_, ok := s.aliases.resolve("app.example.org")
+		return ok
+	}
+	call := func(method, path string, body []byte) int {
+		reqCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		hook.cancel = cancel
+		req := httptest.NewRequest(method, path, bytes.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:4041"
+		auth := adminAuth{Principal: oidc.Principal{Subject: "root", Role: oidc.RoleAdmin}, AuthType: adminAuthTypeMTLS}
+		req = req.WithContext(withAdminAuth(reqCtx, auth))
+		rec := httptest.NewRecorder()
+		s.handleAdminAPI(rec, req)
+		return rec.Code
+	}
+	path := "/api/v1/domains/" + domain.ID
+	if code := call(http.MethodPost, path+"/status", []byte(`{"status":"active"}`)); code != http.StatusOK {
+		t.Fatalf("activate = %d", code)
+	}
+	if !routed() {
+		t.Fatal("activation was not applied after the client disconnected")
+	}
+	if code := call(http.MethodDelete, path, nil); code != http.StatusNoContent {
+		t.Fatalf("delete = %d", code)
+	}
+	if routed() {
+		t.Fatal("deletion was not applied after the client disconnected")
 	}
 }
 

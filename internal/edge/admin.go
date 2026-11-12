@@ -1,6 +1,7 @@
 package edge
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -458,7 +459,7 @@ func (s *Server) handleAdminDomain(w http.ResponseWriter, r *http.Request, rawID
 		writeAdminError(w, http.StatusInternalServerError, "internal_error", "could not delete custom domain")
 		return
 	}
-	s.aliases.refresh(r.Context())
+	s.aliases.refresh(context.WithoutCancel(r.Context()))
 	s.recordAdminEvent(r, "management custom domain deleted", map[string]string{"domain_id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -520,7 +521,7 @@ func (s *Server) handleAdminDomainStatus(w http.ResponseWriter, r *http.Request,
 		}
 		return
 	}
-	s.aliases.refresh(r.Context())
+	s.aliases.refresh(context.WithoutCancel(r.Context()))
 	s.recordAdminEvent(r, "management custom domain status changed", map[string]string{"domain_id": domain.ID, "domain": domain.Domain, "status": domain.Status})
 	writeAdminData(w, http.StatusOK, domain)
 }
