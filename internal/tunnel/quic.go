@@ -21,7 +21,7 @@ const (
 
 	quicInitialWindow        = 64 << 10
 	quicMaxWindow            = 1 << 20
-	quicHandshakeIdleTimeout = 5 * time.Second
+	quicHandshakeIdleTimeout = 10 * time.Second
 	quicMaxIdleTimeout       = 15 * time.Second
 	quicKeepAlivePeriod      = 5 * time.Second
 	quicStreamAcceptTimeout  = 5 * time.Second

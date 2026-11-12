@@ -443,7 +443,7 @@ func TestQUICConfigBounds(t *testing.T) {
 			g = gate
 		}
 		cfg := quicClientConfig()
-		wantHandshake := 5 * time.Second
+		wantHandshake := 10 * time.Second
 		if server {
 			cfg = QUICServerConfig(g, 8*time.Second)
 			wantHandshake = 4 * time.Second

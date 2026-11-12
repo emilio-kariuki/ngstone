@@ -679,3 +679,81 @@ func TestQUICTLSConfigClonesManagedConfig(t *testing.T) {
 		t.Fatalf("apex NextProtos changed from %v to %v", before, apex.NextProtos)
 	}
 }
+
+func startUDPRelay(t *testing.T, target string, oneWay time.Duration, serverToClientPackets int) string {
+	t.Helper()
+	taddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	front, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := net.DialUDP("udp", nil, taddr)
+	if err != nil {
+		front.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		front.Close()
+		back.Close()
+	})
+	var client atomic.Pointer[net.UDPAddr]
+	go func() {
+		buf := make([]byte, 2048)
+		for {
+			n, from, err := front.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			client.Store(from)
+			p := append([]byte(nil), buf[:n]...)
+			time.AfterFunc(oneWay, func() { back.Write(p) })
+		}
+	}()
+	go func() {
+		buf := make([]byte, 2048)
+		forwarded := 0
+		for {
+			n, err := back.Read(buf)
+			if err != nil {
+				return
+			}
+			if serverToClientPackets > 0 && forwarded >= serverToClientPackets {
+				continue
+			}
+			forwarded++
+			p := append([]byte(nil), buf[:n]...)
+			time.AfterFunc(oneWay, func() {
+				if to := client.Load(); to != nil {
+					front.WriteToUDP(p, to)
+				}
+			})
+		}
+	}()
+	return front.LocalAddr().String()
+}
+
+func TestQUICSlowHandshakeWithinBudgetAuthenticates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("takes about 9 seconds")
+	}
+	_, controlAddr, _ := startQUICEdgeForTest(t, LimitsConfig{})
+	relay := startUDPRelay(t, controlAddr, 1400*time.Millisecond, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	nc, err := tunnel.DialQUIC(ctx, relay, quicTestClientTLS())
+	if err != nil {
+		t.Fatalf("dial over a 2.8 s round trip: %v", err)
+	}
+	sess, err := tunnel.Client(nc)
+	if err != nil {
+		nc.Close()
+		t.Fatalf("tunnel client: %v", err)
+	}
+	defer sess.Close("done")
+	if typ, err := quicAuth(sess, "tok", "slow"); err != nil || typ != proto.TypeAuthOK {
+		t.Fatalf("auth over a 2.8 s round trip: %q, %v", typ, err)
+	}
+}

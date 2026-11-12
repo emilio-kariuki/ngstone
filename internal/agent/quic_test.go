@@ -204,7 +204,7 @@ func TestQUICControlSilentUDPHint(t *testing.T) {
 	if !strings.Contains(err.Error(), "no answer from "+pc.LocalAddr().String()+" over UDP") || !strings.Contains(err.Error(), "-quic") {
 		t.Fatalf("error = %v, want the UDP reachability hint", err)
 	}
-	if time.Since(start) > 8*time.Second {
+	if time.Since(start) > 12*time.Second {
 		t.Fatalf("silent UDP took %v to fail", time.Since(start))
 	}
 }
