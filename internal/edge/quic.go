@@ -77,7 +77,7 @@ func quicWindowAllowed(ctx context.Context) bool {
 	return adm != nil && adm.authed.Load()
 }
 
-func quicWindowGate(qc *quic.Conn, _ uint64) bool {
+var quicWindowGate = func(qc *quic.Conn, _ uint64) bool {
 	return quicWindowAllowed(qc.Context())
 }
 

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -404,6 +405,40 @@ func TestQUICAgentSessionBindsAndServes(t *testing.T) {
 	}
 }
 
+func quicBind(t *testing.T, sess tunnel.Session, subdomain string) {
+	t.Helper()
+	ctrl := sess.Control()
+	if err := ctrl.Write(proto.TypeBind, 2, proto.Bind{Kind: proto.KindHTTP, Subdomain: subdomain}); err != nil {
+		t.Fatalf("bind write: %v", err)
+	}
+	ctrl.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for {
+		m, err := ctrl.Read()
+		if err != nil {
+			t.Fatalf("bind reply: %v", err)
+		}
+		if m.Type == proto.TypeBindOK {
+			return
+		}
+		if m.Type == proto.TypeBindErr {
+			t.Fatalf("bind refused: %+v", m)
+		}
+	}
+}
+
+func TestQUICAuthenticatedSessionSurvivesHardStop(t *testing.T) {
+	shortenAuthDeadline(t, time.Second)
+	_, controlAddr, _ := startQUICEdgeForTest(t, LimitsConfig{UnauthSessions: 1})
+	start := time.Now()
+	sess := dialQUICSession(t, controlAddr)
+	defer sess.Close("done")
+	if typ, err := quicAuth(sess, "tok", "agent-hard-stop"); err != nil || typ != proto.TypeAuthOK {
+		t.Fatalf("auth: %q, %v", typ, err)
+	}
+	time.Sleep(time.Until(start.Add(authDeadline + 500*time.Millisecond)))
+	quicBind(t, sess, "hardstop")
+}
+
 func TestQUICDrainRefusesNewConnections(t *testing.T) {
 	s := quicTestServer(2)
 	s.controlDraining = true
@@ -460,6 +495,62 @@ func TestQUICWindowGateOnRealConn(t *testing.T) {
 	if !quicWindowGate(qc, 1<<20) || !gate(qc, 1<<20) {
 		t.Fatal("window gate closed after authentication")
 	}
+}
+
+func TestQUICHandshakeBudgetIsHalfTheAuthDeadline(t *testing.T) {
+	s := quicTestServer(1)
+	if got, want := s.quicConfig().HandshakeIdleTimeout, authDeadline/2; got != want {
+		t.Fatalf("HandshakeIdleTimeout = %v, want %v", got, want)
+	}
+}
+
+func TestQUICListenerConsultsWindowGate(t *testing.T) {
+	var allowed, refused atomic.Int64
+	orig := quicWindowGate
+	quicWindowGate = func(qc *quic.Conn, delta uint64) bool {
+		ok := orig(qc, delta)
+		if ok {
+			allowed.Add(1)
+		} else {
+			refused.Add(1)
+		}
+		return ok
+	}
+	t.Cleanup(func() { quicWindowGate = orig })
+
+	_, controlAddr, publicAddr := startQUICEdgeForTest(t, LimitsConfig{UnauthSessions: 1})
+	sess := dialQUICSession(t, controlAddr)
+	defer sess.Close("done")
+	if typ, err := quicAuth(sess, "tok", "agent-gate"); err != nil || typ != proto.TypeAuthOK {
+		t.Fatalf("auth: %q, %v", typ, err)
+	}
+	ln, err := tunnel.NewListener(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte{'x'}, 8<<20)
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(payload)
+	})}
+	go srv.Serve(ln)
+	defer srv.Close()
+	quicBind(t, sess, "gate")
+
+	req, _ := http.NewRequest(http.MethodGet, "http://"+publicAddr+"/", nil)
+	req.Host = "gate.example.com"
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("public request: %v", err)
+	}
+	n, err := io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if err != nil || n != int64(len(payload)) {
+		t.Fatalf("public response: %d bytes, %v; want %d", n, err, len(payload))
+	}
+	if allowed.Load() == 0 {
+		t.Fatalf("window gate allowed no increase after authentication (allowed=%d refused=%d)", allowed.Load(), refused.Load())
+	}
+	t.Logf("window gate calls: allowed=%d refused=%d", allowed.Load(), refused.Load())
 }
 
 func TestQUICHandshakeSlotReleasedAfterAccept(t *testing.T) {
