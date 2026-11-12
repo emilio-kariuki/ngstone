@@ -173,8 +173,8 @@ func (p Project) Validate() error {
 			return fmt.Errorf("tunnel %q remote_port is only valid for tcp tunnels", name)
 		}
 		transport := strings.ToLower(strings.TrimSpace(tunnel.Transport))
-		if transport != "" && transport != "auto" && transport != "raw" && transport != "tcp" && transport != "websocket" && transport != "ws" && transport != "wss" && transport != "https" {
-			return fmt.Errorf("tunnel %q transport must be auto, raw, or websocket", name)
+		if transport != "" && transport != "auto" && transport != "raw" && transport != "tcp" && transport != "websocket" && transport != "ws" && transport != "wss" && transport != "https" && transport != "quic" {
+			return fmt.Errorf("tunnel %q transport must be auto, raw, websocket, or quic", name)
 		}
 		if tunnel.RemotePort < 0 || tunnel.RemotePort > 65535 {
 			return fmt.Errorf("tunnel %q remote_port must be between 0 and 65535", name)

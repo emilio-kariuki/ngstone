@@ -71,7 +71,7 @@ func cmdDoctor(args []string) int {
 	fs.StringVar(&opts.AdminServer, "admin-server", os.Getenv("NGSTONE_ADMIN_SERVER"), "management API URL to check")
 	fs.StringVar(&opts.Token, "token", "", "tunnel auth token override")
 	fs.StringVar(&opts.AdminToken, "admin-token", os.Getenv("NGSTONE_ADMIN_TOKEN"), "management API bearer token override")
-	fs.StringVar(&opts.Transport, "transport", opts.Transport, "control transport: auto, raw, or websocket")
+	fs.StringVar(&opts.Transport, "transport", opts.Transport, "control transport: auto, raw, websocket, or quic")
 	fs.StringVar(&opts.ServerName, "server-name", opts.ServerName, "TLS ServerName/SNI (default: control host)")
 	fs.StringVar(&opts.Pin, "pin", "", "optional sha256/BASE64 SPKI pin")
 	fs.DurationVar(&opts.Timeout, "timeout", opts.Timeout, "maximum time for each network check")

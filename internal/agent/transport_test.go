@@ -30,6 +30,8 @@ func TestTransportModes(t *testing.T) {
 		{name: "tcp alias", input: "tcp", want: []string{TransportRaw}},
 		{name: "websocket", input: "websocket", want: []string{TransportWebSocket}},
 		{name: "https alias", input: "https", want: []string{TransportWebSocket}},
+		{name: "quic", input: "quic", want: []string{TransportQUIC}},
+		{name: "quic mixed case", input: " QUIC ", want: []string{TransportQUIC}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -45,8 +47,8 @@ func TestTransportModes(t *testing.T) {
 }
 
 func TestTransportModesRejectUnknownTransport(t *testing.T) {
-	if _, err := transportModes("quic"); err == nil {
-		t.Fatal("transportModes(quic) succeeded")
+	if _, err := transportModes("sctp"); err == nil {
+		t.Fatal("transportModes(sctp) succeeded")
 	}
 }
 

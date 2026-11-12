@@ -11,6 +11,10 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/quic-go/quic-go"
+
+	"ngstone/internal/tunnel"
 )
 
 const tlsHandshakeTimeout = 10 * time.Second
@@ -83,6 +87,41 @@ func controlTLSConfig(cfg Config) (*tls.Config, error) {
 		tlsCfg.VerifyPeerCertificate = pinVerifier(want)
 	}
 	return tlsCfg, nil
+}
+
+func quicTLSConfig(cfg Config) (*tls.Config, error) {
+	if cfg.Insecure {
+		return &tls.Config{
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS13,
+			NextProtos:         []string{tunnel.QUICALPN},
+		}, nil
+	}
+	tlsCfg, err := controlTLSConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	tlsCfg.NextProtos = []string{tunnel.QUICALPN}
+	return tlsCfg, nil
+}
+
+func dialQUICControl(ctx context.Context, cfg Config) (net.Conn, error) {
+	tlsCfg, err := quicTLSConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	dctx, cancel := context.WithTimeout(ctx, tlsHandshakeTimeout)
+	defer cancel()
+	conn, err := tunnel.DialQUIC(dctx, cfg.ControlAddr, tlsCfg)
+	if err != nil {
+		var idle *quic.IdleTimeoutError
+		var hs *quic.HandshakeTimeoutError
+		if errors.As(err, &idle) || errors.As(err, &hs) {
+			return nil, fmt.Errorf("agent: quic control: no answer from %s over UDP; the edge must run with -quic and UDP must be reachable: %w", cfg.ControlAddr, err)
+		}
+		return nil, fmt.Errorf("agent: quic control: %w", err)
+	}
+	return conn, nil
 }
 
 func parsePin(s string) ([sha256.Size]byte, error) {
