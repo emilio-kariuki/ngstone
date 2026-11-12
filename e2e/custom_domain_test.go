@@ -243,7 +243,7 @@ func TestCustomDomainLifecycle(t *testing.T) {
 		id := p.tunnelID(t, h.hostname)
 		alice := p.adminClient(t, p.b, "alice", oidc.RoleOperator)
 		root := p.adminClient(t, p.b, "root", oidc.RoleAdmin)
-		otherEdgeBound := 2*5*time.Second + 2*time.Second
+		otherEdgeBound := 8 * time.Second
 
 		domain := p.registerPending(t, alice, customDomainName, id)
 		if got := p.statusOf(t, p.b, customDomainName, fwdReadyPath); got != http.StatusNotFound {
