@@ -544,6 +544,41 @@ func TestAdmitForwardedControlUsesUnauthCap(t *testing.T) {
 	})
 }
 
+func TestAdmitForwardedControlCapsPerOriginalClient(t *testing.T) {
+	cl := newShareCluster(t)
+	cl.b.srv.unauthSem = newGlobalSemaphore(4)
+	cl.b.srv.unauthPerAddr = newPerIPInflight(1)
+	hold, ok := cl.b.srv.acquireUnauthAddr(&net.TCPAddr{IP: net.ParseIP("203.0.113.9"), Port: 1})
+	if !ok {
+		t.Fatal("could not hold the address slot")
+	}
+	delta := metricDelta(metricRejectedUnauthPerAddr)
+	conn, err := dialPeerTLS(t, cl.a.srv.peers.clientTLS(cl.b.pin()), cl.b.peerAddr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendFrame(t, conn, peerFrameControl, 0, "203.0.113.9:4000", nil)
+	mustPeerStatus(t, conn, peerStatusNotOwner)
+	expectClosed(t, conn)
+	if delta() != 1 {
+		t.Fatalf("rejection metric rose by %d, want 1", delta())
+	}
+	if got := len(cl.b.srv.unauthSem.slots); got != 0 {
+		t.Fatalf("a refused forwarded control connection leaked %d global slots", got)
+	}
+	hold()
+
+	startShare(t, cl.b, "the-link-secret", nil)
+	sess := peerControlSession(t, cl.a, cl.b, "203.0.113.9:4000")
+	sess.Control().Write(proto.TypeAuth, 1, proto.Auth{ShareSecret: "the-link-secret", InstanceID: "conn", ProtoVersions: proto.SupportedVersions})
+	if m := readSession(t, sess); m.Type != proto.TypeAuthOK {
+		t.Fatalf("reply = %s %s, want auth_ok once the address slot is free", m.Type, m.Data)
+	}
+	peerEventually(t, "address slot released after auth", func() bool {
+		return cl.b.srv.unauthPerAddr.inUse("203.0.113.9") == 0
+	})
+}
+
 func TestAdmitForwardedControlRefusesWhileDraining(t *testing.T) {
 	cl := newShareCluster(t)
 	cl.b.srv.unauthSem = newGlobalSemaphore(1)

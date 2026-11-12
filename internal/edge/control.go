@@ -180,6 +180,30 @@ func rateLimitKey(ip string) string {
 	return prefix.Masked().String()
 }
 
+func unauthAddrKey(a net.Addr) string {
+	ap, err := netip.ParseAddrPort(a.String())
+	if err != nil {
+		return a.String()
+	}
+	addr := ap.Addr().Unmap()
+	if addr.Is4() {
+		return addr.String()
+	}
+	prefix, err := addr.Prefix(64)
+	if err != nil {
+		return addr.String()
+	}
+	return prefix.String()
+}
+
+func (s *Server) acquireUnauthAddr(a net.Addr) (func(), bool) {
+	release, ok := s.unauthPerAddr.acquire(unauthAddrKey(a))
+	if !ok {
+		metricRejectedUnauthPerAddr.Add(1)
+	}
+	return release, ok
+}
+
 func (l *authRateLimiter) allowed(ip string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -262,8 +286,15 @@ func (s *Server) serveControl(ctx context.Context, ln net.Listener) error {
 			conn.Close()
 			continue
 		}
+		releaseAddr, ok := s.acquireUnauthAddr(conn.RemoteAddr())
+		if !ok {
+			conn.Close()
+			s.unauthSem.release()
+			continue
+		}
 		if !s.acceptControl() {
 			conn.Close()
+			releaseAddr()
 			s.unauthSem.release()
 			continue
 		}
@@ -271,7 +302,12 @@ func (s *Server) serveControl(ctx context.Context, ln net.Listener) error {
 			leave := sync.OnceFunc(s.controlConns.Done)
 			defer leave()
 			var once sync.Once
-			release := func() { once.Do(s.unauthSem.release) }
+			release := func() {
+				once.Do(func() {
+					releaseAddr()
+					s.unauthSem.release()
+				})
+			}
 			defer release()
 			s.handleControlConn(ctx, conn, release, leave)
 		}()

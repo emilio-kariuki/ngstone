@@ -158,6 +158,51 @@ func TestQUICAdmissionReleasesOnAuth(t *testing.T) {
 	}
 }
 
+func TestQUICAdmissionCapsUnauthPerAddr(t *testing.T) {
+	s := quicTestServer(4)
+	s.unauthPerAddr = newPerIPInflight(1)
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	if _, err := s.admitQUIC(ctx1, verifiedClient()); err != nil {
+		t.Fatalf("first admission: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	delta := metricDelta(metricRejectedUnauthPerAddr)
+	if _, err := s.admitQUIC(ctx, verifiedClient()); err == nil {
+		t.Fatal("a second admission from the same address was accepted")
+	}
+	if got := len(s.handshakeSem.slots); got != 1 {
+		t.Fatalf("handshake slots held = %d, want 1 (the refusal leaked or released one)", got)
+	}
+	if got := len(s.unauthSem.slots); got != 1 {
+		t.Fatalf("unauthenticated slots held = %d, want 1 (the refusal leaked or released one)", got)
+	}
+	if delta() != 1 {
+		t.Fatalf("rejection metric rose by %d, want 1", delta())
+	}
+	other := &quic.ClientInfo{RemoteAddr: &net.UDPAddr{IP: net.IPv4(192, 0, 2, 2), Port: 1}, AddrVerified: true}
+	if _, err := s.admitQUIC(ctx, other); err != nil {
+		t.Fatalf("admission from another address: %v", err)
+	}
+	cancel1()
+	peerEventually(t, "address slot released on context end", func() bool { return s.unauthPerAddr.inUse("192.0.2.1") == 0 })
+	if _, err := s.admitQUIC(ctx, verifiedClient()); err != nil {
+		t.Fatalf("admission after the holder ended: %v", err)
+	}
+}
+
+func TestQUICPerAddrReleasedOnAuth(t *testing.T) {
+	_, controlAddr, _ := startQUICEdgeForTest(t, LimitsConfig{UnauthPerAddr: 1})
+	for i := 0; i < 2; i++ {
+		sess := dialQUICSession(t, controlAddr)
+		defer sess.Close("done")
+		if typ, err := quicAuth(sess, "tok", fmt.Sprintf("agent-%d", i)); err != nil || typ != proto.TypeAuthOK {
+			t.Fatalf("auth %d with another authenticated session open: %q, %v", i, typ, err)
+		}
+	}
+}
+
 func startQUICServeForTest(t *testing.T, s *Server, withAdmission bool) string {
 	t.Helper()
 	tlsConf, err := s.quicTLSConfig()
@@ -576,11 +621,17 @@ func requireUnauthSlotHeldThenFreedWithin(t *testing.T, s *Server, start time.Ti
 	if quicSlotFree(s.unauthSem) {
 		t.Fatal("unauthenticated slot was free while the connection had not authenticated")
 	}
+	if got := s.unauthPerAddr.inUse("127.0.0.1"); got != 1 {
+		t.Fatalf("address slots in use while the connection was unauthenticated = %d, want 1", got)
+	}
 	for !quicSlotFree(s.unauthSem) {
 		if elapsed := time.Since(start); elapsed > bound {
 			t.Fatalf("unauthenticated slot still held %v after admission, want release within %v", elapsed, bound)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	if got := s.unauthPerAddr.inUse("127.0.0.1"); got != 0 {
+		t.Fatalf("address slots in use after the unauthenticated slot was freed = %d, want 0", got)
 	}
 }
 
@@ -641,6 +692,9 @@ func TestQUICFailedAuthHoldsSlotUntilConnectionCloses(t *testing.T) {
 	if quicSlotFree(s.unauthSem) {
 		t.Fatal("unauthenticated slot released while the failed connection was still open")
 	}
+	if got := s.unauthPerAddr.inUse("127.0.0.1"); got != 1 {
+		t.Fatalf("address slots in use while the failed connection was still open = %d, want 1", got)
+	}
 	if _, err := dialQUICRaw(t, controlAddr); err == nil {
 		t.Fatal("second connection was admitted while the failed one was still open")
 	}
@@ -650,6 +704,9 @@ func TestQUICFailedAuthHoldsSlotUntilConnectionCloses(t *testing.T) {
 		t.Fatalf("edge left a failed-auth connection open past %v", authDeadline+500*time.Millisecond)
 	}
 	waitQUICSlotFree(t, "unauthenticated", s.unauthSem)
+	if got := s.unauthPerAddr.inUse("127.0.0.1"); got != 0 {
+		t.Fatalf("address slots in use after the failed connection closed = %d, want 0", got)
+	}
 }
 
 func TestQUICTLSConfigClonesManagedConfig(t *testing.T) {

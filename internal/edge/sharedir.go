@@ -280,8 +280,20 @@ func (s *Server) admitForwardedControl(ctx context.Context, pc net.Conn) {
 		pc.Close()
 		return
 	}
+	releaseAddr, ok := s.acquireUnauthAddr(pc.RemoteAddr())
+	if !ok {
+		s.unauthSem.release()
+		writePeerStatus(pc, peerStatusNotOwner)
+		pc.Close()
+		return
+	}
 	var once sync.Once
-	release := func() { once.Do(s.unauthSem.release) }
+	release := func() {
+		once.Do(func() {
+			releaseAddr()
+			s.unauthSem.release()
+		})
+	}
 	if !s.acceptControl() {
 		release()
 		writePeerStatus(pc, peerStatusNotOwner)

@@ -83,6 +83,51 @@ func TestControlWebSocketCarriesAuthenticatedSession(t *testing.T) {
 	}
 }
 
+func TestWebSocketControlCapsUnauthPerAddr(t *testing.T) {
+	s := &Server{
+		cfg:           Config{TokenSHA256: sumToken("fallback-token")},
+		authLimiter:   newAuthRateLimiter(),
+		registry:      NewRegistry(),
+		unauthSem:     newGlobalSemaphore(4),
+		fallbackSem:   newGlobalSemaphore(4),
+		unauthPerAddr: newPerIPInflight(1),
+	}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.handleWebSocketControl(r.Context(), w, r)
+	}))
+	defer ts.Close()
+
+	wsURL := "ws://" + ts.Listener.Addr().String() + controlWebSocketPath
+	config, err := websocket.NewConfig(wsURL, "http://"+ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("websocket config: %v", err)
+	}
+	config.Protocol = []string{controlWebSocketSubprotocol}
+	first, err := websocket.DialConfig(config)
+	if err != nil {
+		t.Fatalf("first websocket dial: %v", err)
+	}
+	defer first.Close()
+
+	delta := metricDelta(metricRejectedUnauthPerAddr)
+	resp, err := http.Get(ts.URL + controlWebSocketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("second connection from the same address: status %d, want %d", resp.StatusCode, http.StatusServiceUnavailable)
+	}
+	if delta() != 1 {
+		t.Fatalf("rejection metric rose by %d, want 1", delta())
+	}
+	if got := len(s.fallbackSem.slots); got != 1 {
+		t.Fatalf("fallback slots held = %d, want 1 (the refusal leaked one)", got)
+	}
+	first.Close()
+	peerEventually(t, "address slot released on close", func() bool { return s.unauthPerAddr.inUse("127.0.0.1") == 0 })
+}
+
 func TestControlWebSocketRejectsMissingSubprotocol(t *testing.T) {
 	s := &Server{unauthSem: newGlobalSemaphore(1)}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

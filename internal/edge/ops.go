@@ -29,10 +29,11 @@ var (
 
 	metricRejectedUpgradeCap = expvar.NewInt("ngstoned_rejected_upgrade_cap_total")
 
-	metricRejectedPerIPCap   = expvar.NewInt("ngstoned_rejected_per_ip_cap_total")
-	metricRejectedClientIdle = expvar.NewInt("ngstoned_rejected_client_idle_total")
-	metricTCPClosedIdle      = expvar.NewInt("ngstoned_tcp_closed_idle_total")
-	metricActiveUpgrades     = expvar.NewInt("ngstoned_active_upgrades")
+	metricRejectedPerIPCap      = expvar.NewInt("ngstoned_rejected_per_ip_cap_total")
+	metricRejectedUnauthPerAddr = expvar.NewInt("ngstoned_rejected_unauth_per_addr_total")
+	metricRejectedClientIdle    = expvar.NewInt("ngstoned_rejected_client_idle_total")
+	metricTCPClosedIdle         = expvar.NewInt("ngstoned_tcp_closed_idle_total")
+	metricActiveUpgrades        = expvar.NewInt("ngstoned_active_upgrades")
 
 	metricPeerForwardedConns     = expvar.NewInt("ngstoned_peer_forwarded_conns_total")
 	metricPeerForwardFailed      = expvar.NewInt("ngstoned_peer_forward_failed_total")

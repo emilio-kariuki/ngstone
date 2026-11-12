@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -259,6 +260,18 @@ func TestNegotiateVersion(t *testing.T) {
 }
 
 func TestUnauthSlotReleasedAfterAuthAllowsSecondAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		limits LimitsConfig
+	}{
+		{"global cap", LimitsConfig{UnauthSessions: 1}},
+		{"per-address cap", LimitsConfig{UnauthPerAddr: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) { requireSecondAgentAuthenticates(t, tc.limits) })
+	}
+}
+
+func requireSecondAgentAuthenticates(t *testing.T, limits LimitsConfig) {
 	controlAddr := freeTCPAddr(t)
 	publicAddr := freeTCPAddr(t)
 
@@ -269,7 +282,7 @@ func TestUnauthSlotReleasedAfterAuthAllowsSecondAgent(t *testing.T) {
 		TokenSHA256:  sumToken("tok"),
 		PublicScheme: "http",
 		Insecure:     true,
-		Limits:       LimitsConfig{UnauthSessions: 1},
+		Limits:       limits,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -356,7 +369,7 @@ func TestUnauthSlotReleasedAfterAuthAllowsSecondAgent(t *testing.T) {
 	case r := <-resCh:
 		if r.err != nil {
 			closeGracefully(sessA)
-			t.Fatalf("second agent could not authenticate while an already-authenticated agent held the connection (UnauthSessions=1): %v — the unauth slot is not being released at the authentication boundary", r.err)
+			t.Fatalf("second agent could not authenticate while an already-authenticated agent held the connection (%+v): %v — the unauth slot is not being released at the authentication boundary", limits, r.err)
 		}
 		sessB = r.sess
 	case <-time.After(3 * time.Second):
@@ -571,4 +584,158 @@ func TestHandleBindRandomNameNeverTakesOverLiveDifferentInstance(t *testing.T) {
 	if !ok || got.Sess != liveHolder {
 		t.Fatalf("random-name bind must never evict a live different-instance holder, even though Bind.Takeover was true: route=%+v ok=%v", got, ok)
 	}
+}
+
+type stringAddr string
+
+func (a stringAddr) Network() string { return "test" }
+func (a stringAddr) String() string  { return string(a) }
+
+func TestUnauthAddrKey(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"192.0.2.1:5", "192.0.2.1"},
+		{"[::ffff:192.0.2.1]:5", "192.0.2.1"},
+		{"[2001:db8:1:2::a]:5", "2001:db8:1:2::/64"},
+		{"[2001:db8:1:2:ffff::1]:5", "2001:db8:1:2::/64"},
+		{"[2001:db8:1:3::1]:5", "2001:db8:1:3::/64"},
+		{"[fe80::1%eth0]:5", "fe80::/64"},
+		{"pipe", "pipe"},
+	}
+	for _, tc := range cases {
+		if got := unauthAddrKey(stringAddr(tc.in)); got != tc.want {
+			t.Errorf("unauthAddrKey(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestAcquireUnauthAddrGroupsIPv6By64(t *testing.T) {
+	s := &Server{unauthPerAddr: newPerIPInflight(1)}
+	addr := func(ip string) net.Addr { return &net.TCPAddr{IP: net.ParseIP(ip), Port: 1} }
+	release, ok := s.acquireUnauthAddr(addr("2001:db8:1:2::a"))
+	if !ok {
+		t.Fatal("first acquisition refused")
+	}
+	delta := metricDelta(metricRejectedUnauthPerAddr)
+	if _, ok := s.acquireUnauthAddr(addr("2001:db8:1:2::b")); ok {
+		t.Fatal("a second address in the same /64 was admitted")
+	}
+	if delta() != 1 {
+		t.Fatalf("rejection metric rose by %d, want 1", delta())
+	}
+	release2, ok := s.acquireUnauthAddr(addr("2001:db8:1:3::a"))
+	if !ok {
+		t.Fatal("an address in another /64 of the same /48 was refused")
+	}
+	release2()
+	release()
+	release3, ok := s.acquireUnauthAddr(addr("2001:db8:1:2::b"))
+	if !ok {
+		t.Fatal("the /64 stayed full after its holder released")
+	}
+	release3()
+}
+
+func startControlEdgeForTest(t *testing.T, limits LimitsConfig) (*Server, string) {
+	t.Helper()
+	controlAddr := freeTCPAddr(t)
+	publicAddr := freeTCPAddr(t)
+	s, err := New(Config{
+		ControlAddr:  controlAddr,
+		PublicAddr:   publicAddr,
+		Domain:       "example.com",
+		TokenSHA256:  sumToken("tok"),
+		PublicScheme: "http",
+		Insecure:     true,
+		Limits:       limits,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- s.serveControl(ctx, ln) }()
+	t.Cleanup(func() {
+		cancel()
+		ln.Close()
+		select {
+		case <-served:
+		case <-time.After(20 * time.Second):
+			t.Error("serveControl did not stop")
+		}
+	})
+	controlAddr = ln.Addr().String()
+	return s, controlAddr
+}
+
+func connHeld(c net.Conn, wait time.Duration) bool {
+	c.SetReadDeadline(time.Now().Add(wait))
+	_, err := c.Read(make([]byte, 1))
+	var ne net.Error
+	return err == nil || (errors.As(err, &ne) && ne.Timeout())
+}
+
+func TestServeControlCapsUnauthPerAddr(t *testing.T) {
+	s, controlAddr := startControlEdgeForTest(t, LimitsConfig{UnauthPerAddr: 1})
+	delta := metricDelta(metricRejectedUnauthPerAddr)
+
+	a, err := net.Dial("tcp", controlAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if !connHeld(a, 300*time.Millisecond) {
+		t.Fatal("the first unauthenticated connection was not held")
+	}
+	b, err := net.Dial("tcp", controlAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if connHeld(b, time.Second) {
+		t.Fatal("a second unauthenticated connection from the same address was held")
+	}
+	if delta() != 1 {
+		t.Fatalf("rejection metric rose by %d, want 1", delta())
+	}
+	if got := s.unauthPerAddr.inUse("127.0.0.1"); got != 1 {
+		t.Fatalf("address slots in use = %d, want 1", got)
+	}
+
+	a.Close()
+	peerEventually(t, "address slot released on close", func() bool { return s.unauthPerAddr.inUse("127.0.0.1") == 0 })
+	c, err := net.Dial("tcp", controlAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if !connHeld(c, 300*time.Millisecond) {
+		t.Fatal("a new connection was refused after the holder closed")
+	}
+	if got := len(s.unauthSem.slots); got != 1 {
+		t.Fatalf("global unauthenticated slots held = %d, want 1 (a refusal leaked or a release was missed)", got)
+	}
+}
+
+func TestServeControlDrainingReleasesUnauthSlots(t *testing.T) {
+	s, controlAddr := startControlEdgeForTest(t, LimitsConfig{UnauthPerAddr: 1})
+	s.controlMu.Lock()
+	s.controlDraining = true
+	s.controlMu.Unlock()
+	for i := 0; i < 3; i++ {
+		c, err := net.Dial("tcp", controlAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if connHeld(c, time.Second) {
+			t.Fatal("a connection was held while the edge was draining")
+		}
+		c.Close()
+	}
+	peerEventually(t, "address slot free after draining refusals", func() bool {
+		return s.unauthPerAddr.inUse("127.0.0.1") == 0 && len(s.unauthSem.slots) == 0
+	})
 }

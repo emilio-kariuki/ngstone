@@ -66,8 +66,19 @@ func (s *Server) handleWebSocketControl(ctx context.Context, w http.ResponseWrit
 		http.Error(w, "too many connections", http.StatusServiceUnavailable)
 		return
 	}
+	releaseAddr, ok := s.acquireUnauthAddr(websocketAddr{network: "tcp", value: r.RemoteAddr})
+	if !ok {
+		admission.release()
+		http.Error(w, "too many connections", http.StatusServiceUnavailable)
+		return
+	}
 	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(admission.release) }
+	release := func() {
+		releaseOnce.Do(func() {
+			releaseAddr()
+			admission.release()
+		})
+	}
 	defer release()
 	wsServer := websocket.Server{
 		Handshake: func(config *websocket.Config, request *http.Request) error {

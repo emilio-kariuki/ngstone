@@ -610,3 +610,17 @@ func TestRedirectToHTTPSRejectsUnrelatedHost(t *testing.T) {
 		t.Fatalf("Location = %q, want empty; must not echo an unvalidated Host header into a redirect", loc)
 	}
 }
+
+func TestLimitsConfigWithDefaultsUnauthPerAddr(t *testing.T) {
+	l, err := LimitsConfig{}.withDefaults()
+	if err != nil {
+		t.Fatalf("withDefaults: %v", err)
+	}
+	if l.UnauthPerAddr != DefaultUnauthPerAddr {
+		t.Fatalf("UnauthPerAddr = %d, want default %d", l.UnauthPerAddr, DefaultUnauthPerAddr)
+	}
+	_, err = LimitsConfig{UnauthPerAddr: -1}.withDefaults()
+	if err == nil || !strings.Contains(err.Error(), "unauth-per-addr") {
+		t.Fatalf("withDefaults(UnauthPerAddr: -1) error = %v, want one naming unauth-per-addr", err)
+	}
+}

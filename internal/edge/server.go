@@ -112,6 +112,8 @@ type Server struct {
 	unauthSem    *globalSemaphore
 	fallbackSem  *globalSemaphore
 
+	unauthPerAddr *perIPInflight
+
 	webhookBudget *byteBudget
 
 	adminClientCAs *x509.CertPool
@@ -317,6 +319,7 @@ func New(cfg Config) (*Server, error) {
 		handshakeSem:      newGlobalSemaphore(int64(limits.HandshakeConcurrency)),
 		unauthSem:         newGlobalSemaphore(int64(limits.UnauthSessions)),
 		fallbackSem:       newGlobalSemaphore(int64(limits.UnauthSessions)),
+		unauthPerAddr:     newPerIPInflight(limits.UnauthPerAddr),
 		webhookBudget:     newByteBudget(limits.WebhookBufferBytes),
 		tcpMgr:            tcpMgr,
 		observability:     newObservabilityRegistry(),

@@ -32,6 +32,7 @@ type quicAdmission struct {
 	deadline                  time.Time
 	handshakeOnce, unauthOnce sync.Once
 	authed                    atomic.Bool
+	releaseAddr               func()
 }
 
 func (a *quicAdmission) releaseHandshake() {
@@ -39,7 +40,10 @@ func (a *quicAdmission) releaseHandshake() {
 }
 
 func (a *quicAdmission) releaseUnauth() {
-	a.unauthOnce.Do(a.s.unauthSem.release)
+	a.unauthOnce.Do(func() {
+		a.releaseAddr()
+		a.s.unauthSem.release()
+	})
 }
 
 func (a *quicAdmission) authenticated() {
@@ -58,7 +62,13 @@ func (s *Server) admitQUIC(ctx context.Context, info *quic.ClientInfo) (context.
 		s.handshakeSem.release()
 		return nil, errors.New("edge: quic unauthenticated session capacity exhausted")
 	}
-	adm := &quicAdmission{s: s, deadline: time.Now().Add(authDeadline)}
+	releaseAddr, ok := s.acquireUnauthAddr(info.RemoteAddr)
+	if !ok {
+		s.unauthSem.release()
+		s.handshakeSem.release()
+		return nil, errors.New("edge: quic per-address unauthenticated session capacity exhausted")
+	}
+	adm := &quicAdmission{s: s, deadline: time.Now().Add(authDeadline), releaseAddr: releaseAddr}
 	ctx = context.WithValue(ctx, quicAdmissionKey{}, adm)
 	context.AfterFunc(ctx, func() {
 		adm.releaseHandshake()
