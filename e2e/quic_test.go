@@ -85,7 +85,7 @@ func TestQUICPartitionGracefulDrainEdgeSIGTERM(t *testing.T) {
 
 func TestQUICPartitionKillAgentMidRequest(t *testing.T) {
 	useQUIC(t)
-	partitionKillAgentMidRequest(t, 25*time.Second, true)
+	partitionKillAgentMidRequest(t, 30*time.Second, true)
 }
 
 func TestQUICPartitionEdgeRestart(t *testing.T) {

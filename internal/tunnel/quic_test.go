@@ -686,6 +686,11 @@ func TestQUICCloseUnblocksPendingRead(t *testing.T) {
 }
 
 func TestQUICRemoteAddrUnmapsIPv4(t *testing.T) {
+	probe, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv6unspecified})
+	if err != nil {
+		t.Skipf("host cannot listen on [::]:0: %v", err)
+	}
+	probe.Close()
 	ln, port := newQUICTestListener(t, "[::]:0")
 	type result struct {
 		nc  net.Conn
