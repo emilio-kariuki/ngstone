@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -195,5 +196,60 @@ func TestConnectHintAndPolicyText(t *testing.T) {
 	spec.MaxUses = 3
 	if got := sharePolicyText(spec); !strings.Contains(got, "3 uses") {
 		t.Fatalf("policy text = %q", got)
+	}
+}
+
+func TestShareFlagSetsHaveTransport(t *testing.T) {
+	sets := map[string]*flag.FlagSet{}
+	sets["share"], _ = newShareFlagSet()
+	sets["connect"], _ = newConnectFlagSet()
+	for _, name := range []string{"shares", "unshare", "extend", "kick"} {
+		sets[name], _ = newOpFlagSet(name)
+	}
+	for name, fs := range sets {
+		f := fs.Lookup("transport")
+		if f == nil {
+			t.Errorf("%s has no --transport flag", name)
+			continue
+		}
+		if f.DefValue != agent.TransportAuto {
+			t.Errorf("%s --transport default = %q, want %q", name, f.DefValue, agent.TransportAuto)
+		}
+	}
+
+	fsShare, sf := newShareFlagSet()
+	if _, err := parsePermissive(fsShare, []string{"postgres", "--transport", "quic"}); err != nil || sf.transport != "quic" {
+		t.Fatalf("share --transport quic: transport = %q, err = %v", sf.transport, err)
+	}
+	fsConnect, cf := newConnectFlagSet()
+	if _, err := parsePermissive(fsConnect, []string{"--transport", "websocket"}); err != nil || cf.transport != "websocket" {
+		t.Fatalf("connect --transport websocket: transport = %q, err = %v", cf.transport, err)
+	}
+	fsOp, of := newOpFlagSet("shares")
+	if _, err := parsePermissive(fsOp, []string{"--transport", "raw"}); err != nil || of.transport != "raw" {
+		t.Fatalf("shares --transport raw: transport = %q, err = %v", of.transport, err)
+	}
+}
+
+func TestShareCommandsRejectInvalidTransport(t *testing.T) {
+	want := agent.ValidateTransport("carrier-pigeon")
+	if want == nil {
+		t.Fatal("ValidateTransport accepted carrier-pigeon")
+	}
+
+	if _, err := newOperator(&opFlags{transport: "carrier-pigeon"}); err == nil || err.Error() != want.Error() {
+		t.Fatalf("newOperator err = %v, want %v", err, want)
+	}
+
+	secret, _, err := agent.NewShareSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := agent.ShareLink("edge.example:4443", secret)
+	if code := cmdShare([]string{"postgres", "--transport", "carrier-pigeon"}); code != 2 {
+		t.Errorf("cmdShare exit = %d, want 2", code)
+	}
+	if code := cmdConnect([]string{link, "--transport", "carrier-pigeon"}); code != 2 {
+		t.Errorf("cmdConnect exit = %d, want 2", code)
 	}
 }

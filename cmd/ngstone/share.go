@@ -64,6 +64,7 @@ type shareFlags struct {
 	insecure   bool
 	serverName string
 	pin        string
+	transport  string
 }
 
 func newShareFlagSet() (*flag.FlagSet, *shareFlags) {
@@ -88,6 +89,7 @@ func newShareFlagSet() (*flag.FlagSet, *shareFlags) {
 	fs.BoolVar(&sf.insecure, "insecure", false, "dial the control plane in plaintext (dev/test only); connectors must pass -insecure too")
 	fs.StringVar(&sf.serverName, "server-name", "", "TLS ServerName/SNI to verify against; defaults to the host in the server address (ignored with -insecure)")
 	fs.StringVar(&sf.pin, "pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation")
+	fs.StringVar(&sf.transport, "transport", agent.TransportAuto, "control transport: auto, raw, websocket, or quic (auto falls back to HTTPS on port 443)")
 	return fs, sf
 }
 
@@ -221,6 +223,10 @@ func cmdShare(args []string) int {
 		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
 		return 2
 	}
+	if err := agent.ValidateTransport(sf.transport); err != nil {
+		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
+		return 2
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -290,6 +296,7 @@ func cmdShare(args []string) int {
 		Insecure:    sf.insecure,
 		ServerName:  sf.serverName,
 		Pin:         sf.pin,
+		Transport:   sf.transport,
 		Share:       spec,
 	}
 
@@ -600,6 +607,7 @@ type connectFlags struct {
 	insecure   bool
 	serverName string
 	pin        string
+	transport  string
 }
 
 func newConnectFlagSet() (*flag.FlagSet, *connectFlags) {
@@ -613,6 +621,7 @@ func newConnectFlagSet() (*flag.FlagSet, *connectFlags) {
 	fs.BoolVar(&cf.insecure, "insecure", false, "dial the edge in plaintext (dev/test only; only for links from an edge running with -insecure)")
 	fs.StringVar(&cf.serverName, "server-name", "", "TLS ServerName/SNI to verify against; defaults to the host in the link (ignored with -insecure)")
 	fs.StringVar(&cf.pin, "pin", "", "optional \"sha256/BASE64\" SPKI pin, checked in addition to normal chain validation")
+	fs.StringVar(&cf.transport, "transport", agent.TransportAuto, "control transport: auto, raw, websocket, or quic (auto falls back to HTTPS on port 443)")
 	return fs, cf
 }
 
@@ -672,6 +681,10 @@ func cmdConnect(args []string) int {
 		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
 		return 2
 	}
+	if err := agent.ValidateTransport(cf.transport); err != nil {
+		fmt.Fprintf(os.Stderr, "ngstone: %v\n", err)
+		return 2
+	}
 	passphrase := cf.passphrase
 	if passphrase == "" {
 		passphrase = os.Getenv("NGSTONE_SHARE_PASSPHRASE")
@@ -692,6 +705,7 @@ func cmdConnect(args []string) int {
 		Insecure:    cf.insecure,
 		ServerName:  cf.serverName,
 		Pin:         cf.pin,
+		Transport:   cf.transport,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -869,6 +883,7 @@ type opFlags struct {
 	insecure   bool
 	serverName string
 	pin        string
+	transport  string
 	jsonOut    bool
 	watch      bool
 }
@@ -881,6 +896,7 @@ func newOpFlagSet(name string) (*flag.FlagSet, *opFlags) {
 	fs.BoolVar(&of.insecure, "insecure", false, "dial the control plane in plaintext (dev/test only)")
 	fs.StringVar(&of.serverName, "server-name", "", "TLS ServerName/SNI to verify against (ignored with -insecure)")
 	fs.StringVar(&of.pin, "pin", "", "optional \"sha256/BASE64\" SPKI pin")
+	fs.StringVar(&of.transport, "transport", agent.TransportAuto, "control transport: auto, raw, websocket, or quic (auto falls back to HTTPS on port 443)")
 	if name == "shares" {
 		fs.BoolVar(&of.jsonOut, "json", false, "print the raw list as JSON")
 		fs.BoolVar(&of.watch, "watch", false, "stay attached and print every share's audit events as they happen")
@@ -889,6 +905,9 @@ func newOpFlagSet(name string) (*flag.FlagSet, *opFlags) {
 }
 
 func newOperator(of *opFlags) (*agent.Operator, error) {
+	if err := agent.ValidateTransport(of.transport); err != nil {
+		return nil, err
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %v", err)
@@ -903,6 +922,7 @@ func newOperator(of *opFlags) (*agent.Operator, error) {
 		Insecure:    of.insecure,
 		ServerName:  of.serverName,
 		Pin:         of.pin,
+		Transport:   of.transport,
 	}), nil
 }
 
