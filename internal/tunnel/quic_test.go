@@ -372,6 +372,59 @@ func TestQUICSessionLargeTransfer(t *testing.T) {
 	}
 }
 
+func TestDialQUICFirstFallsBackToNextAddress(t *testing.T) {
+	want := &quicConn{}
+	var tried []string
+	conn, err := dialQUICFirst(context.Background(), []string{"a", "b", "c"}, func(_ context.Context, addr string) (net.Conn, error) {
+		tried = append(tried, addr)
+		if addr == "a" {
+			return nil, errors.New("a down")
+		}
+		return want, nil
+	})
+	if err != nil || conn != net.Conn(want) {
+		t.Fatalf("conn = %v, err = %v; want the second address's connection", conn, err)
+	}
+	if len(tried) != 2 || tried[0] != "a" || tried[1] != "b" {
+		t.Fatalf("tried = %v, want [a b]", tried)
+	}
+}
+
+func TestDialQUICFirstJoinsEveryError(t *testing.T) {
+	first := &quic.HandshakeTimeoutError{}
+	second := errors.New("second down")
+	errs := map[string]error{"a": first, "b": second}
+	_, err := dialQUICFirst(context.Background(), []string{"a", "b"}, func(_ context.Context, addr string) (net.Conn, error) {
+		return nil, errs[addr]
+	})
+	if err == nil {
+		t.Fatal("all addresses failed but no error was returned")
+	}
+	var hs *quic.HandshakeTimeoutError
+	if !errors.As(err, &hs) {
+		t.Fatalf("errors.As did not match the first attempt's error in %v", err)
+	}
+	if !errors.Is(err, second) {
+		t.Fatalf("errors.Is did not match the second attempt's error in %v", err)
+	}
+}
+
+func TestDialQUICFirstStopsWhenContextIsDone(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	_, err := dialQUICFirst(ctx, []string{"a", "b", "c"}, func(context.Context, string) (net.Conn, error) {
+		calls++
+		cancel()
+		return nil, context.Canceled
+	})
+	if calls != 1 {
+		t.Fatalf("dial attempts after the context ended = %d, want 1", calls)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
 func TestQUICConfigBounds(t *testing.T) {
 	gate := func(*quic.Conn, uint64) bool { return true }
 	for _, server := range []bool{true, false} {

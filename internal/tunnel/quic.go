@@ -196,18 +196,28 @@ func DialQUIC(ctx context.Context, addr string, tlsConf *tls.Config) (net.Conn, 
 	if len(candidates) == 0 {
 		return nil, fmt.Errorf("tunnel: no addresses for %q", host)
 	}
-	var lastErr error
-	for _, ip := range candidates {
-		conn, err := dialQUICAddr(ctx, net.JoinHostPort(ip.String(), strconv.Itoa(portNum)), tlsConf)
+	addrs := make([]string, len(candidates))
+	for i, ip := range candidates {
+		addrs[i] = net.JoinHostPort(ip.String(), strconv.Itoa(portNum))
+	}
+	return dialQUICFirst(ctx, addrs, func(ctx context.Context, addr string) (net.Conn, error) {
+		return dialQUICAddr(ctx, addr, tlsConf)
+	})
+}
+
+func dialQUICFirst(ctx context.Context, addrs []string, dial func(context.Context, string) (net.Conn, error)) (net.Conn, error) {
+	var errs []error
+	for _, addr := range addrs {
+		conn, err := dial(ctx, addr)
 		if err == nil {
 			return conn, nil
 		}
-		lastErr = err
+		errs = append(errs, err)
 		if ctx.Err() != nil {
 			break
 		}
 	}
-	return nil, lastErr
+	return nil, errors.Join(errs...)
 }
 
 func dialQUICAddr(ctx context.Context, addr string, tlsConf *tls.Config) (net.Conn, error) {
