@@ -1105,7 +1105,12 @@ func (s *Server) handleBindTCP(as *AgentSession, ctrl *proto.Conn, id uint64, bi
 	if s.storage != nil && bind.RemotePort != 0 {
 		lease, err = s.acquireDurableLease(as, bind, s.cfg.Domain, bind.RemotePort, nil)
 		if err != nil {
-			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodePortUnavailable, Message: "requested port is already in use"})
+			if errors.Is(err, storage.ErrTunnelConflict) {
+				ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodePortUnavailable, Message: "requested port is already in use"})
+				return
+			}
+			code, message := durableLeaseError(err)
+			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: code, Message: message})
 			return
 		}
 	}
@@ -1129,7 +1134,12 @@ func (s *Server) handleBindTCP(as *AgentSession, ctrl *proto.Conn, id uint64, bi
 		lease, err = s.acquireDurableLease(as, bind, s.cfg.Domain, port, nil)
 		if err != nil {
 			s.tcpMgr.releasePort(as, port)
-			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodePortUnavailable, Message: "allocated port is already in use"})
+			if errors.Is(err, storage.ErrTunnelConflict) {
+				ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodePortUnavailable, Message: "allocated port is already in use"})
+				return
+			}
+			code, message := durableLeaseError(err)
+			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: code, Message: message})
 			return
 		}
 	}
