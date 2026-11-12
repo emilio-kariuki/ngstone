@@ -169,7 +169,7 @@ func (t *readErrTracker) Read(b []byte) (int, error) {
 	return n, err
 }
 
-func (p *peerForwarder) routeControl(ctx context.Context, conn net.Conn, ip string, releaseUnauth, leave func()) (net.Conn, bool) {
+func (p *peerForwarder) routeControl(ctx context.Context, conn net.Conn, ip string, deadline time.Time, releaseUnauth, leave func()) (net.Conn, bool) {
 	tracker := &readErrTracker{r: conn}
 	captured, secret, ok := sniffShareSecret(tracker)
 	if !ok && tracker.err != nil {
@@ -193,7 +193,7 @@ func (p *peerForwarder) routeControl(ctx context.Context, conn net.Conn, ip stri
 	if !found {
 		return local, false
 	}
-	return p.spliceControl(ctx, conn, ip, src, captured, owner, releaseUnauth, leave)
+	return p.spliceControl(ctx, conn, ip, src, captured, owner, deadline, releaseUnauth, leave)
 }
 
 func (p *peerForwarder) controlForwardable(conn net.Conn, ip string, hash [32]byte) (src netip.AddrPort, key string, ok bool) {
@@ -239,7 +239,7 @@ func (p *peerForwarder) lookupShareHolder(ctx context.Context, key string) (owne
 	return owner, found, true
 }
 
-func (p *peerForwarder) spliceControl(ctx context.Context, conn net.Conn, ip string, src netip.AddrPort, captured []byte, owner storage.EdgePeer, releaseUnauth, leave func()) (net.Conn, bool) {
+func (p *peerForwarder) spliceControl(ctx context.Context, conn net.Conn, ip string, src netip.AddrPort, captured []byte, owner storage.EdgePeer, deadline time.Time, releaseUnauth, leave func()) (net.Conn, bool) {
 	release, ok := p.reserve(ip)
 	if !ok {
 		return p.forwardFailed(conn)
@@ -256,9 +256,23 @@ func (p *peerForwarder) spliceControl(ctx context.Context, conn net.Conn, ip str
 	}
 	defer upstream.Close()
 	defer conn.Close()
-	releaseUnauth()
+	if upstream.SetReadDeadline(deadline) != nil {
+		return nil, true
+	}
+	reply, authed := sniffAuthReply(upstream)
+	if authed {
+		releaseUnauth()
+	}
+	if len(reply) > 0 {
+		conn.SetWriteDeadline(deadline)
+		conn.Write(reply)
+	}
+	if !authed {
+		metricPeerForwardFailed.Add(1)
+		return nil, true
+	}
 	leave()
-	if conn.SetDeadline(time.Time{}) != nil {
+	if conn.SetDeadline(time.Time{}) != nil || upstream.SetReadDeadline(time.Time{}) != nil {
 		return nil, true
 	}
 	metricActivePeerForwards.Add(1)

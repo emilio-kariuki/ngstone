@@ -1371,3 +1371,85 @@ func TestInactiveShareCredentialClosesSessionAndWithdrawsRow(t *testing.T) {
 		})
 	}
 }
+
+func publishStaleShareRow(t *testing.T, holder *peerEdge, secret string) {
+	t.Helper()
+	key := shareDirKey(shareSecretHashBytes(secret))
+	if err := holder.store.PublishShare(context.Background(), key, "shr-stale", holder.id, "stale-owner", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("publish stale share row: %v", err)
+	}
+}
+
+func runIngressTransport(t *testing.T, e *peerEdge, name string, release func()) (net.Conn, <-chan struct{}) {
+	t.Helper()
+	client, server := net.Pipe()
+	remote := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 40001}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.srv.handleControlConnTransport(context.Background(), mappedRemoteConn{Conn: server, remote: remote}, release, controlTransport{name: name, leave: func() {}})
+	}()
+	t.Cleanup(func() {
+		client.Close()
+		server.Close()
+		<-done
+	})
+	return client, done
+}
+
+func TestForwardedControlHoldsUnauthUntilHolderAuth(t *testing.T) {
+	t.Run("valid link releases before the client reads auth_ok", func(t *testing.T) {
+		cl := newShareCluster(t)
+		startShare(t, cl.b, "the-link-secret", nil)
+		var released atomic.Bool
+		client, _ := runIngressTransport(t, cl.a, "quic", func() { released.Store(true) })
+		sess, err := tunnel.Client(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { sess.Close("test done") })
+		if released.Load() {
+			t.Fatal("the slot was released before the client sent its hello")
+		}
+		if err := sess.Control().Write(proto.TypeAuth, 1, proto.Auth{ShareSecret: "the-link-secret", InstanceID: "conn", ProtoVersions: proto.SupportedVersions}); err != nil {
+			t.Fatal(err)
+		}
+		if m := readSession(t, sess); m.Type != proto.TypeAuthOK {
+			t.Fatalf("reply = %s %s, want auth_ok", m.Type, m.Data)
+		}
+		if !released.Load() {
+			t.Fatal("the client read auth_ok before the ingress released its unauthenticated slot")
+		}
+	})
+
+	t.Run("rejected link keeps the slot and forwards the rejection", func(t *testing.T) {
+		cl := newShareCluster(t)
+		publishStaleShareRow(t, cl.b, "stale-secret")
+		failed := metricDelta(metricPeerForwardFailed)
+		var released atomic.Bool
+		client, done := runIngressTransport(t, cl.a, "quic", func() { released.Store(true) })
+		sess, err := tunnel.Client(client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { sess.Close("test done") })
+		if err := sess.Control().Write(proto.TypeAuth, 1, proto.Auth{ShareSecret: "stale-secret", InstanceID: "conn", ProtoVersions: proto.SupportedVersions}); err != nil {
+			t.Fatal(err)
+		}
+		m := readSession(t, sess)
+		if m.Type != proto.TypeAuthErr {
+			t.Fatalf("reply = %q %s, want auth_err", m.Type, m.Data)
+		}
+		ae, err := proto.Decode[proto.AuthErr](m)
+		if err != nil || ae.Code != proto.CodeBadShare {
+			t.Fatalf("auth_err = %+v, %v; want %s", ae, err, proto.CodeBadShare)
+		}
+		awaitSignal(t, done, "the ingress to finish the rejected connection")
+		if released.Load() {
+			t.Fatal("the ingress released its unauthenticated slot for a link the holder rejected")
+		}
+		if failed() != 1 {
+			t.Fatalf("forward failures = %d, want 1", failed())
+		}
+	})
+}

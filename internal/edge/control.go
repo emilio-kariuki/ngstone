@@ -363,7 +363,7 @@ func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, 
 
 	if !forwarded && s.peers != nil {
 		var done bool
-		if conn, done = s.peers.routeControl(ctx, conn, ip, releaseUnauth, tr.leave); done {
+		if conn, done = s.peers.routeControl(ctx, conn, ip, deadline, releaseUnauth, tr.leave); done {
 			return
 		}
 	}

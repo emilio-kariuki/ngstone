@@ -709,6 +709,92 @@ func TestQUICFailedAuthHoldsSlotUntilConnectionCloses(t *testing.T) {
 	}
 }
 
+func quicShareCluster(t *testing.T, unauthSlots int64) (*shareCluster, string) {
+	t.Helper()
+	cl := newShareCluster(t)
+	cl.a.srv.handshakeSem = newGlobalSemaphore(4)
+	cl.a.srv.unauthSem = newGlobalSemaphore(unauthSlots)
+	return cl, startQUICServeForTest(t, cl.a.srv, true)
+}
+
+func TestQUICForwardedShareRejectedKeepsHardStop(t *testing.T) {
+	shortenAuthDeadline(t, time.Second)
+	var allowed atomic.Int64
+	orig := quicWindowGate
+	quicWindowGate = func(qc *quic.Conn, delta uint64) bool {
+		ok := orig(qc, delta)
+		if ok {
+			allowed.Add(1)
+		}
+		return ok
+	}
+	t.Cleanup(func() { quicWindowGate = orig })
+
+	cl := newShareCluster(t)
+	cl.a.srv.handshakeSem = newGlobalSemaphore(4)
+	cl.a.srv.unauthSem = newGlobalSemaphore(1)
+	publishStaleShareRow(t, cl.b, "stale-secret")
+	addr := startQUICServeForTest(t, cl.a.srv, true)
+
+	start := time.Now()
+	sess := dialQUICSession(t, addr)
+	defer sess.Close("done")
+	if err := sess.Control().Write(proto.TypeAuth, 1, proto.Auth{ShareSecret: "stale-secret", InstanceID: "quic-conn", ProtoVersions: proto.SupportedVersions}); err != nil {
+		t.Fatal(err)
+	}
+	m := readSession(t, sess)
+	if m.Type != proto.TypeAuthErr {
+		t.Fatalf("reply = %q %s, want auth_err", m.Type, m.Data)
+	}
+	requireUnauthSlotHeldThenFreedWithin(t, cl.a.srv, start, authDeadline+300*time.Millisecond)
+	if n := allowed.Load(); n != 0 {
+		t.Fatalf("connection window opened %d times for a link the holder rejected", n)
+	}
+}
+
+func TestQUICConnectorAcrossEdges(t *testing.T) {
+	cl, addr := quicShareCluster(t, 1)
+	sharer, shareID := startShare(t, cl.b, "the-link-secret", nil)
+	forwarded := metricDelta(metricPeerControlForwarded)
+
+	sess := dialQUICSession(t, addr)
+	defer sess.Close("done")
+	if err := sess.Control().Write(proto.TypeAuth, 1, proto.Auth{ShareSecret: "the-link-secret", InstanceID: "quic-conn", ProtoVersions: proto.SupportedVersions}); err != nil {
+		t.Fatal(err)
+	}
+	if m := readSession(t, sess); m.Type != proto.TypeAuthOK {
+		t.Fatalf("auth reply = %s %s, want auth_ok", m.Type, m.Data)
+	}
+	if !quicSlotFree(cl.a.srv.unauthSem) {
+		t.Fatal("the ingress kept its unauthenticated slot after the holder accepted the link")
+	}
+	if err := sess.Control().Write(proto.TypeConnect, 5, proto.Connect{}); err != nil {
+		t.Fatal(err)
+	}
+	if m := readSession(t, sess); m.Type != proto.TypeConnectOK {
+		t.Fatalf("connect reply = %s %s", m.Type, m.Data)
+	}
+	readEvent(t, sharer.Control(), proto.ShareEventConnectorJoined)
+
+	stream, err := sess.OpenStream(context.Background(), proto.StreamOpen{Kind: proto.KindShare, Host: shareID, ShareID: shareID, ReqID: "r1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	msg := []byte("select 1\n")
+	if _, err := stream.Write(msg); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, len(msg))
+	stream.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(stream, buf); err != nil || string(buf) != string(msg) {
+		t.Fatalf("echo = %q, %v", buf, err)
+	}
+	if forwarded() != 1 {
+		t.Fatalf("forwarded = %d, want 1", forwarded())
+	}
+}
+
 func TestQUICTLSConfigClonesManagedConfig(t *testing.T) {
 	mgr, err := NewTLSManager(TLSConfig{
 		Domain:      "quic-config.invalid",

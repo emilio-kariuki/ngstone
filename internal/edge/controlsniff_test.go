@@ -207,3 +207,82 @@ func TestSniffRejectsOversizedProtoFrame(t *testing.T) {
 		t.Fatalf("captured %d read %d, want %d", len(captured), cr.n, 12+4)
 	}
 }
+
+func authOKFrameBytes(t *testing.T) []byte {
+	t.Helper()
+	return protoFrameBytes(t, proto.TypeAuthOK, proto.AuthOK{ProtoVersion: 3, SessionID: "sess", ServerVersion: "v"})
+}
+
+func TestSniffControlMsgReturnsFirstMessage(t *testing.T) {
+	msgBytes := authOKFrameBytes(t)
+	cut := len(msgBytes) / 2
+	var in bytes.Buffer
+	in.Write(yamuxHdr(yamuxTypeWindow, 0, controlStreamID, 100))
+	in.Write(yamuxHdr(yamuxTypePing, 0, 0, 7))
+	in.Write(dataFrame(controlStreamID, msgBytes[:cut]))
+	in.Write(yamuxHdr(yamuxTypeWindow, 0, controlStreamID, 100))
+	in.Write(dataFrame(controlStreamID, msgBytes[cut:]))
+	want := append([]byte{}, in.Bytes()...)
+	in.WriteString("bytes-after-the-message")
+
+	cr := &countingReader{r: &in}
+	captured, msg, ok := sniffControlMsg(cr)
+	if !ok || msg.Type != proto.TypeAuthOK {
+		t.Fatalf("sniff = ok %v type %q, want auth_ok", ok, msg.Type)
+	}
+	if !bytes.Equal(captured, want) {
+		t.Fatalf("captured %d bytes, want %d", len(captured), len(want))
+	}
+	if cr.n != len(want) {
+		t.Fatalf("read %d bytes, want %d (no read-ahead)", cr.n, len(want))
+	}
+	slow, msg, ok := sniffControlMsg(iotest.OneByteReader(bytes.NewReader(append(append([]byte{}, want...), "tail"...))))
+	if !ok || msg.Type != proto.TypeAuthOK || !bytes.Equal(slow, want) {
+		t.Fatalf("one-byte sniff = ok %v type %q captured-equal %v", ok, msg.Type, bytes.Equal(slow, want))
+	}
+}
+
+func TestSniffAuthReplyRejectsErrors(t *testing.T) {
+	okFrame := dataFrame(controlStreamID, authOKFrameBytes(t))
+	if captured, authed := sniffAuthReply(bytes.NewReader(okFrame)); !authed || !bytes.Equal(captured, okFrame) {
+		t.Fatalf("auth_ok: authed %v captured-equal %v", authed, bytes.Equal(captured, okFrame))
+	}
+
+	errFrame := dataFrame(controlStreamID, protoFrameBytes(t, proto.TypeAuthErr, proto.AuthErr{Code: proto.CodeBadShare, Message: "no such share"}))
+	captured, authed := sniffAuthReply(bytes.NewReader(errFrame))
+	if authed {
+		t.Fatal("auth_err reported as authenticated")
+	}
+	if !bytes.Equal(captured, errFrame) {
+		t.Fatalf("auth_err captured %d bytes, want %d", len(captured), len(errFrame))
+	}
+
+	goAway := yamuxHdr(3, 0, 0, 0)
+	if captured, authed := sniffAuthReply(bytes.NewReader(append(append([]byte{}, goAway...), okFrame...))); authed || !bytes.Equal(captured, goAway) {
+		t.Fatalf("go away: authed %v captured %d bytes, want false and %d", authed, len(captured), len(goAway))
+	}
+
+	if _, authed := sniffAuthReply(bytes.NewReader(dataFrame(3, authOKFrameBytes(t)))); authed {
+		t.Fatal("auth_ok on stream 3 reported as authenticated")
+	}
+	if _, authed := sniffAuthReply(bytes.NewReader(nil)); authed {
+		t.Fatal("empty input reported as authenticated")
+	}
+}
+
+func TestSniffShareSecretUnchanged(t *testing.T) {
+	withToken := testShareAuth()
+	withToken.Token = "tok"
+	frame := dataFrame(controlStreamID, protoFrameBytes(t, proto.TypeAuth, withToken))
+	captured, secret, ok := sniffShareSecret(bytes.NewReader(frame))
+	if ok || secret != "" {
+		t.Fatalf("token-carrying auth: ok %v secret %q", ok, secret)
+	}
+	if !bytes.Equal(captured, frame) {
+		t.Fatalf("captured %d bytes, want %d", len(captured), len(frame))
+	}
+
+	if _, secret, ok := sniffShareSecret(bytes.NewReader(dataFrame(controlStreamID, authOKFrameBytes(t)))); ok || secret != "" {
+		t.Fatalf("non-auth message: ok %v secret %q", ok, secret)
+	}
+}
