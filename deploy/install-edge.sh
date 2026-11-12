@@ -618,10 +618,17 @@ configure_quic_buffers() {
     rm -f -- "$SYSCTL_PATH"
     return
   fi
-  local key current entries=""
+  local key current entries="" raised=0 failed=0
   for key in net.core.rmem_max net.core.wmem_max; do
     current="$(sysctl -n "$key" 2>/dev/null || true)"
-    if [[ ! "$current" =~ ^[0-9]+$ ]] || (( current <= 7500000 )); then
+    if [[ ! "$current" =~ ^[0-9]+$ ]] || (( current < 7500000 )); then
+      entries+="${key}=7500000"$'\n'
+      if sysctl -q -w "${key}=7500000" >/dev/null; then
+        raised=1
+      else
+        failed=1
+      fi
+    elif (( current == 7500000 )) || { [[ -f "$SYSCTL_PATH" ]] && grep -qF -- "${key}=" "$SYSCTL_PATH"; }; then
       entries+="${key}=7500000"$'\n'
     fi
   done
@@ -632,10 +639,10 @@ configure_quic_buffers() {
   fi
   printf '%s' "$entries" > "$SYSCTL_PATH"
   chmod 644 "$SYSCTL_PATH"
-  if sysctl -q -p "$SYSCTL_PATH" >/dev/null; then
-    info "raised UDP socket buffer limits for QUIC (${SYSCTL_PATH})"
-  else
+  if [[ "$failed" -eq 1 ]]; then
     warn "could not apply ${SYSCTL_PATH}; QUIC works with smaller UDP buffers, so raise net.core.rmem_max and net.core.wmem_max to 7500000 on the host"
+  elif [[ "$raised" -eq 1 ]]; then
+    info "raised UDP socket buffer limits for QUIC (${SYSCTL_PATH})"
   fi
 }
 
