@@ -132,6 +132,12 @@ listening  127.0.0.1:6380          redis     ->  redis-cli -p 6380`}
           Optional SPKI pin, checked in addition to normal chain
           validation.
         </Property>
+        <Property name="--transport" type="string" defaultValue="auto">
+          Control transport: <code>auto</code>, <code>raw</code>,{" "}
+          <code>websocket</code> or <code>quic</code>. Share, connect and the
+          management commands all take it; <code>quic</code> is never part of{" "}
+          <code>auto</code>.
+        </Property>
       </ParamTable>
 
       <Anchor id="managing">Managing shares from anywhere</Anchor>

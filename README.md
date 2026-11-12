@@ -865,7 +865,9 @@ ngstone connect ngstone://example.com:4443/s/...
 Ctrl-C on the sharer revokes the link and connectors are told within a
 second. `--allow-cidr`, `--max-conns`, `--max-connectors`, `--max-uses`,
 `--single-use`, `--idle`, `--approve` and `--passphrase` set the policy;
-`--audit-log` writes every event as JSON Lines. Several services go in one
+`--audit-log` writes every event as JSON Lines. `share`, `connect` and the
+management commands take `--transport` (auto, raw, websocket or quic), the
+same as `http` and `tcp`. Several services go in one
 link (`ngstone share postgres redis:6380`), and connectors can name
 themselves (`--as alice`). From any terminal with the token, `ngstone
 shares` lists live shares (`--watch` tails their events), `ngstone extend`
@@ -1278,9 +1280,8 @@ fit in the 5 s pre-authentication budget after admission. A link with a round
 trip above about 4.5 s cannot connect over QUIC and should use TCP. Agents
 older than this release wait 5 s and are limited to about 2.5 s, so upgrade the
 agents to get the slow-link fix. `--transport quic` is a flag of
-the root form, `auth`, `port`, `tcp`, `tls` and `doctor`; `start` takes the
-transport from the tunnels file, and `share`, `connect` and the operator
-commands do not take it.
+the root form, `auth`, `port`, `tcp`, `tls`, `doctor`, `share`, `connect` and
+the operator commands; `start` takes the transport from the tunnels file.
 
 The edge also caps unauthenticated control connections per client address:
 at most 8 at once (`-unauth-per-addr`), counted per IPv4 address or per IPv6

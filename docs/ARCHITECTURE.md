@@ -437,7 +437,9 @@ domain-separated key, share id, edge id, owner id, expiry and revoked flag) and
 passes the raw control bytes over the peer hop, and the holding edge
 authenticates the connector with its real address. A share secret registered by
 another owner is refused, and `unshare` from any edge revokes the row for the
-owner.
+owner. The ingress releases its unauthenticated-session slot (and, for QUIC,
+opens flow control and cancels the hard stop) only after the holder's first
+control message is `auth_ok`.
 
 ### Custom domains
 

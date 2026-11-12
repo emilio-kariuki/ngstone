@@ -1015,7 +1015,7 @@ $ ngstone share tcp:9000 --single-use --idle 30m --audit-log share.jsonl`}
         <Property name="--audit-log" type="string">
           Append every audit event to this file as JSON Lines.
         </Property>
-        <Property name="--server, --token, --insecure, --server-name, --pin" type="various">
+        <Property name="--server, --token, --transport, --insecure, --server-name, --pin" type="various">
           As for <code>ngstone tcp</code>. With <code>--insecure</code> the
           printed hint tells connectors to pass it too.
         </Property>
@@ -1060,6 +1060,10 @@ $ NGSTONE_SHARE_LINK=ngstone://... ngstone connect --port 15432 --port redis=638
         <Property name="--pin" type="string">
           Optional SPKI pin, checked in addition to chain validation.
         </Property>
+        <Property name="--transport" type="string" defaultValue="auto">
+          Control transport: <code>auto</code>, <code>raw</code>,{" "}
+          <code>websocket</code> or <code>quic</code>.
+        </Property>
       </ParamTable>
       <p>
         Exit status is <code>0</code> on Ctrl-C, <code>3</code> when the
@@ -1085,8 +1089,9 @@ $ ngstone unshare sh_7f3a...     # revoke`}
       />
       <p>
         All take <code>--server</code>, <code>--token</code>,{" "}
-        <code>--insecure</code>, <code>--server-name</code> and{" "}
-        <code>--pin</code> like the other verbs. A revoked sharer&apos;s
+        <code>--transport</code>, <code>--insecure</code>,{" "}
+        <code>--server-name</code> and <code>--pin</code> like the other
+        verbs. A revoked sharer&apos;s
         terminal says <code>share revoked by another terminal</code> and
         exits 0.
       </p>
