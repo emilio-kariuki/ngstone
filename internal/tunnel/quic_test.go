@@ -711,3 +711,28 @@ func TestOrderQUICCandidatesPutsIPv4First(t *testing.T) {
 		t.Fatal("no addresses must yield no candidates")
 	}
 }
+
+func TestDialQUICBindsRouteSourceAddress(t *testing.T) {
+	ln, port := newQUICTestListener(t, "127.0.0.1:0")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	go func() {
+		qc, err := ln.Accept(ctx)
+		if err != nil {
+			return
+		}
+		qc.CloseWithError(0, "")
+	}()
+	nc, err := DialQUIC(ctx, quicTestAddr(port), quicTestClientTLS())
+	if err != nil {
+		t.Fatalf("DialQUIC: %v", err)
+	}
+	defer nc.Close()
+	la, ok := nc.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("LocalAddr type = %T, want *net.UDPAddr", nc.LocalAddr())
+	}
+	if !la.IP.Equal(net.IPv4(127, 0, 0, 1)) {
+		t.Fatalf("LocalAddr = %v, want 127.0.0.1", la)
+	}
+}

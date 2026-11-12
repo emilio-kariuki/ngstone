@@ -212,10 +212,26 @@ func DialQUIC(ctx context.Context, addr string, tlsConf *tls.Config) (net.Conn, 
 }
 
 func dialQUICAddr(ctx context.Context, addr string, tlsConf *tls.Config) (net.Conn, error) {
-	qc, err := quic.DialAddr(ctx, addr, tlsConf, quicClientConfig())
+	raddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, err
 	}
+	probe, err := net.DialUDP("udp", nil, raddr)
+	if err != nil {
+		return nil, err
+	}
+	src := probe.LocalAddr().(*net.UDPAddr)
+	probe.Close()
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: src.IP, Zone: src.Zone})
+	if err != nil {
+		return nil, err
+	}
+	qc, err := quic.Dial(ctx, pc, raddr, tlsConf, quicClientConfig())
+	if err != nil {
+		pc.Close()
+		return nil, err
+	}
+	context.AfterFunc(qc.Context(), func() { pc.Close() })
 	st, err := qc.OpenStreamSync(ctx)
 	if err != nil {
 		qc.CloseWithError(0, "")
