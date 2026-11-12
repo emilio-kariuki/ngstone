@@ -83,7 +83,7 @@ func TestAuthWrongTokenRejected(t *testing.T) {
 		})
 	}()
 
-	if _, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second), false); err == nil {
+	if _, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second), authDirect); err == nil {
 		t.Fatalf("expected error for wrong token")
 	}
 
@@ -117,7 +117,7 @@ func TestAuthMissingWithinDeadlineCloses(t *testing.T) {
 	s := newTestServer("tok")
 
 	start := time.Now()
-	_, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(authDeadline), false)
+	_, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(authDeadline), authDirect)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -142,7 +142,7 @@ func TestAuthNoCommonVersion(t *testing.T) {
 		})
 	}()
 
-	if _, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second), false); err == nil {
+	if _, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second), authDirect); err == nil {
 		t.Fatalf("expected error for incompatible protocol versions")
 	}
 
@@ -196,7 +196,7 @@ func TestReplyIDsEcho(t *testing.T) {
 		})
 	}()
 
-	as, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second), false)
+	as, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second), authDirect)
 	if err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
@@ -486,7 +486,7 @@ func TestControlLoopGoodbyeDoesNotLeakReaderGoroutine(t *testing.T) {
 				ProtoVersions: []int{proto.ProtoVersion},
 			})
 		}()
-		as, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second), false)
+		as, err := s.authenticate(context.Background(), server, "127.0.0.1", netip.AddrPort{}, time.Now().Add(5*time.Second), authDirect)
 		if err != nil {
 			t.Fatalf("authenticate: %v", err)
 		}

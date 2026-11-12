@@ -1453,3 +1453,155 @@ func TestForwardedControlHoldsUnauthUntilHolderAuth(t *testing.T) {
 		}
 	})
 }
+
+func peerAdminSession(t *testing.T, from, to *peerEdge, src string) tunnel.Session {
+	t.Helper()
+	conn, err := dialPeerTLS(t, from.srv.peers.clientTLS(to.pin()), to.peerAddr())
+	if err != nil {
+		t.Fatalf("peer handshake: %v", err)
+	}
+	sendFrame(t, conn, peerFrameAdmin, 0, src, nil)
+	mustPeerStatus(t, conn, peerStatusAccept)
+	conn.SetDeadline(time.Time{})
+	sess, err := tunnel.Client(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { sess.Close("test done") })
+	return sess
+}
+
+func peerAdminAuth(t *testing.T, sess tunnel.Session, auth proto.Auth) proto.Msg {
+	t.Helper()
+	auth.ProtoVersions = proto.SupportedVersions
+	if err := sess.Control().Write(proto.TypeAuth, 1, auth); err != nil {
+		t.Fatal(err)
+	}
+	return readSession(t, sess)
+}
+
+func fillAuthFailures(s *Server, ip string, n int) {
+	for i := 0; i < n; i++ {
+		s.authLimiter.recordFailure(ip)
+	}
+}
+
+func TestForwardedAdminRejectsShareSecret(t *testing.T) {
+	cl := newShareCluster(t)
+	useShareCredentials(cl)
+	const operator = "203.0.113.9"
+	fillAuthFailures(cl.b.srv, operator, maxAuthFailuresPerMinute-1)
+	if !cl.b.srv.authLimiter.allowed(operator) {
+		t.Fatal("the operator address is limited before the attempt")
+	}
+
+	sess := peerAdminSession(t, cl.a, cl.b, operator+":4000")
+	m := peerAdminAuth(t, sess, proto.Auth{ShareSecret: "some-link-secret"})
+	if e, _ := proto.Decode[proto.Error](m); m.Type != proto.TypeError || e.Code != proto.CodeMalformed {
+		t.Fatalf("admin auth with a share secret = %s %s, want malformed", m.Type, m.Data)
+	}
+	if cl.b.srv.authLimiter.allowed(operator) {
+		t.Fatal("a share secret on an admin frame was not counted against the operator address")
+	}
+}
+
+func TestForwardedAdminRejectsBadToken(t *testing.T) {
+	cl := newShareCluster(t)
+	useShareCredentials(cl)
+	const operator = "203.0.113.9"
+	fillAuthFailures(cl.b.srv, operator, maxAuthFailuresPerMinute-1)
+
+	sess := peerAdminSession(t, cl.a, cl.b, operator+":4000")
+	m := peerAdminAuth(t, sess, proto.Auth{Token: "ngs_not_a_real_token"})
+	if e, _ := proto.Decode[proto.AuthErr](m); m.Type != proto.TypeAuthErr || e.Code != proto.CodeBadToken {
+		t.Fatalf("admin auth with an unknown token = %s %s, want bad_token", m.Type, m.Data)
+	}
+	if cl.b.srv.authLimiter.allowed(operator) {
+		t.Fatal("a bad relayed token was not counted against the operator address")
+	}
+	if !cl.b.srv.authLimiter.allowed("127.0.0.1") {
+		t.Fatal("a bad relayed token was counted against the forwarding edge")
+	}
+
+	empty := peerAdminSession(t, cl.a, cl.b, "203.0.113.20:4000")
+	m = peerAdminAuth(t, empty, proto.Auth{})
+	if e, _ := proto.Decode[proto.Error](m); m.Type != proto.TypeError || e.Code != proto.CodeMalformed {
+		t.Fatalf("admin auth without a token = %s %s, want malformed", m.Type, m.Data)
+	}
+}
+
+func TestForwardedAdminGate(t *testing.T) {
+	cl := newShareCluster(t)
+	useShareCredentials(cl)
+	tokenA, tokenB := issueShareToken(t, cl.b, "owner-a"), issueShareToken(t, cl.b, "owner-b")
+	sharer, m := credentialShare(t, cl.b, tokenA, "sharer", "gate-link-secret")
+	if m.Type != proto.TypeShareOK {
+		t.Fatalf("share reply = %s %s", m.Type, m.Data)
+	}
+	_ = sharer
+	shareOK, _ := proto.Decode[proto.ShareOK](m)
+
+	authed := func(token string) tunnel.Session {
+		sess := peerAdminSession(t, cl.a, cl.b, "203.0.113.9:4000")
+		if m := peerAdminAuth(t, sess, proto.Auth{Token: token}); m.Type != proto.TypeAuthOK {
+			t.Fatalf("admin auth = %s %s, want auth_ok", m.Type, m.Data)
+		}
+		return sess
+	}
+
+	forbidden := []struct {
+		typ     string
+		payload any
+	}{
+		{proto.TypeShare, testShareReq("other-secret", time.Minute)},
+		{proto.TypeBind, proto.Bind{Kind: "http", Name: "x"}},
+		{proto.TypeUnbind, proto.Unbind{Hostname: "x.example.com"}},
+		{proto.TypeUnshare, proto.Unshare{ShareID: shareOK.ShareID}},
+		{proto.TypeApprove, proto.Approve{ShareID: shareOK.ShareID, ConnectorID: "c1", Allow: true}},
+		{proto.TypeWatchShares, proto.WatchShares{}},
+		{proto.TypeConnect, proto.Connect{}},
+	}
+	for _, tc := range forbidden {
+		t.Run("forbidden "+tc.typ, func(t *testing.T) {
+			sess := authed(tokenA)
+			if err := sess.Control().Write(tc.typ, 7, tc.payload); err != nil {
+				t.Fatal(err)
+			}
+			m := readSession(t, sess)
+			if e, _ := proto.Decode[proto.Error](m); m.Type != proto.TypeError || e.Code != proto.CodeForbidden {
+				t.Fatalf("%s on an admin session = %s %s, want forbidden", tc.typ, m.Type, m.Data)
+			}
+		})
+	}
+
+	t.Run("list is allowed and scoped", func(t *testing.T) {
+		sess := authed(tokenA)
+		sess.Control().Write(proto.TypeListShares, 8, proto.ListShares{})
+		m := readSession(t, sess)
+		ok, err := proto.Decode[proto.SharesOK](m)
+		if m.Type != proto.TypeSharesOK || err != nil || len(ok.Shares) != 1 || ok.Shares[0].ShareID != shareOK.ShareID {
+			t.Fatalf("owner list = %s %s, %v", m.Type, m.Data, err)
+		}
+		other := authed(tokenB)
+		other.Control().Write(proto.TypeListShares, 9, proto.ListShares{})
+		m = readSession(t, other)
+		ok, err = proto.Decode[proto.SharesOK](m)
+		if m.Type != proto.TypeSharesOK || err != nil || len(ok.Shares) != 0 {
+			t.Fatalf("other owner list = %s %s, %v", m.Type, m.Data, err)
+		}
+	})
+
+	t.Run("extend and kick are allowed", func(t *testing.T) {
+		sess := authed(tokenA)
+		newExpiry := time.Now().Add(20 * time.Minute).UnixMilli()
+		sess.Control().Write(proto.TypeShareUpdate, 10, proto.ShareUpdate{ShareID: shareOK.ShareID, ExpiresAtMS: newExpiry})
+		if m := readSession(t, sess); m.Type != proto.TypeShareOK {
+			t.Fatalf("extend on an admin session = %s %s, want share_ok", m.Type, m.Data)
+		}
+		sess.Control().Write(proto.TypeKick, 11, proto.Kick{ShareID: shareOK.ShareID, ConnectorID: "nobody"})
+		m := readSession(t, sess)
+		if e, _ := proto.Decode[proto.Error](m); m.Type != proto.TypeError || e.Code != proto.CodeNoSuchConnector {
+			t.Fatalf("kick on an admin session = %s %s, want no_such_connector", m.Type, m.Data)
+		}
+	})
+}

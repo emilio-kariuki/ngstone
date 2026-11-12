@@ -65,6 +65,9 @@ type AgentSession struct {
 	pendingShare *share
 	share        atomic.Pointer[share]
 	connectorID  string
+
+	relayToken string
+	viaPeer    bool
 }
 
 func (a *AgentSession) isConnector() bool {
@@ -318,17 +321,25 @@ func (s *Server) handleControlConn(ctx context.Context, conn net.Conn, releaseUn
 	s.handleControlConnTransport(ctx, conn, releaseUnauth, controlTransport{tls: s.tlsMgr != nil, leave: leave, name: "tcp"})
 }
 
+type authOrigin int
+
+const (
+	authDirect authOrigin = iota
+	authForwardedShare
+	authForwardedAdmin
+)
+
 type controlTransport struct {
-	tls       bool
-	forwarded bool
-	leave     func()
-	deadline  time.Time
-	name      string
+	tls      bool
+	origin   authOrigin
+	leave    func()
+	deadline time.Time
+	name     string
 }
 
 func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, releaseUnauth func(), tr controlTransport) {
 	ip := remoteIP(conn)
-	applyTLS, forwarded := tr.tls, tr.forwarded
+	applyTLS := tr.tls
 
 	deadline := tr.deadline
 	if deadline.IsZero() {
@@ -361,7 +372,7 @@ func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, 
 		conn = tlsConn
 	}
 
-	if !forwarded && s.peers != nil {
+	if tr.origin == authDirect && s.peers != nil {
 		var done bool
 		if conn, done = s.peers.routeControl(ctx, conn, ip, deadline, releaseUnauth, tr.leave); done {
 			return
@@ -378,7 +389,7 @@ func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, 
 	remote, _ := netip.ParseAddrPort(conn.RemoteAddr().String())
 
 	authCtx, cancelAuth := context.WithDeadline(ctx, deadline)
-	as, err := s.authenticate(authCtx, sess, ip, remote, deadline, forwarded)
+	as, err := s.authenticate(authCtx, sess, ip, remote, deadline, tr.origin)
 	cancelAuth()
 	if err != nil {
 		sess.Close("auth failed")
@@ -408,7 +419,7 @@ func remoteIP(conn net.Conn) string {
 	return addrPort.Addr().String()
 }
 
-func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip string, remote netip.AddrPort, deadline time.Time, forwarded bool) (*AgentSession, error) {
+func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip string, remote netip.AddrPort, deadline time.Time, origin authOrigin) (*AgentSession, error) {
 	ctrl := sess.Control()
 	if err := ctrl.SetReadDeadline(deadline); err != nil {
 		return nil, err
@@ -425,7 +436,7 @@ func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip strin
 		return nil, err
 	}
 	if msg.Type != proto.TypeAuth {
-		if forwarded {
+		if origin != authDirect {
 			s.authLimiter.recordFailure(ip)
 		}
 		ctrl.Write(proto.TypeError, msg.ID, proto.Error{Code: proto.CodeMalformed, Message: "expected auth as first message"})
@@ -439,7 +450,14 @@ func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip strin
 		return nil, err
 	}
 
-	if forwarded && (auth.ShareSecret == "" || auth.Token != "") {
+	if origin == authForwardedAdmin && (auth.Token == "" || auth.ShareSecret != "") {
+		s.authLimiter.recordFailure(ip)
+		ctrl.Write(proto.TypeError, msg.ID, proto.Error{Code: proto.CodeMalformed, Message: "forwarded admin sessions carry token auth only"})
+		slog.Warn("edge: auth attempt", "ip", ip, "result", "forwarded_not_token")
+		return nil, errors.New("edge: forwarded admin session is not a token session")
+	}
+
+	if origin == authForwardedShare && (auth.ShareSecret == "" || auth.Token != "") {
 		s.authLimiter.recordFailure(ip)
 		ctrl.Write(proto.TypeError, msg.ID, proto.Error{Code: proto.CodeMalformed, Message: "forwarded sessions carry share_secret auth only"})
 		slog.Warn("edge: auth attempt", "ip", ip, "result", "forwarded_not_share")
@@ -511,6 +529,10 @@ func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip strin
 		streamSem:         newGlobalSemaphore(s.limitsOrDefault().PerSessionInFlight),
 		upgradeStreamSem:  newGlobalSemaphore(s.limitsOrDefault().PerSessionUpgradeInFlight),
 		pendingShare:      pending,
+		viaPeer:           origin == authForwardedAdmin,
+	}
+	if origin == authDirect && auth.Token != "" && s.peers != nil && (credential == nil || credential.Kind == credentials.KindShare) {
+		as.relayToken = auth.Token
 	}
 	as.markHeartbeat()
 
@@ -604,6 +626,11 @@ func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 			if as.isConnector() && !connectorMaySend(m.Type) {
 				ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeForbidden, Message: fmt.Sprintf("%q is not allowed on a connector session", m.Type)})
 				slog.Warn("edge: connector sent a forbidden message", "session_id", as.ID, "type", m.Type)
+				return
+			}
+			if as.viaPeer && !peerAdminMaySend(m.Type) {
+				ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeForbidden, Message: fmt.Sprintf("%q is not allowed on a forwarded admin session", m.Type)})
+				slog.Warn("edge: forwarded admin session sent a forbidden message", "session_id", as.ID, "type", m.Type)
 				return
 			}
 			if as.Credential != nil {
@@ -762,6 +789,14 @@ func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 func connectorMaySend(typ string) bool {
 	switch typ {
 	case proto.TypeConnect, proto.TypePing, proto.TypePong, proto.TypeGoodbye:
+		return true
+	}
+	return false
+}
+
+func peerAdminMaySend(typ string) bool {
+	switch typ {
+	case proto.TypeShareUpdate, proto.TypeKick, proto.TypeListShares, proto.TypePing, proto.TypePong, proto.TypeGoodbye:
 		return true
 	}
 	return false

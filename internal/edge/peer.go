@@ -35,10 +35,12 @@ import (
 const (
 	peerALPN1 = "ngstone-peer-1"
 	peerALPN2 = "ngstone-peer-2"
+	peerALPN3 = "ngstone-peer-3"
 
 	peerFrameSNI     byte = 0x01
 	peerFrameTCP     byte = 0x02
 	peerFrameControl byte = 0x03
+	peerFrameAdmin   byte = 0x04
 
 	peerStatusAccept   byte = 0x00
 	peerStatusNotOwner byte = 0x01
@@ -210,7 +212,7 @@ func (p *peerForwarder) knownPin(pin string) bool {
 }
 
 func peerKnownALPN(proto string) bool {
-	return proto == peerALPN2 || proto == peerALPN1
+	return proto == peerALPN3 || proto == peerALPN2 || proto == peerALPN1
 }
 
 func (p *peerForwarder) serverTLS() *tls.Config {
@@ -218,7 +220,7 @@ func (p *peerForwarder) serverTLS() *tls.Config {
 		MinVersion:             tls.VersionTLS13,
 		Certificates:           []tls.Certificate{p.id.cert},
 		ClientAuth:             tls.RequireAnyClientCert,
-		NextProtos:             []string{peerALPN2, peerALPN1},
+		NextProtos:             []string{peerALPN3, peerALPN2, peerALPN1},
 		SessionTicketsDisabled: true,
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			if cs.DidResume {
@@ -249,7 +251,7 @@ func (p *peerForwarder) clientTLS(wantPin string) *tls.Config {
 		Certificates:       []tls.Certificate{p.id.cert},
 		InsecureSkipVerify: true,
 		ServerName:         "ngstone-peer",
-		NextProtos:         []string{peerALPN2, peerALPN1},
+		NextProtos:         []string{peerALPN3, peerALPN2, peerALPN1},
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			if cs.DidResume {
 				return errPeerResumed
@@ -450,7 +452,13 @@ func (p *peerForwarder) serveConn(ctx context.Context, c net.Conn) {
 	if kind == peerFrameControl {
 		held = false
 		p.handshakeSem.release()
-		p.srv.admitForwardedControl(ctx, &peerConn{Conn: tc, remote: remote})
+		p.srv.admitForwardedControl(ctx, &peerConn{Conn: tc, remote: remote}, authForwardedShare)
+		return
+	}
+	if kind == peerFrameAdmin {
+		held = false
+		p.handshakeSem.release()
+		p.srv.admitForwardedControl(ctx, &peerConn{Conn: tc, remote: remote}, authForwardedAdmin)
 		return
 	}
 	if err := c.SetDeadline(time.Time{}); err != nil {
@@ -465,7 +473,8 @@ func (p *peerForwarder) serveConn(ctx context.Context, c net.Conn) {
 
 func readPeerFrameHeader(tc *tls.Conn) (kind byte, port int, remote net.Addr, ok bool) {
 	kind = peerFrameSNI
-	if tc.ConnectionState().NegotiatedProtocol == peerALPN2 {
+	negotiated := tc.ConnectionState().NegotiatedProtocol
+	if negotiated == peerALPN2 || negotiated == peerALPN3 {
 		var head [1]byte
 		if _, err := io.ReadFull(tc, head[:]); err != nil {
 			slog.Debug("edge: peer frame header unreadable", "remote", tc.RemoteAddr().String(), "err", err)
@@ -474,6 +483,11 @@ func readPeerFrameHeader(tc *tls.Conn) (kind byte, port int, remote net.Addr, ok
 		kind = head[0]
 		switch kind {
 		case peerFrameSNI, peerFrameControl:
+		case peerFrameAdmin:
+			if negotiated != peerALPN3 {
+				slog.Debug("edge: peer admin frame without peer-3", "remote", tc.RemoteAddr().String())
+				return 0, 0, nil, false
+			}
 		case peerFrameTCP:
 			var raw [2]byte
 			if _, err := io.ReadFull(tc, raw[:]); err != nil {
@@ -644,7 +658,11 @@ type peerFrame struct {
 }
 
 func (f peerFrame) encode(alpn string) ([]byte, bool) {
-	if alpn != peerALPN2 && (alpn != peerALPN1 || f.kind != peerFrameSNI) {
+	switch {
+	case alpn == peerALPN3:
+	case alpn == peerALPN2 && f.kind != peerFrameAdmin:
+	case alpn == peerALPN1 && f.kind == peerFrameSNI:
+	default:
 		return nil, false
 	}
 	line, err := proxyProtoV1Line(f.src)
@@ -652,7 +670,7 @@ func (f peerFrame) encode(alpn string) ([]byte, bool) {
 		return nil, false
 	}
 	buf := make([]byte, 0, 3+len(line)+len(f.payload))
-	if alpn == peerALPN2 {
+	if alpn == peerALPN2 || alpn == peerALPN3 {
 		buf = append(buf, f.kind)
 		if f.kind == peerFrameTCP {
 			buf = binary.BigEndian.AppendUint16(buf, f.port)

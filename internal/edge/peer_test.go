@@ -2129,7 +2129,7 @@ func (f *fakePeerOwner) peer() storage.EdgePeer {
 func sendFrame(t *testing.T, c *tls.Conn, kind byte, port uint16, src string, payload []byte) {
 	t.Helper()
 	frame := peerFrame{kind: kind, port: port, src: netip.MustParseAddrPort(src), payload: payload}
-	b, ok := frame.encode(peerALPN2)
+	b, ok := frame.encode(c.ConnectionState().NegotiatedProtocol)
 	if !ok {
 		t.Fatalf("frame kind %#x cannot be encoded", kind)
 	}
@@ -2138,7 +2138,7 @@ func sendFrame(t *testing.T, c *tls.Conn, kind byte, port uint16, src string, pa
 	}
 }
 
-func TestPeerServerPrefersPeer2(t *testing.T) {
+func TestPeerServerPrefersPeer3(t *testing.T) {
 	pc := newPeerCluster(t)
 	a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
 	registerPeers(t, a, b)
@@ -2147,9 +2147,62 @@ func TestPeerServerPrefersPeer2(t *testing.T) {
 	if err != nil {
 		t.Fatalf("handshake: %v", err)
 	}
-	if got := tc.ConnectionState().NegotiatedProtocol; got != peerALPN2 {
-		t.Fatalf("negotiated %q, want %q", got, peerALPN2)
+	if got := tc.ConnectionState().NegotiatedProtocol; got != peerALPN3 {
+		t.Fatalf("negotiated %q, want %q", got, peerALPN3)
 	}
+	cfg := a.srv.peers.clientTLS(b.pin())
+	cfg.NextProtos = []string{peerALPN2}
+	tc, err = dialPeerTLS(t, cfg, b.peerAddr())
+	if err != nil {
+		t.Fatalf("peer-2 handshake: %v", err)
+	}
+	if got := tc.ConnectionState().NegotiatedProtocol; got != peerALPN2 {
+		t.Fatalf("negotiated %q for a peer-2 client, want %q", got, peerALPN2)
+	}
+}
+
+func TestPeerAdminFrameRequiresPeer3(t *testing.T) {
+	src := netip.MustParseAddrPort("203.0.113.9:4000")
+	admin := peerFrame{kind: peerFrameAdmin, src: src}
+	if b, ok := admin.encode(peerALPN2); ok {
+		t.Fatalf("admin frame encoded for peer-2: %q", b)
+	}
+	if b, ok := admin.encode(peerALPN1); ok {
+		t.Fatalf("admin frame encoded for peer-1: %q", b)
+	}
+	if _, ok := admin.encode(peerALPN3); !ok {
+		t.Fatal("admin frame cannot be encoded for peer-3")
+	}
+
+	pc := newPeerCluster(t)
+	a, b := pc.edge(t, "edge-a"), pc.edge(t, "edge-b")
+	registerPeers(t, a, b)
+	accepted := metricDelta(metricPeerAcceptedConns)
+
+	cfg := a.srv.peers.clientTLS(b.pin())
+	cfg.NextProtos = []string{peerALPN2}
+	old, err := dialPeerTLS(t, cfg, b.peerAddr())
+	if err != nil {
+		t.Fatalf("peer-2 handshake: %v", err)
+	}
+	line, err := proxyProtoV1Line(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Write(append([]byte{peerFrameAdmin}, line...)); err != nil {
+		t.Fatalf("write admin frame under peer-2: %v", err)
+	}
+	expectClosed(t, old)
+	if accepted() != 0 {
+		t.Fatalf("accepted = %d after an admin frame under peer-2, want 0", accepted())
+	}
+
+	current, err := dialPeerTLS(t, a.srv.peers.clientTLS(b.pin()), b.peerAddr())
+	if err != nil {
+		t.Fatalf("peer-3 handshake: %v", err)
+	}
+	sendFrame(t, current, peerFrameAdmin, 0, src.String(), nil)
+	mustPeerStatus(t, current, peerStatusAccept)
 }
 
 func TestPeerServerServesPeer1Client(t *testing.T) {
@@ -2216,6 +2269,12 @@ func TestPeerFrameEncode(t *testing.T) {
 		{"tcp peer-2", peerFrame{kind: peerFrameTCP, port: 8080, src: src}, peerALPN2, "\x02\x1f\x90" + line, true},
 		{"tcp peer-2 high port", peerFrame{kind: peerFrameTCP, port: 65535, src: src}, peerALPN2, "\x02\xff\xff" + line, true},
 		{"control peer-2", peerFrame{kind: peerFrameControl, src: src, payload: []byte("abc")}, peerALPN2, "\x03" + line + "abc", true},
+		{"sni peer-3", peerFrame{kind: peerFrameSNI, src: src, payload: []byte("HELLO")}, peerALPN3, "\x01" + line + "HELLO", true},
+		{"tcp peer-3", peerFrame{kind: peerFrameTCP, port: 8080, src: src}, peerALPN3, "\x02\x1f\x90" + line, true},
+		{"control peer-3", peerFrame{kind: peerFrameControl, src: src, payload: []byte("abc")}, peerALPN3, "\x03" + line + "abc", true},
+		{"admin peer-3", peerFrame{kind: peerFrameAdmin, src: src}, peerALPN3, "\x04" + line, true},
+		{"admin peer-2", peerFrame{kind: peerFrameAdmin, src: src}, peerALPN2, "", false},
+		{"admin peer-1", peerFrame{kind: peerFrameAdmin, src: src}, peerALPN1, "", false},
 		{"tcp peer-1", peerFrame{kind: peerFrameTCP, port: 8080, src: src}, peerALPN1, "", false},
 		{"control peer-1", peerFrame{kind: peerFrameControl, src: src, payload: []byte("abc")}, peerALPN1, "", false},
 		{"unknown protocol", peerFrame{kind: peerFrameSNI, src: src}, "ngstone-peer-9", "", false},

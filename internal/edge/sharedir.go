@@ -288,7 +288,7 @@ func (p *peerForwarder) forwardFailed(conn net.Conn) (net.Conn, bool) {
 	return nil, true
 }
 
-func (s *Server) admitForwardedControl(ctx context.Context, pc net.Conn) {
+func (s *Server) admitForwardedControl(ctx context.Context, pc net.Conn, origin authOrigin) {
 	if !s.unauthSem.tryAcquire() {
 		writePeerStatus(pc, peerStatusNotOwner)
 		pc.Close()
@@ -322,5 +322,9 @@ func (s *Server) admitForwardedControl(ctx context.Context, pc net.Conn) {
 		return
 	}
 	metricPeerAcceptedConns.Add(1)
-	s.handleControlConnTransport(ctx, pc, release, controlTransport{forwarded: true, leave: leave, name: "peer"})
+	name := "peer"
+	if origin == authForwardedAdmin {
+		name = "peer-admin"
+	}
+	s.handleControlConnTransport(ctx, pc, release, controlTransport{origin: origin, leave: leave, name: name})
 }
