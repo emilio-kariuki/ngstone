@@ -457,3 +457,51 @@ func TestQUICHandshakeSlotReleasedAfterAccept(t *testing.T) {
 		}
 	}
 }
+
+func shortenAuthDeadline(t *testing.T, d time.Duration) {
+	t.Helper()
+	orig := authDeadline
+	authDeadline = d
+	t.Cleanup(func() { authDeadline = orig })
+}
+
+func requireUnauthSlotHeldThenFreedWithin(t *testing.T, s *Server, start time.Time, bound time.Duration) {
+	t.Helper()
+	if quicSlotFree(s.unauthSem) {
+		t.Fatal("unauthenticated slot was free while the connection had not authenticated")
+	}
+	for !quicSlotFree(s.unauthSem) {
+		if elapsed := time.Since(start); elapsed > bound {
+			t.Fatalf("unauthenticated slot still held %v after admission, want release within %v", elapsed, bound)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestQUICUnauthLifetimeBoundedWithoutStream(t *testing.T) {
+	shortenAuthDeadline(t, time.Second)
+	s, controlAddr, _ := startQUICEdgeForTest(t, LimitsConfig{UnauthSessions: 1})
+	start := time.Now()
+	if _, err := dialQUICRaw(t, controlAddr); err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	requireUnauthSlotHeldThenFreedWithin(t, s, start, authDeadline+300*time.Millisecond)
+}
+
+func TestQUICUnauthLifetimeBoundedAfterLateSilentStream(t *testing.T) {
+	shortenAuthDeadline(t, time.Second)
+	s, controlAddr, _ := startQUICEdgeForTest(t, LimitsConfig{UnauthSessions: 1})
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := tunnel.DialQUIC(ctx, controlAddr, quicTestClientTLS())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { go conn.Close() }()
+	time.Sleep(600 * time.Millisecond)
+	if _, err := conn.Write([]byte{0}); err != nil {
+		t.Fatalf("partial hello: %v", err)
+	}
+	requireUnauthSlotHeldThenFreedWithin(t, s, start, authDeadline+300*time.Millisecond)
+}

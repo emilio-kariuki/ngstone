@@ -19,18 +19,18 @@ import (
 const (
 	QUICALPN = "ngstone-quic-1"
 
-	quicInitialWindow        = 64 << 10
-	quicMaxWindow            = 1 << 20
-	quicHandshakeIdleTimeout = 5 * time.Second
-	quicMaxIdleTimeout       = 15 * time.Second
-	quicKeepAlivePeriod      = 5 * time.Second
-	quicStreamAcceptTimeout  = 5 * time.Second
-	quicCloseLinger          = 3 * time.Second
+	quicInitialWindow              = 64 << 10
+	quicMaxWindow                  = 1 << 20
+	quicHandshakeIdleTimeout       = 5 * time.Second
+	quicServerHandshakeIdleTimeout = 2500 * time.Millisecond
+	quicMaxIdleTimeout             = 15 * time.Second
+	quicKeepAlivePeriod            = 5 * time.Second
+	quicStreamAcceptTimeout        = 5 * time.Second
+	quicCloseLinger                = 3 * time.Second
 )
 
-func quicConfig(server bool, gate func(*quic.Conn, uint64) bool) *quic.Config {
-	cfg := &quic.Config{
-		HandshakeIdleTimeout:           quicHandshakeIdleTimeout,
+func quicBaseConfig() *quic.Config {
+	return &quic.Config{
 		MaxIdleTimeout:                 quicMaxIdleTimeout,
 		KeepAlivePeriod:                quicKeepAlivePeriod,
 		InitialStreamReceiveWindow:     quicInitialWindow,
@@ -42,15 +42,20 @@ func quicConfig(server bool, gate func(*quic.Conn, uint64) bool) *quic.Config {
 		Allow0RTT:                      false,
 		EnableDatagrams:                false,
 	}
-	if server {
-		cfg.MaxIncomingStreams = 1
-		cfg.AllowConnectionWindowIncrease = gate
-	}
+}
+
+func quicClientConfig() *quic.Config {
+	cfg := quicBaseConfig()
+	cfg.HandshakeIdleTimeout = quicHandshakeIdleTimeout
 	return cfg
 }
 
 func QUICServerConfig(gate func(*quic.Conn, uint64) bool) *quic.Config {
-	return quicConfig(true, gate)
+	cfg := quicBaseConfig()
+	cfg.HandshakeIdleTimeout = quicServerHandshakeIdleTimeout
+	cfg.MaxIncomingStreams = 1
+	cfg.AllowConnectionWindowIncrease = gate
+	return cfg
 }
 
 type quicConn struct {
@@ -183,7 +188,7 @@ func DialQUIC(ctx context.Context, addr string, tlsConf *tls.Config) (net.Conn, 
 			}
 		}
 	}
-	qc, err := quic.DialAddr(ctx, net.JoinHostPort(ip.String(), strconv.Itoa(portNum)), tlsConf, quicConfig(false, nil))
+	qc, err := quic.DialAddr(ctx, net.JoinHostPort(ip.String(), strconv.Itoa(portNum)), tlsConf, quicClientConfig())
 	if err != nil {
 		return nil, err
 	}

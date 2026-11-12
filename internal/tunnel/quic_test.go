@@ -361,9 +361,14 @@ func TestQUICConfigBounds(t *testing.T) {
 		if server {
 			g = gate
 		}
-		cfg := quicConfig(server, g)
-		if cfg.HandshakeIdleTimeout != 5*time.Second {
-			t.Errorf("server=%v HandshakeIdleTimeout = %v", server, cfg.HandshakeIdleTimeout)
+		cfg := quicClientConfig()
+		wantHandshake := 5 * time.Second
+		if server {
+			cfg = QUICServerConfig(g)
+			wantHandshake = 2500 * time.Millisecond
+		}
+		if cfg.HandshakeIdleTimeout != wantHandshake {
+			t.Errorf("server=%v HandshakeIdleTimeout = %v, want %v", server, cfg.HandshakeIdleTimeout, wantHandshake)
 		}
 		if cfg.MaxIdleTimeout != 15*time.Second {
 			t.Errorf("server=%v MaxIdleTimeout = %v", server, cfg.MaxIdleTimeout)
@@ -470,7 +475,7 @@ func TestQUICNever0RTT(t *testing.T) {
 	tlsConf.ClientSessionCache = tls.NewLRUClientSessionCache(4)
 	for i := 0; i < 2; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		qc, err := quic.DialAddrEarly(ctx, quicTestAddr(port), tlsConf, quicConfig(false, nil))
+		qc, err := quic.DialAddrEarly(ctx, quicTestAddr(port), tlsConf, quicClientConfig())
 		if err != nil {
 			t.Fatalf("dial %d: %v", i, err)
 		}
@@ -658,7 +663,7 @@ func TestAcceptQUICClosesConnWithoutStream(t *testing.T) {
 	ln, port := newQUICTestListener(t, "127.0.0.1:0")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cqc, err := quic.DialAddr(ctx, quicTestAddr(port), quicTestClientTLS(), quicConfig(false, nil))
+	cqc, err := quic.DialAddr(ctx, quicTestAddr(port), quicTestClientTLS(), quicClientConfig())
 	if err != nil {
 		t.Fatal(err)
 	}

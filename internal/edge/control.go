@@ -286,13 +286,17 @@ type controlTransport struct {
 	tls       bool
 	forwarded bool
 	leave     func()
+	deadline  time.Time
 }
 
 func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, releaseUnauth func(), tr controlTransport) {
 	ip := remoteIP(conn)
 	applyTLS, forwarded := tr.tls, tr.forwarded
 
-	deadline := time.Now().Add(authDeadline)
+	deadline := tr.deadline
+	if deadline.IsZero() {
+		deadline = time.Now().Add(authDeadline)
+	}
 	if err := conn.SetReadDeadline(deadline); err != nil {
 		conn.Close()
 		return

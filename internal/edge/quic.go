@@ -29,6 +29,7 @@ type quicAdmissionKey struct{}
 
 type quicAdmission struct {
 	s                         *Server
+	deadline                  time.Time
 	handshakeOnce, unauthOnce sync.Once
 	authed                    atomic.Bool
 }
@@ -57,7 +58,7 @@ func (s *Server) admitQUIC(ctx context.Context, info *quic.ClientInfo) (context.
 		s.handshakeSem.release()
 		return nil, errors.New("edge: quic unauthenticated session capacity exhausted")
 	}
-	adm := &quicAdmission{s: s}
+	adm := &quicAdmission{s: s, deadline: time.Now().Add(authDeadline)}
 	ctx = context.WithValue(ctx, quicAdmissionKey{}, adm)
 	context.AfterFunc(ctx, func() {
 		adm.releaseHandshake()
@@ -174,13 +175,17 @@ func quicRemoteIP(qc *quic.Conn) string {
 func (s *Server) handleQUICConn(ctx context.Context, qc *quic.Conn, adm *quicAdmission) {
 	leave := sync.OnceFunc(s.controlConns.Done)
 	defer leave()
-	nc, err := tunnel.AcceptQUIC(ctx, qc)
+	actx, cancel := context.WithDeadline(ctx, adm.deadline)
+	nc, err := tunnel.AcceptQUIC(actx, qc)
+	cancel()
 	if err != nil {
+		adm.releaseUnauth()
 		slog.Warn("edge: quic control stream failed", "ip", quicRemoteIP(qc), "err", err)
 		return
 	}
 	slog.Info("edge: quic control stream accepted", "ip", quicRemoteIP(qc))
-	s.handleControlConnTransport(ctx, nc, adm.authenticated, controlTransport{leave: leave})
+	s.handleControlConnTransport(ctx, nc, adm.authenticated, controlTransport{leave: leave, deadline: adm.deadline})
+	adm.releaseUnauth()
 	nc.Close()
 	t := time.NewTimer(quicConnCloseWait)
 	defer t.Stop()
