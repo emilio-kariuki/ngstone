@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"os"
 	"path/filepath"
@@ -251,5 +252,60 @@ func TestShareCommandsRejectInvalidTransport(t *testing.T) {
 	}
 	if code := cmdConnect([]string{link, "--transport", "carrier-pigeon"}); code != 2 {
 		t.Errorf("cmdConnect exit = %d, want 2", code)
+	}
+}
+
+func TestPrintShares(t *testing.T) {
+	exp := time.Now().Add(time.Hour).UnixMilli()
+	one := func(id, edge string) proto.ShareInfo {
+		return proto.ShareInfo{ShareID: id, Edge: edge, Label: "db", ExpiresAtMS: exp, MaxConns: 4, MaxConnectors: 2}
+	}
+	cases := []struct {
+		name     string
+		listed   proto.SharesOK
+		contains []string
+		absent   []string
+	}{
+		{
+			name:     "single edge keeps the old footer",
+			listed:   proto.SharesOK{Edge: "edge-a", Shares: []proto.ShareInfo{one("sh_1", "")}},
+			contains: []string{"sh_1", "Shares on edge edge-a; other edges may hold more."},
+			absent:   []string{"EDGE", "did not answer"},
+		},
+		{
+			name:     "group lists an edge column and every edge",
+			listed:   proto.SharesOK{Edge: "edge-a", Group: true, Shares: []proto.ShareInfo{one("sh_1", "edge-a"), one("sh_2", "edge-b")}},
+			contains: []string{"EDGE", "edge-a         sh_1", "edge-b         sh_2"},
+			absent:   []string{"other edges may hold more", "did not answer"},
+		},
+		{
+			name:     "group names unreached edges",
+			listed:   proto.SharesOK{Edge: "edge-a", Group: true, Unreached: []string{"edge-b", "edge-c"}, Shares: []proto.ShareInfo{one("sh_1", "edge-a")}},
+			contains: []string{"edges edge-b, edge-c did not answer; their shares are not shown."},
+			absent:   []string{"other edges may hold more"},
+		},
+		{
+			name:     "empty group still reports unreached edges",
+			listed:   proto.SharesOK{Edge: "edge-a", Group: true, Unreached: []string{"edge-b"}},
+			contains: []string{"no live shares", "edges edge-b did not answer"},
+			absent:   []string{"EDGE"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printShares(&buf, tc.listed)
+			out := buf.String()
+			for _, want := range tc.contains {
+				if !strings.Contains(out, want) {
+					t.Errorf("output missing %q:\n%s", want, out)
+				}
+			}
+			for _, bad := range tc.absent {
+				if strings.Contains(out, bad) {
+					t.Errorf("output contains %q:\n%s", bad, out)
+				}
+			}
+		})
 	}
 }

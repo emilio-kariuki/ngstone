@@ -940,7 +940,11 @@ func opError(err error) int {
 	return 1
 }
 
-func formatShareInfo(w io.Writer, s proto.ShareInfo) {
+func formatShareInfo(w io.Writer, s proto.ShareInfo, group bool) {
+	edge, indent := "", ""
+	if group {
+		edge, indent = fmt.Sprintf("%-14s ", s.Edge), strings.Repeat(" ", 15)
+	}
 	mine := ""
 	if s.Mine {
 		mine = "  (this session)"
@@ -949,7 +953,7 @@ func formatShareInfo(w io.Writer, s proto.ShareInfo) {
 	for _, t := range s.Targets {
 		targets = append(targets, t.Preset)
 	}
-	fmt.Fprintf(w, "%s  %-24s %-20s expires %s%s\n", s.ShareID, s.Label, strings.Join(targets, ","), expiresText(time.UnixMilli(s.ExpiresAtMS)), mine)
+	fmt.Fprintf(w, "%s%s  %-24s %-20s expires %s%s\n", edge, s.ShareID, s.Label, strings.Join(targets, ","), expiresText(time.UnixMilli(s.ExpiresAtMS)), mine)
 	policy := []string{fmt.Sprintf("%d conns", s.MaxConns), fmt.Sprintf("%d connectors", s.MaxConnectors)}
 	if s.MaxUses > 0 {
 		policy = append(policy, fmt.Sprintf("%d/%d uses", s.Uses, s.MaxUses))
@@ -966,9 +970,9 @@ func formatShareInfo(w io.Writer, s proto.ShareInfo) {
 	if s.Passphrase {
 		policy = append(policy, "passphrase")
 	}
-	fmt.Fprintf(w, "%20s  policy: %s;  %d open connections\n", "", strings.Join(policy, ", "), s.OpenConns)
+	fmt.Fprintf(w, "%s%20s  policy: %s;  %d open connections\n", indent, "", strings.Join(policy, ", "), s.OpenConns)
 	for _, c := range s.Connectors {
-		fmt.Fprintf(w, "%20s  connector %-12s %-21s joined %s ago\n", "", c.ID, hostOnlyAddr(c.Addr), roundDuration(time.Since(time.UnixMilli(c.JoinedMS))))
+		fmt.Fprintf(w, "%s%20s  connector %-12s %-21s joined %s ago\n", indent, "", c.ID, hostOnlyAddr(c.Addr), roundDuration(time.Since(time.UnixMilli(c.JoinedMS))))
 	}
 }
 
@@ -1018,16 +1022,26 @@ func cmdShares(args []string) int {
 		enc.Encode(shares)
 		return 0
 	}
-	if len(shares) == 0 {
-		fmt.Println("no live shares")
-	}
-	for _, s := range shares {
-		formatShareInfo(os.Stdout, s)
-	}
-	if listed.Edge != "" {
-		fmt.Printf("Shares on edge %s; other edges may hold more.\n", listed.Edge)
-	}
+	printShares(os.Stdout, listed)
 	return 0
+}
+
+func printShares(w io.Writer, listed proto.SharesOK) {
+	if len(listed.Shares) == 0 {
+		fmt.Fprintln(w, "no live shares")
+	}
+	if listed.Group && len(listed.Shares) > 0 {
+		fmt.Fprintf(w, "%-14s %s\n", "EDGE", "SHARE")
+	}
+	for _, s := range listed.Shares {
+		formatShareInfo(w, s, listed.Group)
+	}
+	switch {
+	case listed.Group && len(listed.Unreached) > 0:
+		fmt.Fprintf(w, "edges %s did not answer; their shares are not shown.\n", strings.Join(listed.Unreached, ", "))
+	case !listed.Group && listed.Edge != "":
+		fmt.Fprintf(w, "Shares on edge %s; other edges may hold more.\n", listed.Edge)
+	}
 }
 
 func cmdUnshare(args []string) int {
