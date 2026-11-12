@@ -161,6 +161,8 @@ type Agent struct {
 	control     *liveControl      // live control stream in sharer mode, for Approve/Kick/Extend
 	pendingMgmt map[uint64]string // ids of management requests awaiting a reply
 	tcpPort     int
+	subdomain   string
+	rememberOff bool
 }
 
 func New(cfg Config) *Agent {
@@ -621,9 +623,13 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		return proto.BindOK{}, errPlaintextWebhookSecret
 	}
 
-	rememberPort := a.bindKind() == proto.KindTCP && a.cfg.RemotePort == 0
+	rememberPort := a.bindKind() == proto.KindTCP && a.cfg.RemotePort == 0 && a.remembering()
 	if rememberPort {
 		bindMsg.RemotePort = a.rememberedTCPPort()
+	}
+	rememberName := (a.bindKind() == proto.KindHTTP || a.bindKind() == proto.KindTLS) && a.cfg.Subdomain == "" && a.remembering()
+	if rememberName {
+		bindMsg.Subdomain = a.rememberedSubdomain()
 	}
 
 	bindOK, bindErr, err := a.bind(ctrl, idgen, bindMsg)
@@ -634,6 +640,18 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		slog.Warn("agent: previous tcp port unavailable, binding a new one", "port", bindMsg.RemotePort)
 		a.setRememberedTCPPort(0)
 		bindMsg.RemotePort = 0
+		bindOK, bindErr, err = a.bind(ctrl, idgen, bindMsg)
+		if err != nil {
+			return proto.BindOK{}, err
+		}
+	}
+	if bindErr != nil && rememberName && bindMsg.Subdomain != "" && (bindErr.Code == proto.CodeSubdomainTaken || bindErr.Code == proto.CodeKindConflict || bindErr.Code == proto.CodeCredentialScope) {
+		slog.Warn("agent: previous name unavailable, binding a new one", "subdomain", bindMsg.Subdomain, "code", bindErr.Code)
+		a.setRememberedSubdomain("")
+		if bindErr.Code == proto.CodeCredentialScope {
+			a.stopRemembering()
+		}
+		bindMsg.Subdomain = ""
 		bindOK, bindErr, err = a.bind(ctrl, idgen, bindMsg)
 		if err != nil {
 			return proto.BindOK{}, err
@@ -663,8 +681,11 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 	if a.cfg.OIDC != nil && !bindOK.OIDC {
 		return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge OIDC visitor login; upgrade ngstoned", errFatalHandshake)
 	}
-	if rememberPort {
+	if rememberPort && a.remembering() {
 		a.setRememberedTCPPort(bindOK.Port)
+	}
+	if rememberName && a.remembering() {
+		a.setRememberedSubdomain(subdomainOf(bindOK.Hostname))
 	}
 	return bindOK, nil
 }
@@ -702,6 +723,40 @@ func (a *Agent) setRememberedTCPPort(port int) {
 	a.mu.Lock()
 	a.tcpPort = port
 	a.mu.Unlock()
+}
+
+func (a *Agent) rememberedSubdomain() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.subdomain
+}
+
+func (a *Agent) setRememberedSubdomain(name string) {
+	a.mu.Lock()
+	a.subdomain = name
+	a.mu.Unlock()
+}
+
+func (a *Agent) remembering() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return !a.rememberOff
+}
+
+func (a *Agent) stopRemembering() {
+	a.mu.Lock()
+	a.rememberOff = true
+	a.subdomain = ""
+	a.tcpPort = 0
+	a.mu.Unlock()
+}
+
+func subdomainOf(hostname string) string {
+	label, _, found := strings.Cut(hostname, ".")
+	if !found {
+		return ""
+	}
+	return label
 }
 
 func (a *Agent) sendGoodbye(sess tunnel.Session, idgen *proto.IDGen, reason string) {
