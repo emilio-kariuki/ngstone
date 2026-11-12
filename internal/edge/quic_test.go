@@ -279,7 +279,7 @@ func startQUICEdgeForTest(t *testing.T, limits LimitsConfig) (*Server, string, s
 			t.Error("edge did not stop")
 		}
 	})
-	waitTCPUp(t, publicAddr)
+	waitTCPUpOrRunErr(t, publicAddr, runErr)
 	return s, controlAddr, publicAddr
 }
 

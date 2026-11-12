@@ -24,19 +24,47 @@ func sumToken(token string) []byte {
 
 func freeTCPAddr(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("freeTCPAddr: %v", err)
+	for i := 0; i < 50; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("freeTCPAddr: %v", err)
+		}
+		addr := ln.Addr().String()
+		pc, uerr := net.ListenPacket("udp", addr)
+		ln.Close()
+		if uerr == nil {
+			pc.Close()
+			return addr
+		}
 	}
-	addr := ln.Addr().String()
-	ln.Close()
-	return addr
+	t.Fatal("freeTCPAddr: no port free on both TCP and UDP")
+	return ""
 }
 
 func waitTCPUp(t *testing.T, addr string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", addr)
+}
+
+func waitTCPUpOrRunErr(t *testing.T, addr string, runErr chan error) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-runErr:
+			runErr <- err
+			t.Fatalf("edge Run returned before %s came up: %v", addr, err)
+		default:
+		}
 		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
 		if err == nil {
 			conn.Close()
