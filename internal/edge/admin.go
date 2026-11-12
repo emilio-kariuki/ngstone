@@ -526,7 +526,7 @@ func (s *Server) handleAdminDomainStatus(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) customDomainReserved(domain string) bool {
-	return hostMatchesDomain(domain, strings.ToLower(s.cfg.Domain)) || s.visitor.servesHost(domain)
+	return hostMatchesDomain(domain, strings.ToLower(s.cfg.Domain))
 }
 
 func truncateField(value string, max int) string {

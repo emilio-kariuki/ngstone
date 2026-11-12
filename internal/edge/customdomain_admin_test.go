@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"path/filepath"
 	"testing"
 
@@ -95,8 +94,7 @@ func TestAdminCreateCustomDomainRejectsClientStatus(t *testing.T) {
 
 func TestAdminCreateCustomDomainRejectsReserved(t *testing.T) {
 	s := newDomainTestServer(t)
-	s.visitor = &visitorLogin{callback: &url.URL{Scheme: "https", Host: "login.other.net"}}
-	for _, domain := range []string{"example.com", "Example.com.", "app.example.com", "deep.app.example.com", "login.other.net", "1.2.3.4", "*.example.org", "[::1]"} {
+	for _, domain := range []string{"example.com", "Example.com.", "app.example.com", "deep.app.example.com", "1.2.3.4", "*.example.org", "[::1]"} {
 		body, _ := json.Marshal(map[string]string{"domain": domain})
 		rec := adminRequestAs(t, s, oidc.RoleOperator, "alice", http.MethodPost, "/api/v1/domains", body)
 		if rec.Code != http.StatusUnprocessableEntity {
