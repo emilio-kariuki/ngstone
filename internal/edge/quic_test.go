@@ -209,7 +209,7 @@ func TestQUICAcceptFailsClosedWithoutAdmission(t *testing.T) {
 	addr := startQUICServeForTest(t, s, false)
 	qc, err := dialQUICRaw(t, addr)
 	if err != nil {
-		return
+		t.Fatalf("dial: %v", err)
 	}
 	select {
 	case <-qc.Context().Done():
@@ -399,16 +399,17 @@ func TestQUICDrainRefusesNewConnections(t *testing.T) {
 	s.controlDraining = true
 	addr := startQUICServeForTest(t, s, true)
 	qc, err := dialQUICRaw(t, addr)
-	if err == nil {
-		select {
-		case <-qc.Context().Done():
-		case <-time.After(3 * time.Second):
-			t.Fatal("a connection during drain was not closed")
-		}
-		var appErr *quic.ApplicationError
-		if !errors.As(context.Cause(qc.Context()), &appErr) || appErr.ErrorMessage != "draining" {
-			t.Fatalf("close cause = %v, want an application error with message draining", context.Cause(qc.Context()))
-		}
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	select {
+	case <-qc.Context().Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("a connection during drain was not closed")
+	}
+	var appErr *quic.ApplicationError
+	if !errors.As(context.Cause(qc.Context()), &appErr) || appErr.ErrorMessage != "draining" {
+		t.Fatalf("close cause = %v, want an application error with message draining", context.Cause(qc.Context()))
 	}
 	waitQUICSlotFree(t, "handshake", s.handshakeSem)
 	waitQUICSlotFree(t, "unauthenticated", s.unauthSem)
@@ -504,4 +505,32 @@ func TestQUICUnauthLifetimeBoundedAfterLateSilentStream(t *testing.T) {
 		t.Fatalf("partial hello: %v", err)
 	}
 	requireUnauthSlotHeldThenFreedWithin(t, s, start, authDeadline+300*time.Millisecond)
+}
+
+func TestQUICTLSConfigClonesManagedConfig(t *testing.T) {
+	mgr, err := NewTLSManager(TLSConfig{
+		Domain:      "quic-config.invalid",
+		DNSProvider: fakeDNSProvider{},
+		ACMEEmail:   "ops@quic-config.invalid",
+		StoragePath: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("NewTLSManager: %v", err)
+	}
+	apex := mgr.ApexTLSConfig()
+	before := append([]string(nil), apex.NextProtos...)
+	s := &Server{tlsMgr: mgr}
+	cfg, err := s.quicTLSConfig()
+	if err != nil {
+		t.Fatalf("quicTLSConfig: %v", err)
+	}
+	if cfg == apex {
+		t.Fatal("quicTLSConfig returned the shared apex config instead of a clone")
+	}
+	if len(cfg.NextProtos) != 1 || cfg.NextProtos[0] != tunnel.QUICALPN {
+		t.Fatalf("NextProtos = %v, want [%s]", cfg.NextProtos, tunnel.QUICALPN)
+	}
+	if strings.Join(apex.NextProtos, ",") != strings.Join(before, ",") {
+		t.Fatalf("apex NextProtos changed from %v to %v", before, apex.NextProtos)
+	}
 }

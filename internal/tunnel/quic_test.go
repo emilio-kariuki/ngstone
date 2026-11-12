@@ -64,7 +64,7 @@ func newQUICTestListener(t *testing.T, laddr string) (*quic.Listener, int) {
 	}
 	pc, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		t.Skipf("udp listen %s: %v", laddr, err)
+		t.Fatalf("udp listen %s: %v", laddr, err)
 	}
 	tr := &quic.Transport{Conn: pc}
 	ln, err := tr.Listen(&tls.Config{
