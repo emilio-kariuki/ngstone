@@ -1256,8 +1256,13 @@ bidirectional QUIC stream. Every QUIC connection goes through address
 validation (Retry) before the edge spends handshake work on it. The edge
 serves its managed apex certificate, or an ephemeral self-signed certificate
 in insecure mode; a caller-supplied public TLS config is rejected with
-`-quic`. A handshake that gets no answer times out after 5 s, with a
-hint to check that the edge runs with `-quic` and that UDP is reachable.
+`-quic`. A handshake that gets no answer times out after 10 s, with a
+hint to check that the edge runs with `-quic` and that UDP is reachable. When
+UDP is blocked, a literal address fails after 10 s. A name with both an IPv4 and
+an IPv6 address tries IPv4 first and then IPv6, so it can take up to 20 s,
+the agent's whole QUIC dial budget. `ngstone doctor` gives the probe
+`--timeout` (5 s by default) instead, so on a link with a round trip above
+about 2.5 s run it with a longer `--timeout`.
 
 QUIC has no peer-death signal like a TCP reset, so it sends a keep-alive every
 5 s with a 15 s idle timeout: a peer that vanishes without closing (crash,
@@ -1266,9 +1271,13 @@ killed process over TCP (the kernel resets the connection) and up to 45 s for a
 silent TCP path (partition). A graceful shutdown is noticed at once on every
 transport. A QUIC connection that has not authenticated is closed no later
 than 5 s after it was admitted, and holds its unauthenticated slot until it is
-closed. The edge gives the QUIC handshake half of that pre-authentication
-budget (2.5 s) as idle time, so a link with a round trip above about 2.5 s
-cannot connect over QUIC and should use TCP. `--transport quic` is a flag of
+closed. The edge sends a QUIC Retry before it admits a connection, so the
+agent's first handshake reply arrives two round trips after it starts. The
+agent waits up to 10 s for it, and the whole handshake and authentication must
+fit in the 5 s pre-authentication budget after admission. A link with a round
+trip above about 4.5 s cannot connect over QUIC and should use TCP. Agents
+older than this release wait 5 s and are limited to about 2.5 s, so upgrade the
+agents to get the slow-link fix. `--transport quic` is a flag of
 the root form, `auth`, `port`, `tcp`, `tls` and `doctor`; `start` takes the
 transport from the tunnels file, and `share`, `connect` and the operator
 commands do not take it.

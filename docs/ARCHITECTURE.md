@@ -489,7 +489,7 @@ The listener chain is `net.Listener` → PROXY protocol (when enabled) → SNI r
 | **Peak tunnel buffering** | 64 × 1 MiB = **64 MiB** per side | the largest buffer in the system |
 | :4443 concurrent TLS handshakes | 16 | unauthenticated handshake flood |
 | :4443 unauthenticated sessions | 32 | slow-auth session hoarding |
-| QUIC handshake idle (client / edge) / max idle timeout / keep-alive | 5 s / 2.5 s / 15 s / 5 s | stalled handshakes; vanished peers. The edge allows the handshake half the pre-authentication budget of idle time, so a link with a round trip above about 2.5 s cannot connect over QUIC and should use TCP |
+| QUIC handshake idle (client / edge) / max idle timeout / keep-alive | 10 s / 2.5 s / 15 s / 5 s | stalled handshakes; vanished peers. The client wait covers the Retry round trip plus the first handshake flight; a round trip above about 4.5 s cannot connect over QUIC. Agents older than this release wait 5 s and are limited to about 2.5 s. The agent's whole QUIC dial gets 20 s, so with UDP blocked a literal address fails after 10 s and a dual-stack name (IPv4 then IPv6) after up to 20 s |
 | QUIC unauthenticated lifetime from admission | closed no later than one `authDeadline` (5 s) after admission; the slot is held until the connection closes | silent connections hoarding an unauthenticated slot |
 | QUIC connection receive window before auth / after | 64 KiB / up to 1 MiB | unauthenticated memory use |
 

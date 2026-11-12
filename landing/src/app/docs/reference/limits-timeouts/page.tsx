@@ -204,12 +204,22 @@ export default function LimitsTimeoutsPage() {
           later than 5 s after admission and holds its slot until it is
           closed.
         </Property>
-        <Property name="QUIC handshake idle timeout" type="duration" defaultValue="5s">
+        <Property name="QUIC handshake idle timeout" type="duration" defaultValue="10s">
           Applies only with <code>-quic</code>. A QUIC handshake that stalls
-          is dropped. The edge gives the handshake half of the 5 s
-          pre-authentication budget (2.5 s) as idle time, so a link with a
-          round trip above about 2.5 s cannot connect over QUIC and should
-          use TCP.
+          is dropped. The edge sends a QUIC Retry before it admits a
+          connection, so the agent&apos;s first handshake reply arrives two
+          round trips after it starts. The agent waits up to 10 s for it, and
+          the whole handshake and authentication must fit in the 5 s
+          pre-authentication budget after admission. A link with a round trip
+          above about 4.5 s cannot connect over QUIC and should use TCP.
+          Agents older than this release wait 5 s and are limited to about
+          2.5 s.
+        </Property>
+        <Property name="QUIC dial timeout" type="duration" defaultValue="20s">
+          Applies only with <code>-quic</code>. The agent&apos;s whole QUIC
+          dial budget. With UDP blocked, a literal address fails after 10 s. A
+          name with both an IPv4 and an IPv6 address tries IPv4 first and then
+          IPv6, so it fails after up to 20 s.
         </Property>
         <Property name="QUIC max idle timeout" type="duration" defaultValue="15s">
           Applies only with <code>-quic</code>. A peer that vanishes without
