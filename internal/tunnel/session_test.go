@@ -10,7 +10,14 @@ import (
 	"ngstone/internal/proto"
 )
 
+var sessionPairFactory = newPipeSessionPair
+
 func newSessionPair(t *testing.T) (Session, Session) {
+	t.Helper()
+	return sessionPairFactory(t)
+}
+
+func newPipeSessionPair(t *testing.T) (Session, Session) {
 	t.Helper()
 	c1, c2 := net.Pipe()
 
