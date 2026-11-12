@@ -67,6 +67,7 @@ func main() {
 	insecure := flag.Bool("insecure", false, "run with no TLS anywhere and no certificate management (dev/test only)")
 	acmeCA := flag.String("acme-ca", edge.ACMECAStaging, "ACME CA to use: \"staging\" (default) or \"production\"; a config mistake against production can rate-limit the domain for a week")
 	certEmail := flag.String("cert-email", "", "ACME account email (required unless -insecure)")
+	customCerts := flag.String("custom-certs", "", "directory of <name>.crt and <name>.key pairs served for active custom domains; changes need a restart")
 	certStorage := flag.String("cert-storage", edge.DefaultCertStoragePath, "certmagic FileStorage path; must match the systemd StateDirectory (see deploy/)")
 	dnsProvider := flag.String("dns-provider", edge.DefaultDNSProvider, "DNS provider used for the DNS-01 certificate challenges; its credentials are read from the environment. Use -dns-provider help to list providers and their variables")
 	cfAPIToken := flag.String("cf-api-token", "", "Cloudflare API token, for -dns-provider cloudflare (prefer $NGSTONE_CF_API_TOKEN; ps auxww exposes flags but not the environment)")
@@ -124,6 +125,7 @@ func main() {
 		resolvedEdgeID = *edgeID
 	}
 	resolvedAdminMTLSAddr := envOrFlag("NGSTONE_ADMIN_MTLS_ADDR", *adminMTLSAddr)
+	resolvedCustomCerts := envOrFlag("NGSTONE_CUSTOM_CERTS_DIR", *customCerts)
 	resolvedAdminMTLSClientCA := envOrFlag("NGSTONE_ADMIN_MTLS_CLIENT_CA", *adminMTLSClientCA)
 	resolvedPeerAddr := envOrFlag("NGSTONE_PEER_ADDR", *peerAddr)
 	resolvedPeerListen := envOrFlag("NGSTONE_PEER_LISTEN", *peerListen)
@@ -331,6 +333,7 @@ func main() {
 		ACMECA:               *acmeCA,
 		ACMEEmail:            *certEmail,
 		CertStoragePath:      *certStorage,
+		CustomCertDir:        resolvedCustomCerts,
 		DNSProvider:          provider,
 
 		AdminMTLSAddr:         resolvedAdminMTLSAddr,

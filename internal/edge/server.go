@@ -65,6 +65,7 @@ type Config struct {
 	PeerAddr        string
 	PeerListen      string
 	PublicTLSConfig *tls.Config
+	CustomCertDir   string
 
 	TCPPortRange string
 	TCPBindAddr  string
@@ -205,6 +206,18 @@ func New(cfg Config) (*Server, error) {
 	if cfg.PublicTLSConfig != nil && cfg.Insecure {
 		closeOpenedStorage()
 		return nil, errors.New("edge: a public TLS config cannot be combined with insecure mode")
+	}
+	if cfg.CustomCertDir != "" {
+		switch {
+		case cfg.Insecure:
+			closeOpenedStorage()
+			return nil, errors.New("edge: custom certificates cannot be combined with insecure mode")
+		case cfg.PublicTLSConfig != nil:
+			closeOpenedStorage()
+			return nil, errors.New("edge: custom certificates cannot be combined with a public TLS config")
+		case durableStore == nil:
+			return nil, errors.New("edge: custom certificates need durable storage")
+		}
 	}
 	var credentialStore credentialStore
 	if durableStore != nil {
@@ -393,6 +406,15 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		if err := mgr.CheckApexReady(ctx); err != nil {
 			return fmt.Errorf("edge: refusing to start control plane: %w", err)
+		}
+		if s.cfg.CustomCertDir != "" {
+			certs, err := loadCustomCertificates(s.cfg.CustomCertDir, s.customDomainReserved, normalizeHost(s.cfg.Domain), time.Now())
+			if err != nil {
+				return fmt.Errorf("edge: %w", err)
+			}
+			if err := mgr.AddCustomCertificates(ctx, certs); err != nil {
+				return fmt.Errorf("edge: %w", err)
+			}
 		}
 		s.tlsMgr = mgr
 	}
