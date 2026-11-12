@@ -13,6 +13,10 @@ import (
 )
 
 func TestPartitionKillAgentMidRequest(t *testing.T) {
+	partitionKillAgentMidRequest(t, 10*time.Second, false)
+}
+
+func partitionKillAgentMidRequest(t *testing.T, detectBound time.Duration, allowBadGateway bool) {
 	if testing.Short() {
 		t.Skip("skipping partition matrix test in -short mode")
 	}
@@ -64,6 +68,7 @@ func TestPartitionKillAgentMidRequest(t *testing.T) {
 		t.Fatal("client never received response headers for the in-flight request")
 	}
 
+	killedAt := time.Now()
 	if err := agentProc.cmd.Process.Kill(); err != nil {
 		t.Fatalf("kill -9 agent: %v", err)
 	}
@@ -79,7 +84,12 @@ func TestPartitionKillAgentMidRequest(t *testing.T) {
 		t.Fatalf("expected the in-flight request to fail after kill -9, but it completed cleanly: status=%d body=%q", res.status, res.body)
 	}
 
-	waitStatus(t, publicAddr, hostname, "/", http.StatusNotFound, 10*time.Second)
+	if allowBadGateway {
+		waitNotFoundThrough502(t, publicAddr, hostname, "/", detectBound-time.Since(killedAt))
+		t.Logf("agent kill detected %s after the kill", time.Since(killedAt))
+	} else {
+		waitStatus(t, publicAddr, hostname, "/", http.StatusNotFound, detectBound)
+	}
 	t.Log("confirmed: subsequent request got 404, not 502, after agent death")
 
 	startAgent(t, agentBin, controlAddr, token, origin.URL, "app", "")
@@ -228,6 +238,10 @@ func TestPartitionTakeoverVictimEvicted(t *testing.T) {
 }
 
 func TestPartitionEdgeRestart(t *testing.T) {
+	partitionEdgeRestart(t, 30*time.Second)
+}
+
+func partitionEdgeRestart(t *testing.T, rebindBound time.Duration) {
 	if testing.Short() {
 		t.Skip("skipping partition matrix test in -short mode")
 	}
@@ -260,7 +274,7 @@ func TestPartitionEdgeRestart(t *testing.T) {
 
 	startEdge(t, edgeBin, controlAddr, publicAddr, token, domain)
 
-	elapsed := waitBoundWithin(t, publicAddr, hostname, 30*time.Second)
+	elapsed := waitBoundWithin(t, publicAddr, hostname, rebindBound)
 	t.Logf("edge restart recovery took %s", elapsed)
 
 	status, body, err = doGet(publicAddr, hostname, "/")

@@ -420,6 +420,23 @@ func waitStatus(t *testing.T, publicAddr, hostname, path string, want int, max t
 	t.Fatalf("timed out waiting for status %d on %s%s within %s; last status=%d err=%v", want, hostname, path, max, lastStatus, lastErr)
 }
 
+func waitNotFoundThrough502(t *testing.T, publicAddr, hostname, path string, max time.Duration) time.Duration {
+	t.Helper()
+	start := time.Now()
+	var lastStatus int
+	var lastErr error
+	for time.Since(start) < max {
+		status, _, err := doGet(publicAddr, hostname, path)
+		lastStatus, lastErr = status, err
+		if err == nil && status == http.StatusNotFound {
+			return time.Since(start)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for 404 on %s%s within %s; last status=%d err=%v", hostname, path, max, lastStatus, lastErr)
+	return 0
+}
+
 func waitLogContains(t *testing.T, sb *syncBuf, substr string, max time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(max)
