@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -94,6 +95,12 @@ func loadCustomCertificates(dir string, reserved func(string) bool, edgeDomain s
 		pair.Leaf = leaf
 		if len(leaf.DNSNames) == 0 {
 			return nil, fmt.Errorf("custom certificate %s has no DNS names", crtPath)
+		}
+		if len(leaf.IPAddresses) > 0 || len(leaf.EmailAddresses) > 0 || len(leaf.URIs) > 0 {
+			return nil, fmt.Errorf("custom certificate %s must not contain IP address, e-mail or URI names", crtPath)
+		}
+		if cn := leaf.Subject.CommonName; cn != "" && !slices.ContainsFunc(leaf.DNSNames, func(dns string) bool { return strings.EqualFold(cn, dns) }) {
+			return nil, fmt.Errorf("custom certificate %s has a subject common name that is not one of its DNS names", crtPath)
 		}
 		if !now.Before(leaf.NotAfter) {
 			return nil, fmt.Errorf("custom certificate %s expired at %s", crtPath, leaf.NotAfter.UTC().Format(time.RFC3339))

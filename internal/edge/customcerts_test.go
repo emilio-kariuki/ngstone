@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,21 +24,27 @@ import (
 
 const customCertSecretMarker = "SECRETMARKERDONOTLEAK"
 
-func customCertPEM(t *testing.T, names []string, ips []net.IP, notAfter time.Time) (crt, key []byte) {
-	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
+func customCertTemplate(names []string, ips []net.IP, notAfter time.Time) *x509.Certificate {
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(time.Now().UnixNano()),
-		Subject:      pkix.Name{CommonName: "custom"},
 		DNSNames:     names,
 		IPAddresses:  ips,
 		NotBefore:    time.Now().Add(-48 * time.Hour),
 		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	if len(names) > 0 {
+		tmpl.Subject = pkix.Name{CommonName: names[0]}
+	}
+	return tmpl
+}
+
+func signCustomCert(t *testing.T, tmpl *x509.Certificate) (crt, key []byte) {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
 	if err != nil {
@@ -48,6 +55,22 @@ func customCertPEM(t *testing.T, names []string, ips []net.IP, notAfter time.Tim
 		t.Fatalf("marshal key: %v", err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+}
+
+func customCertPEM(t *testing.T, names []string, ips []net.IP, notAfter time.Time) (crt, key []byte) {
+	t.Helper()
+	return signCustomCert(t, customCertTemplate(names, ips, notAfter))
+}
+
+func writeCustomTemplate(t *testing.T, dir, stem string, tmpl *x509.Certificate) {
+	t.Helper()
+	crt, key := signCustomCert(t, tmpl)
+	if err := os.WriteFile(filepath.Join(dir, stem+".crt"), crt, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, stem+".key"), key, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func writeCustomPair(t *testing.T, dir, stem string, names []string, notAfter time.Time) {
@@ -229,6 +252,46 @@ func TestLoadCustomCertificates(t *testing.T) {
 			writeCustomPair(t, dir, "app", []string{"*.com"}, valid)
 			return dir
 		}, wantErr: "overlaps the edge domain"},
+		{name: "common name naming an edge hostname", setup: func(t *testing.T, dir string) string {
+			tmpl := customCertTemplate([]string{"app.example.org"}, nil, valid)
+			tmpl.Subject = pkix.Name{CommonName: "victim.example.com"}
+			writeCustomTemplate(t, dir, "app", tmpl)
+			return dir
+		}, wantErr: "subject common name that is not one of its DNS names"},
+		{name: "common name not among the DNS names", setup: func(t *testing.T, dir string) string {
+			tmpl := customCertTemplate([]string{"app.example.org"}, nil, valid)
+			tmpl.Subject = pkix.Name{CommonName: "victim.example.net"}
+			writeCustomTemplate(t, dir, "app", tmpl)
+			return dir
+		}, wantErr: "subject common name that is not one of its DNS names"},
+		{name: "IP address name", setup: func(t *testing.T, dir string) string {
+			writeCustomTemplate(t, dir, "app", customCertTemplate([]string{"app.example.org"}, []net.IP{net.ParseIP("192.0.2.1")}, valid))
+			return dir
+		}, wantErr: "must not contain IP address, e-mail or URI names"},
+		{name: "e-mail name", setup: func(t *testing.T, dir string) string {
+			tmpl := customCertTemplate([]string{"app.example.org"}, nil, valid)
+			tmpl.EmailAddresses = []string{"ops@example.org"}
+			writeCustomTemplate(t, dir, "app", tmpl)
+			return dir
+		}, wantErr: "must not contain IP address, e-mail or URI names"},
+		{name: "URI name", setup: func(t *testing.T, dir string) string {
+			tmpl := customCertTemplate([]string{"app.example.org"}, nil, valid)
+			tmpl.URIs = []*url.URL{{Scheme: "https", Host: "victim.example.com"}}
+			writeCustomTemplate(t, dir, "app", tmpl)
+			return dir
+		}, wantErr: "must not contain IP address, e-mail or URI names"},
+		{name: "common name equal to a DNS name in another case", setup: func(t *testing.T, dir string) string {
+			tmpl := customCertTemplate([]string{"a.example.org", "b.example.org"}, nil, valid)
+			tmpl.Subject = pkix.Name{CommonName: "B.Example.ORG"}
+			writeCustomTemplate(t, dir, "app", tmpl)
+			return dir
+		}, want: []string{"a.example.org", "b.example.org"}},
+		{name: "empty common name", setup: func(t *testing.T, dir string) string {
+			tmpl := customCertTemplate([]string{"app.example.org"}, nil, valid)
+			tmpl.Subject = pkix.Name{}
+			writeCustomTemplate(t, dir, "app", tmpl)
+			return dir
+		}, want: []string{"app.example.org"}},
 		{name: "expired", setup: func(t *testing.T, dir string) string {
 			writeCustomPair(t, dir, "app", []string{"app.example.org"}, now.Add(-time.Minute))
 			return dir
