@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -406,6 +407,9 @@ func TestDialQUICFirstJoinsEveryError(t *testing.T) {
 	}
 	if !errors.Is(err, second) {
 		t.Fatalf("errors.Is did not match the second attempt's error in %v", err)
+	}
+	if strings.Contains(err.Error(), "\n") {
+		t.Fatalf("joined error spans several lines: %q", err)
 	}
 }
 

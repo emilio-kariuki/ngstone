@@ -206,18 +206,22 @@ func DialQUIC(ctx context.Context, addr string, tlsConf *tls.Config) (net.Conn, 
 }
 
 func dialQUICFirst(ctx context.Context, addrs []string, dial func(context.Context, string) (net.Conn, error)) (net.Conn, error) {
-	var errs []error
+	var failed error
 	for _, addr := range addrs {
 		conn, err := dial(ctx, addr)
 		if err == nil {
 			return conn, nil
 		}
-		errs = append(errs, err)
+		if failed == nil {
+			failed = err
+		} else {
+			failed = fmt.Errorf("%w; %w", failed, err)
+		}
 		if ctx.Err() != nil {
 			break
 		}
 	}
-	return nil, errors.Join(errs...)
+	return nil, failed
 }
 
 func dialQUICAddr(ctx context.Context, addr string, tlsConf *tls.Config) (net.Conn, error) {
