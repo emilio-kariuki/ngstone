@@ -101,7 +101,8 @@ type Server struct {
 	ownsStorage     bool
 	randomName      func() string
 
-	aliases *aliasResolver
+	aliases     *aliasResolver
+	customCerts []customCert
 
 	perIPLimiter *perIPLimiter
 	perIP        *perIPInflight
@@ -330,6 +331,14 @@ func New(cfg Config) (*Server, error) {
 	if durableStore != nil {
 		srv.aliases = newAliasResolver(durableStore, srv.customDomainReserved, srv.leaseTTL)
 	}
+	if cfg.CustomCertDir != "" {
+		srv.customCerts, err = loadCustomCertificates(cfg.CustomCertDir, srv.customDomainReserved, normalizeHost(cfg.Domain), time.Now())
+		if err != nil {
+			alerts.close()
+			closeOpenedStorage()
+			return nil, fmt.Errorf("edge: %w", err)
+		}
+	}
 	if cfg.PeerAddr != "" {
 		srv.peers, err = newPeerForwarder(srv)
 		if err != nil {
@@ -413,12 +422,8 @@ func (s *Server) Run(ctx context.Context) error {
 		if err := mgr.CheckApexReady(ctx); err != nil {
 			return fmt.Errorf("edge: refusing to start control plane: %w", err)
 		}
-		if s.cfg.CustomCertDir != "" {
-			certs, err := loadCustomCertificates(s.cfg.CustomCertDir, s.customDomainReserved, normalizeHost(s.cfg.Domain), time.Now())
-			if err != nil {
-				return fmt.Errorf("edge: %w", err)
-			}
-			if err := mgr.AddCustomCertificates(ctx, certs); err != nil {
+		if len(s.customCerts) > 0 {
+			if err := mgr.AddCustomCertificates(ctx, s.customCerts); err != nil {
 				return fmt.Errorf("edge: %w", err)
 			}
 		}

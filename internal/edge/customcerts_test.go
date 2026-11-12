@@ -375,8 +375,56 @@ func TestNewRejectsCustomCertDirMisconfiguration(t *testing.T) {
 		})
 	}
 
+	writeCustomPair(t, dir, "good", []string{"app.example.org"}, time.Now().Add(24*time.Hour))
 	if _, err := New(Config{Domain: "example.com", Storage: store, CustomCertDir: dir}); err != nil {
 		t.Fatalf("New with a valid custom certificate configuration: %v", err)
+	}
+}
+
+func TestNewValidatesCustomCertificateFiles(t *testing.T) {
+	store, err := storage.Open(storage.Config{DSN: filepath.Join(t.TempDir(), "control.db"), EdgeID: "edge-test"})
+	if err != nil {
+		t.Fatalf("open storage: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	future := time.Now().Add(24 * time.Hour)
+
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+		want  string
+	}{
+		{"empty directory", func(t *testing.T, dir string) {}, "no certificate and key pairs"},
+		{"key readable by others", func(t *testing.T, dir string) {
+			writeCustomPair(t, dir, "app", []string{"app.example.org"}, future)
+			if err := os.Chmod(filepath.Join(dir, "app.key"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, "group or world readable"},
+		{"certificate and key do not match", func(t *testing.T, dir string) {
+			writeCustomPair(t, dir, "app", []string{"app.example.org"}, future)
+			writeCustomPair(t, dir, "other", []string{"other.example.org"}, future)
+			key, err := os.ReadFile(filepath.Join(dir, "other.key"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "app.key"), key, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, "private key does not match public key"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.setup(t, dir)
+			srv, err := New(Config{Domain: "example.com", Storage: store, CustomCertDir: dir})
+			if err == nil {
+				t.Fatalf("New succeeded: %v", srv)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.want)
+			}
+		})
 	}
 }
 
