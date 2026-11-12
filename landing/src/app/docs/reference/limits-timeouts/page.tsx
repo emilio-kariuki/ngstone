@@ -206,10 +206,13 @@ export default function LimitsTimeoutsPage() {
           Applies only with <code>-quic</code>. A QUIC handshake that stalls
           is dropped.
         </Property>
-        <Property name="QUIC max idle timeout" type="duration" defaultValue="60s">
-          Applies only with <code>-quic</code>. QUIC keepalive is off, so a
-          peer killed without a clean close is noticed only when this
-          expires.
+        <Property name="QUIC max idle timeout" type="duration" defaultValue="15s">
+          Applies only with <code>-quic</code>. A peer that vanishes without
+          a clean close is noticed within about this long.
+        </Property>
+        <Property name="QUIC keep-alive" type="duration" defaultValue="5s">
+          Applies only with <code>-quic</code>. Keeps an idle connection open
+          and lets a vanished peer be detected.
         </Property>
       </ParamTable>
     </DocsArticle>

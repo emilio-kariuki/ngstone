@@ -39,9 +39,11 @@ before replacing the installed binary.
 writes `/etc/sysctl.d/99-ngstone-quic.conf` (`net.core.rmem_max` and
 `net.core.wmem_max` of 7500000) so QUIC can use larger UDP socket buffers.
 `--quic off` (the default) removes the `-quic` flag, the UFW rule and that
-file; leaving the option out keeps the current setting. After `kill -9` of one
-side, QUIC detects the dead peer only after its 60 s idle timeout, about 55 to
-60 s, against about 45 s over TCP.
+file; leaving the option out keeps the current setting. QUIC sends a keep-alive
+every 5 s with a 15 s idle timeout, so a peer that vanishes without closing
+(crash, power loss) is detected within about 15 s, compared with immediately
+for a killed process over TCP and up to 45 s for a silent TCP path. A graceful
+shutdown is noticed at once on every transport.
 
 For a disposable VPS, the same installer can be fetched directly after
 reviewing the script:

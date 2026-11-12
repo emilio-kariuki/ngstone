@@ -95,9 +95,11 @@ export default function ReconnectionTakeoverPage() {
         <code>-quic</code> and open <code>4443/udp</code>. The same yamux
         session runs over one bidirectional QUIC stream, every connection is
         address-validated with Retry, and the agent never falls back to
-        another transport. QUIC gives no reset when a peer is killed with{" "}
-        <code>kill -9</code>, so the surviving side notices only when the 60 s
-        idle timeout expires, measured at 55 to 59 s.
+        another transport. QUIC sends a keep-alive every 5 s with a 15 s idle
+        timeout, so a peer that vanishes without closing is detected within
+        about 15 s, compared with immediately for a killed process over TCP
+        and up to 45 s for a silent TCP path. A graceful shutdown is noticed at
+        once on every transport.
       </p>
 
       <Anchor id="reconnect-backoff">Reconnect backoff</Anchor>

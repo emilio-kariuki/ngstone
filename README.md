@@ -1237,10 +1237,11 @@ in insecure mode; a caller-supplied public TLS config is rejected with
 `-quic`. A handshake that gets no answer times out after 5 s, with a
 hint to check that the edge runs with `-quic` and that UDP is reachable.
 
-QUIC has no peer-death signal like a TCP reset: after `kill -9` of one side,
-the other notices only when the connection's 60 s idle timeout expires
-(measured 55 to 59 s), against about 45 s of control pings on TCP. Graceful
-shutdown is unaffected. `--transport quic` is a flag of the root form, `port`,
+QUIC has no peer-death signal like a TCP reset, so it sends a keep-alive every
+5 s with a 15 s idle timeout: a peer that vanishes without closing (crash,
+power loss) is detected within about 15 s, compared with immediately for a
+killed process over TCP and up to 45 s for a silent TCP path. A graceful
+shutdown is noticed at once on every transport. `--transport quic` is a flag of the root form, `port`,
 `tcp`, `tls`, `start` and `doctor`; `share`, `connect` and the operator
 commands do not take it.
 
