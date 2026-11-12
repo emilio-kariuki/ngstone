@@ -282,6 +282,11 @@ func startAgentTCP(t *testing.T, agentBin, controlAddr, token, localTarget strin
 
 func startAgentTCPWithAllowCIDR(t *testing.T, agentBin, controlAddr, token, localTarget string, remotePort int, allowCIDR string) (*managedProc, *syncBuf) {
 	t.Helper()
+	return startAgentTCPWithInstanceID(t, agentBin, controlAddr, token, localTarget, remotePort, allowCIDR, "")
+}
+
+func startAgentTCPWithInstanceID(t *testing.T, agentBin, controlAddr, token, localTarget string, remotePort int, allowCIDR, instanceID string) (*managedProc, *syncBuf) {
+	t.Helper()
 	args := []string{
 		"tcp", localTarget,
 		"-server", controlAddr,
@@ -293,6 +298,9 @@ func startAgentTCPWithAllowCIDR(t *testing.T, agentBin, controlAddr, token, loca
 	}
 	if allowCIDR != "" {
 		args = append(args, "-allow-cidr", allowCIDR)
+	}
+	if instanceID != "" {
+		args = append(args, "-instance-id", instanceID)
 	}
 	cmd := quicAgent(exec.Command(agentBin, args...))
 	sb := &syncBuf{}

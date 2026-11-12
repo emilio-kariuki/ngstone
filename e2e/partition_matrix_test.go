@@ -3,9 +3,11 @@ package e2e
 import (
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -142,6 +144,50 @@ func TestPartitionInstantTakeoverPastHalfOpenPeer(t *testing.T) {
 	if err != nil || status != http.StatusOK || body != "ok\n" {
 		t.Fatalf("agent B should be serving after instant takeover: status=%d body=%q err=%v", status, body, err)
 	}
+
+	agentA.cmd.Process.Signal(syscall.SIGCONT)
+}
+
+func TestPartitionInstantTCPTakeoverPastHalfOpenPeer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping partition matrix test in -short mode")
+	}
+
+	edgeBin, agentBin := buildBinaries(t)
+	echoAddr := startTCPEcho(t)
+
+	token := "tok-instant-tcp-takeover"
+	domain := "tcptakeover.example.com"
+	controlAddr := freeAddr(t)
+	publicAddr := freeAddr(t)
+	tcpLo, tcpHi := freeTCPRange(t, 30)
+	const instanceID = "fixed-instance-tcp-half-open"
+
+	startEdgeTCP(t, edgeBin, controlAddr, publicAddr, token, domain, tcpLo, tcpHi)
+
+	agentA, sbA := startAgentTCPWithInstanceID(t, agentBin, controlAddr, token, echoAddr, 0, "", instanceID)
+	port := waitTCPAssignedPort(t, sbA, 15*time.Second)
+	waitForPort(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	echoRoundTrip(t, dialTunnel(t, port), "before-takeover\n")
+
+	if err := agentA.cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatalf("SIGSTOP agent A: %v", err)
+	}
+	t.Cleanup(func() {
+		agentA.cmd.Process.Signal(syscall.SIGCONT)
+	})
+
+	_, sbB := startAgentTCPWithInstanceID(t, agentBin, controlAddr, token, echoAddr, port, "", instanceID)
+
+	const bound = 10 * time.Second
+	start := time.Now()
+	got := waitTCPAssignedPort(t, sbB, bound)
+	t.Logf("instant tcp takeover past half-open peer: rebind took %s (asserted bound was %s)", time.Since(start), bound)
+	if got != port {
+		t.Fatalf("agent B advertised tcp port %d, want the port agent A held (%d)", got, port)
+	}
+
+	echoRoundTrip(t, dialTunnel(t, port), "after-takeover\n")
 
 	agentA.cmd.Process.Signal(syscall.SIGCONT)
 }
