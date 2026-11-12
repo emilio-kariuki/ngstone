@@ -567,9 +567,25 @@ Limits:
 - No ownership verification. Activation is the trust decision.
 - Certificates are per edge and are loaded at start-up; replacing one needs a
   restart of that edge.
-- An expired or unreadable certificate stops the edge from starting.
+- An expired, unreadable or mismatched certificate stops the edge from
+  starting, before certificate management begins.
 - Tunnels that require visitor sign-in answer 403 on custom domains.
-- Activation reaches other edges within 5 seconds, disabling within 30.
+- Activation, disabling and deletion take effect at once on the edge that
+  handled the admin call and reach other edges within one poll interval
+  (about 5 seconds). During that window a stale edge can forward a connection
+  that the owning edge then refuses; the visitor sees a closed connection.
+- An edge that cannot read the database keeps routing the domains it already
+  knows until that list is older than the lease TTL, then stops routing them.
+- At most 10,000 active custom domains are routed.
+- Any operator can register a name, with or without a tunnel, and leave it
+  `pending`. The real owner then gets a conflict until an administrator
+  deletes that row.
+- An active custom domain for an HTTP tunnel with no certificate in the
+  `-custom-certs` directory fails the TLS handshake; there is no default
+  certificate.
+- A certificate's common name must be empty or equal to one of its DNS names,
+  and it must not carry IP, e-mail or URI names. OCSP stapling is not done
+  for these certificates.
 - Internationalised names must be registered in `xn--` form.
 - Raw TCP tunnels are not addressed by name.
 - No `Strict-Transport-Security` header is set.
