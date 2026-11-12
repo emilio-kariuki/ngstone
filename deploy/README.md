@@ -574,12 +574,18 @@ Limits:
   starting, before certificate management begins.
 - Tunnels that require visitor sign-in answer 403 on custom domains.
 - Activation, disabling and deletion take effect at once on the edge that
-  handled the admin call and reach other edges within one poll interval
+  handled the admin call if that edge can read the database, otherwise at its
+  next poll, and reach other edges within one poll interval
   (about 5 seconds). During that window a stale edge can forward a connection
   that the owning edge then refuses; the visitor sees a closed connection.
 - An edge that cannot read the database keeps routing the domains it already
   knows until that list is older than the lease TTL, then stops routing them.
-- At most 10,000 active custom domains are routed.
+- At most 10,000 active custom domains are routed, the earliest activated
+  first. Beyond that the most recently activated domains are not routed;
+  activation still returns `active`. The edge logs a warning ("active custom
+  domains exceed the routing cap") and `ngstoned_custom_domains_active` stays
+  at 10000, so an edge that reports 10000 with more active rows in the
+  database is over the cap.
 - Any operator can register a name, with or without a tunnel, and leave it
   `pending`. The real owner then gets a conflict until an administrator
   deletes that row.

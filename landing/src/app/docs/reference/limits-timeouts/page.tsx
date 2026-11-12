@@ -200,11 +200,16 @@ export default function LimitsTimeoutsPage() {
         </Property>
         <Property name=":4443 unauthenticated sessions" type="int" defaultValue="32">
           Guards against slow-auth session hoarding. QUIC connections share
-          both caps with TCP.
+          both caps with TCP. An unauthenticated QUIC connection is closed no
+          later than 5 s after admission and holds its slot until it is
+          closed.
         </Property>
         <Property name="QUIC handshake idle timeout" type="duration" defaultValue="5s">
           Applies only with <code>-quic</code>. A QUIC handshake that stalls
-          is dropped.
+          is dropped. The edge gives the handshake half of the 5 s
+          pre-authentication budget (2.5 s) as idle time, so a link with a
+          round trip above about 2.5 s cannot connect over QUIC and should
+          use TCP.
         </Property>
         <Property name="QUIC max idle timeout" type="duration" defaultValue="15s">
           Applies only with <code>-quic</code>. A peer that vanishes without

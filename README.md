@@ -628,12 +628,18 @@ Limits:
 - A tunnel that requires visitor sign-in (`--oidc`) answers 403 on its custom
   domain.
 - Activation, disabling and deletion take effect at once on the edge that
-  handled the admin call and reach other edges within one poll interval
+  handled the admin call if that edge can read the database, otherwise at its
+  next poll, and reach other edges within one poll interval
   (about 5 seconds). During that window a stale edge can forward a connection
   that the owning edge then refuses; the visitor sees a closed connection.
 - An edge that cannot read the database keeps routing the domains it already
   knows until that list is older than the lease TTL, then stops routing them.
-- At most 10,000 active custom domains are routed.
+- At most 10,000 active custom domains are routed, the earliest activated
+  first. Beyond that the most recently activated domains are not routed;
+  activation still returns `active`. The edge logs a warning ("active custom
+  domains exceed the routing cap") and `ngstoned_custom_domains_active` stays
+  at 10000, so an edge that reports 10000 with more active rows in the
+  database is over the cap.
 - Any operator can register a name, with or without a tunnel, and leave it
   `pending`. The real owner then gets a conflict until an administrator
   deletes that row.
@@ -1258,10 +1264,14 @@ QUIC has no peer-death signal like a TCP reset, so it sends a keep-alive every
 power loss) is detected within about 20 s, compared with immediately for a
 killed process over TCP (the kernel resets the connection) and up to 45 s for a
 silent TCP path (partition). A graceful shutdown is noticed at once on every
-transport. A QUIC connection that has not authenticated within 5 s of being
-admitted is closed, the same bound as TCP. `--transport quic` is a flag of the
-root form, `auth`, `port`, `tcp`, `tls`, `start` and `doctor`; `share`,
-`connect` and the operator commands do not take it.
+transport. A QUIC connection that has not authenticated is closed no later
+than 5 s after it was admitted, and holds its unauthenticated slot until it is
+closed. The edge gives the QUIC handshake half of that pre-authentication
+budget (2.5 s) as idle time, so a link with a round trip above about 2.5 s
+cannot connect over QUIC and should use TCP. `--transport quic` is a flag of
+the root form, `auth`, `port`, `tcp`, `tls` and `doctor`; `start` takes the
+transport from the tunnels file, and `share`, `connect` and the operator
+commands do not take it.
 
 Reconnects use decorrelated exponential jitter from 500 ms to a 30 s cap.
 The edge and agent exchange control pings, skip connectors that have exceeded
