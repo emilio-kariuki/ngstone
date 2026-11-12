@@ -757,3 +757,39 @@ func TestQUICSlowHandshakeWithinBudgetAuthenticates(t *testing.T) {
 		t.Fatalf("auth over a 2.8 s round trip: %q, %v", typ, err)
 	}
 }
+
+func TestQUICStuckHandshakeFreedByAdmissionDeadline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("takes a few seconds")
+	}
+	shortenAuthDeadline(t, 2*time.Second)
+	s, controlAddr, _ := startQUICEdgeForTest(t, LimitsConfig{})
+	relay := startUDPRelay(t, controlAddr, 20*time.Millisecond, 1)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	go func() {
+		if nc, err := tunnel.DialQUIC(ctx, relay, quicTestClientTLS()); err == nil {
+			nc.Close()
+		}
+	}()
+	waitStart := time.Now()
+	for len(s.unauthSem.slots) != 1 {
+		if time.Since(waitStart) > 2*time.Second {
+			t.Fatal("the stuck handshake was never admitted")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	admitted := time.Now()
+	time.Sleep(time.Second)
+	if len(s.unauthSem.slots) != 1 || len(s.handshakeSem.slots) != 1 {
+		t.Fatalf("slots released %v after admission, before the admission deadline %v", time.Since(admitted), authDeadline)
+	}
+	limit := admitted.Add(authDeadline + 300*time.Millisecond)
+	for !(len(s.unauthSem.slots) == 0 && len(s.handshakeSem.slots) == 0) {
+		if time.Now().After(limit) {
+			t.Fatalf("stuck handshake still held slots %v after admission, want release within %v", time.Since(admitted), authDeadline+300*time.Millisecond)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+}
