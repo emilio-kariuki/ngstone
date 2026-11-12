@@ -9,7 +9,6 @@ Type=simple
 # -dns-provider NAME and put its variables in the env file
 # (ngstoned -dns-provider help lists them). For raw TCP tunnels add
 # -tcp-ports MIN-MAX and open that range in the firewall.
-# For agents on --transport quic add -quic and open 4443/udp.
 ExecStart=/usr/local/bin/ngstoned \
     -domain example.com \
     -cert-email ${NGSTONE_CERT_EMAIL} \

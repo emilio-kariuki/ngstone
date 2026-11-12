@@ -114,8 +114,8 @@ if [[ "$found" -eq 0 ]]; then
   exit 0
 fi
 
-# Read the TCP tunnel range and the QUIC setting before the unit is removed,
-# so their firewall rules can be removed too.
+# Read the TCP tunnel range before the unit is removed, so its firewall rule
+# can be removed too.
 TCP_PORTS=""
 QUIC=0
 if [[ -f "$SERVICE_PATH" ]]; then
