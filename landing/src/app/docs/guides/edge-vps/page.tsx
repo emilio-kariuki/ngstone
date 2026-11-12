@@ -113,8 +113,9 @@ $ sudo ./deploy/install-edge.sh \\
           <code>--transport quic</code>. Opens <code>4443/udp</code> in UFW
           and writes <code>/etc/sysctl.d/99-ngstone-quic.conf</code> with
           larger UDP socket buffers (<code>net.core.rmem_max</code> and{" "}
-          <code>net.core.wmem_max</code> of <code>7500000</code>). A rerun
-          keeps the current value; <code>off</code> removes the flag, the
+          <code>net.core.wmem_max</code> of <code>7500000</code>). A limit
+          that is already higher is never lowered, and a rerun keeps the
+          current value; <code>off</code> removes the flag, the
           rule and the file.
         </Property>
         <Property name="--from-source" type="bool">

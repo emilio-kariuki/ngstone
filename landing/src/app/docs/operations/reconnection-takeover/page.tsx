@@ -94,11 +94,13 @@ export default function ReconnectionTakeoverPage() {
         <code>--transport quic</code> is opt-in: start the edge with{" "}
         <code>-quic</code> and open <code>4443/udp</code>. The same yamux
         session runs over one bidirectional QUIC stream, every connection is
-        address-validated with Retry, and the agent never falls back to
-        another transport. QUIC sends a keep-alive every 5 s with a 15 s idle
+        address-validated (Retry, and NEW_TOKEN tokens also validate the
+        address), closed if unauthenticated 5 s after admission as on TCP, and
+        the agent never falls back to another transport. QUIC sends a keep-alive every 5 s with a 15 s idle
         timeout, so a peer that vanishes without closing is detected within
-        about 15 s, compared with immediately for a killed process over TCP
-        and up to 45 s for a silent TCP path. A graceful shutdown is noticed at
+        about 20 s, compared with immediately for a killed process over TCP
+        (the kernel resets the connection) and up to 45 s for a silent TCP
+        path (partition). A graceful shutdown is noticed at
         once on every transport.
       </p>
 

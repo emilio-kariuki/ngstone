@@ -37,12 +37,15 @@ before replacing the installed binary.
 `--quic on` runs `ngstoned` with `-quic`, so agents can use
 `--transport quic` over UDP on the control port. It opens `4443/udp` in UFW and
 writes `/etc/sysctl.d/99-ngstone-quic.conf` (`net.core.rmem_max` and
-`net.core.wmem_max` of 7500000) so QUIC can use larger UDP socket buffers.
+`net.core.wmem_max` of 7500000) so QUIC can use larger UDP socket buffers. A
+key whose current value already exceeds 7500000 is left alone, and if both
+already do, no file is written; the installer never lowers a limit.
 `--quic off` (the default) removes the `-quic` flag, the UFW rule and that
 file; leaving the option out keeps the current setting. QUIC sends a keep-alive
 every 5 s with a 15 s idle timeout, so a peer that vanishes without closing
-(crash, power loss) is detected within about 15 s, compared with immediately
-for a killed process over TCP and up to 45 s for a silent TCP path. A graceful
+(crash, power loss) is detected within about 20 s, compared with immediately
+for a killed process over TCP (the kernel resets the connection) and up to 45 s
+for a silent TCP path (partition). A graceful
 shutdown is noticed at once on every transport.
 
 For a disposable VPS, the same installer can be fetched directly after
