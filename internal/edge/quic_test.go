@@ -196,7 +196,16 @@ func dialQUICRaw(t *testing.T, addr string) (*quic.Conn, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	qc, err := quic.DialAddr(ctx, addr, quicTestClientTLS(), &quic.Config{HandshakeIdleTimeout: 5 * time.Second})
+	raddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return nil, err
+	}
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		return nil, err
+	}
+	t.Cleanup(func() { pc.Close() })
+	qc, err := quic.Dial(ctx, pc, raddr, quicTestClientTLS(), &quic.Config{HandshakeIdleTimeout: 5 * time.Second})
 	if err != nil {
 		return nil, err
 	}

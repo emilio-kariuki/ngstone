@@ -88,6 +88,23 @@ func quicTestAddr(port int) string {
 	return net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 }
 
+func quicDialLoopback(t *testing.T, ctx context.Context, port int, tlsConf *tls.Config, early bool) (*quic.Conn, error) {
+	t.Helper()
+	raddr, err := net.ResolveUDPAddr("udp", quicTestAddr(port))
+	if err != nil {
+		return nil, err
+	}
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		return nil, err
+	}
+	t.Cleanup(func() { pc.Close() })
+	if early {
+		return quic.DialEarly(ctx, pc, raddr, tlsConf, quicClientConfig())
+	}
+	return quic.Dial(ctx, pc, raddr, tlsConf, quicClientConfig())
+}
+
 type quicPeers struct {
 	client net.Conn
 	server net.Conn
@@ -476,7 +493,7 @@ func TestQUICNever0RTT(t *testing.T) {
 	tlsConf.ClientSessionCache = tls.NewLRUClientSessionCache(4)
 	for i := 0; i < 2; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		qc, err := quic.DialAddrEarly(ctx, quicTestAddr(port), tlsConf, quicClientConfig())
+		qc, err := quicDialLoopback(t, ctx, port, tlsConf, true)
 		if err != nil {
 			t.Fatalf("dial %d: %v", i, err)
 		}
@@ -664,7 +681,7 @@ func TestAcceptQUICClosesConnWithoutStream(t *testing.T) {
 	ln, port := newQUICTestListener(t, "127.0.0.1:0")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cqc, err := quic.DialAddr(ctx, quicTestAddr(port), quicTestClientTLS(), quicClientConfig())
+	cqc, err := quicDialLoopback(t, ctx, port, quicTestClientTLS(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
