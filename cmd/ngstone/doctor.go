@@ -243,7 +243,12 @@ func checkDoctorEndpoint(opts doctorOptions, server string) doctorCheck {
 	}
 	cancel()
 	if err != nil {
-		return doctorCheck{Status: doctorFail, Name: "control.network", Message: "control plane port is not reachable", Details: map[string]string{"address": server}}
+		check := doctorCheck{Status: doctorFail, Name: "control.network", Message: "control plane port is not reachable", Details: map[string]string{"address": server}}
+		if overQUIC {
+			check.Message += ": " + err.Error()
+			check.Details["error"] = err.Error()
+		}
+		return check
 	}
 	if overQUIC {
 		go conn.Close()

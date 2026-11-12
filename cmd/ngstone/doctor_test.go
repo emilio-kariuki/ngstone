@@ -130,7 +130,11 @@ func TestDoctorEndpointProbesOverQUICWhenTransportIsQUIC(t *testing.T) {
 	}
 
 	opts.DialQUIC = func(context.Context, agent.Config) (net.Conn, error) { return nil, errors.New("no udp answer") }
-	if check := checkDoctorEndpoint(opts, "edge.example.com:4443"); check.Status != doctorFail || check.Name != "control.network" {
+	check = checkDoctorEndpoint(opts, "edge.example.com:4443")
+	if check.Status != doctorFail || check.Name != "control.network" {
 		t.Fatalf("failed QUIC probe check = %+v", check)
+	}
+	if check.Details["error"] != "no udp answer" || !strings.Contains(check.Message, "no udp answer") {
+		t.Fatalf("failed QUIC probe hides the dial error: %+v", check)
 	}
 }
