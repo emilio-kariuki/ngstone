@@ -38,8 +38,12 @@ before replacing the installed binary.
 `--transport quic` over UDP on the control port. It opens `4443/udp` in UFW and
 writes `/etc/sysctl.d/99-ngstone-quic.conf` (`net.core.rmem_max` and
 `net.core.wmem_max` of 7500000) so QUIC can use larger UDP socket buffers. A
-key whose current value already exceeds 7500000 is left alone, and if both
-already do, no file is written; the installer never lowers a limit.
+key whose live value already exceeds 7500000 gets no entry, so on a host where
+the installer has not written its file and both keys exceed 7500000, no file is
+written. Once the file exists, a rerun keeps its keys at 7500000. The installer
+never lowers a live value, but the file sorts last in `sysctl.d`, so at boot it
+overrides an earlier drop-in for the same key; to keep a larger persistent
+value, edit or remove that key in this file.
 `--quic off` (the default) removes the `-quic` flag, the UFW rule and that
 file; leaving the option out keeps the current setting. QUIC sends a keep-alive
 every 5 s with a 15 s idle timeout, so a peer that vanishes without closing

@@ -113,10 +113,15 @@ $ sudo ./deploy/install-edge.sh \\
           <code>--transport quic</code>. Opens <code>4443/udp</code> in UFW
           and writes <code>/etc/sysctl.d/99-ngstone-quic.conf</code> with
           larger UDP socket buffers (<code>net.core.rmem_max</code> and{" "}
-          <code>net.core.wmem_max</code> of <code>7500000</code>). A limit
-          that is already higher is never lowered, and a rerun keeps the
-          current value; <code>off</code> removes the flag, the
-          rule and the file.
+          <code>net.core.wmem_max</code> of <code>7500000</code>). A key whose
+          live value already exceeds that gets no entry, and no file is
+          written if the installer has not written one before and both
+          exceed it. Once the file exists, a rerun keeps its keys at{" "}
+          <code>7500000</code>. The installer never lowers a live value, but
+          the file sorts last in <code>sysctl.d</code> and so overrides an
+          earlier drop-in for the same key at boot; edit or remove its key
+          to keep a larger persistent value. <code>off</code> removes the
+          flag, the rule and the file.
         </Property>
         <Property name="--from-source" type="bool">
           Build <code>ngstoned</code> from the checkout with Go instead of
