@@ -618,7 +618,19 @@ configure_quic_buffers() {
     rm -f -- "$SYSCTL_PATH"
     return
   fi
-  printf 'net.core.rmem_max=7500000\nnet.core.wmem_max=7500000\n' > "$SYSCTL_PATH"
+  local key current entries=""
+  for key in net.core.rmem_max net.core.wmem_max; do
+    current="$(sysctl -n "$key" 2>/dev/null || true)"
+    if [[ ! "$current" =~ ^[0-9]+$ ]] || (( current <= 7500000 )); then
+      entries+="${key}=7500000"$'\n'
+    fi
+  done
+  if [[ -z "$entries" ]]; then
+    rm -f -- "$SYSCTL_PATH"
+    info "host UDP socket buffer limits already exceed what QUIC needs; leaving them unchanged"
+    return
+  fi
+  printf '%s' "$entries" > "$SYSCTL_PATH"
   chmod 644 "$SYSCTL_PATH"
   if sysctl -q -p "$SYSCTL_PATH" >/dev/null; then
     info "raised UDP socket buffer limits for QUIC (${SYSCTL_PATH})"
