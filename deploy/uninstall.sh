@@ -8,6 +8,7 @@ BINARY_PATH=/usr/local/bin/ngstoned
 AGENT_BINARY_PATH=/usr/local/bin/ngstone
 ENV_DIR=/etc/ngstoned
 ENV_PATH=/etc/ngstoned/env
+SYSCTL_PATH=/etc/sysctl.d/99-ngstone-quic.conf
 STATE_PRIVATE=/var/lib/private/ngstoned
 STATE_PUBLIC=/var/lib/ngstoned
 SCOPED_CREDENTIALS_PATH=
@@ -36,7 +37,7 @@ Usage: uninstall.sh [options]
 Options:
   -y, --yes                   skip the confirmation prompt
   --remove-state              delete the persisted certificate and ACME state
-  --remove-firewall-rules     remove matching UFW allow rules for 80/tcp, 443/tcp, 4443/tcp and any TCP tunnel range
+  --remove-firewall-rules     remove matching UFW allow rules for 80/tcp, 443/tcp, 4443/tcp, 4443/udp and any TCP tunnel range
   -h, --help                  show this help
 
 The default removes the ngstoned systemd unit, binary, and root-only secrets.
@@ -98,7 +99,7 @@ if [[ -f "$ENV_PATH" ]]; then
 fi
 
 found=0
-for target in "$SERVICE_PATH" "$BINARY_PATH" "$AGENT_BINARY_PATH" "$ENV_PATH" "$STATE_PRIVATE" "$STATE_PUBLIC"; do
+for target in "$SERVICE_PATH" "$BINARY_PATH" "$AGENT_BINARY_PATH" "$ENV_PATH" "$STATE_PRIVATE" "$STATE_PUBLIC" "$SYSCTL_PATH"; do
   if [[ -e "$target" || -L "$target" ]]; then
     found=1
     break
@@ -113,20 +114,30 @@ if [[ "$found" -eq 0 ]]; then
   exit 0
 fi
 
-# Read the TCP tunnel range before the unit is removed, so its firewall rule
-# can be removed too.
+# Read the TCP tunnel range and the QUIC setting before the unit is removed,
+# so their firewall rules can be removed too.
 TCP_PORTS=""
+QUIC=0
 if [[ -f "$SERVICE_PATH" ]]; then
   TCP_PORTS="$(awk '$1 == "-tcp-ports" { print $2; exit }' "$SERVICE_PATH")"
+  if awk '$1 == "-quic" { found = 1 } END { exit !found }' "$SERVICE_PATH"; then
+    QUIC=1
+  fi
 fi
 [[ "$TCP_PORTS" =~ ^[0-9]+-[0-9]+$ ]] || TCP_PORTS=""
 FIREWALL_PORTS="80/tcp, 443/tcp, and 4443/tcp${TCP_PORTS:+, plus the ${TCP_PORTS} TCP tunnel range}"
+if [[ "$QUIC" -eq 1 ]]; then
+  FIREWALL_PORTS="${FIREWALL_PORTS}, plus 4443/udp for QUIC"
+fi
 
 printf 'This removes:\n'
 printf '  - the %s systemd unit and its enablement\n' "$SERVICE_NAME"
 printf '  - %s\n' "$BINARY_PATH"
 printf '  - %s\n' "$AGENT_BINARY_PATH"
 printf '  - %s, including the DNS provider credentials and auth-token hash\n' "$ENV_PATH"
+if [[ -f "$SYSCTL_PATH" ]]; then
+  printf '  - %s (the UDP buffer limits it set stay in effect until the next reboot)\n' "$SYSCTL_PATH"
+fi
 if [[ -n "$SCOPED_CREDENTIALS_PATH" ]]; then
   printf '  - scoped credential file %s\n' "$SCOPED_CREDENTIALS_PATH"
 fi
@@ -173,6 +184,7 @@ info "removing the edge binary and secrets"
 rm -f -- "$BINARY_PATH"
 rm -f -- "$AGENT_BINARY_PATH"
 rm -f -- "$ENV_PATH"
+rm -f -- "$SYSCTL_PATH"
 if [[ -n "$SCOPED_CREDENTIALS_PATH" ]]; then
   rm -f -- "$SCOPED_CREDENTIALS_PATH" "$SCOPED_CREDENTIALS_PATH.lock"
 fi
@@ -211,6 +223,9 @@ if [[ "$REMOVE_FIREWALL" -eq 1 ]]; then
     ufw delete allow 80/tcp >/dev/null || true
     ufw delete allow 443/tcp >/dev/null || true
     ufw delete allow 4443/tcp >/dev/null || true
+    if [[ "$QUIC" -eq 1 ]]; then
+      ufw delete allow 4443/udp >/dev/null || true
+    fi
     if [[ -n "$TCP_PORTS" ]]; then
       ufw delete allow "${TCP_PORTS/-/:}/tcp" >/dev/null || true
     fi

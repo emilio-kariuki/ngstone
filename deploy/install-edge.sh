@@ -8,6 +8,7 @@ AGENT_INSTALL_PATH="/usr/local/bin/ngstone"
 SERVICE_PATH="/etc/systemd/system/ngstoned.service"
 ENV_DIR="/etc/ngstoned"
 ENV_PATH="${ENV_DIR}/env"
+SYSCTL_PATH="/etc/sysctl.d/99-ngstone-quic.conf"
 VERSION="${NGSTONE_VERSION:-}"
 DOMAIN="${NGSTONE_DOMAIN:-}"
 EMAIL="${NGSTONE_CERT_EMAIL:-}"
@@ -17,6 +18,7 @@ ALERT_WEBHOOK_URL="${NGSTONE_ALERT_WEBHOOK_URL:-}"
 ALERT_WEBHOOK_TOKEN="${NGSTONE_ALERT_WEBHOOK_TOKEN:-}"
 DNS_PROVIDER="${NGSTONE_DNS_PROVIDER:-}"
 TCP_PORTS="${NGSTONE_TCP_PORTS:-}"
+QUIC=""
 AUTH_TOKEN="${NGSTONE_AUTH_TOKEN:-}"
 ACME_CA="${NGSTONE_ACME_CA:-}"
 BINARY_PATH="${NGSTONE_EDGE_BINARY:-}"
@@ -107,6 +109,7 @@ Options:
   --email ADDRESS           Let's Encrypt account email
   --dns-provider NAME       DNS host for certificate challenges (default: cloudflare)
   --tcp-ports MIN-MAX       enable raw TCP tunnels on this port range; "off" disables
+  --quic on|off             accept agents over QUIC on UDP 4443 (default: off)
   --version VERSION         release version, for example v0.3.2
   --from-source             build ngstoned from this checkout (needs Go) instead of downloading
   --acme-ca staging|production
@@ -157,6 +160,11 @@ while [[ $# -gt 0 ]]; do
   --tcp-ports)
     [[ $# -ge 2 ]] || fail "--tcp-ports requires MIN-MAX or off"
     TCP_PORTS="$2"
+    shift 2
+    ;;
+  --quic)
+    [[ $# -ge 2 ]] || fail "--quic requires on or off"
+    QUIC="$2"
     shift 2
     ;;
   --from-source)
@@ -277,6 +285,11 @@ get_env_value() {
   fi
 }
 
+service_has_flag() {
+  local key="$1"
+  [[ -f "$SERVICE_PATH" ]] && awk -v key="$key" '$1 == key { found = 1 } END { exit !found }' "$SERVICE_PATH"
+}
+
 get_service_value() {
   local key="$1"
   if [[ -f "$SERVICE_PATH" ]]; then
@@ -378,6 +391,21 @@ if [[ -n "$TCP_PORTS" ]]; then
     fail "--tcp-ports must not include the control port 4443"
   fi
 fi
+if [[ -z "$QUIC" ]]; then
+  if service_has_flag -quic; then
+    QUIC=on
+  else
+    QUIC=off
+  fi
+fi
+QUIC="${QUIC,,}"
+case "$QUIC" in
+on|off)
+  ;;
+*)
+  fail "--quic must be on or off"
+  ;;
+esac
 if [[ -z "$ALERT_WEBHOOK_URL" ]]; then
   ALERT_WEBHOOK_URL="$EXISTING_ALERT_WEBHOOK_URL"
 fi
@@ -559,8 +587,12 @@ check_dns() {
 }
 
 configure_firewall() {
+  local quic_note=""
+  if [[ "$QUIC" == on ]]; then
+    quic_note="; plus 4443/udp for QUIC"
+  fi
   if [[ "$SKIP_FIREWALL" -eq 1 ]]; then
-    warn "skipping UFW configuration; open SSH, 80/tcp, 443/tcp, and 4443/tcp${TCP_PORTS:+, and ${TCP_PORTS}/tcp} manually"
+    warn "skipping UFW configuration; open SSH, 80/tcp, 443/tcp, and 4443/tcp${TCP_PORTS:+, and ${TCP_PORTS}/tcp}${quic_note} manually"
     return
   fi
   ufw default deny incoming
@@ -572,8 +604,27 @@ configure_firewall() {
   if [[ -n "$TCP_PORTS" ]]; then
     ufw allow "${TCP_LO}:${TCP_HI}/tcp"
   fi
+  if [[ "$QUIC" == on ]]; then
+    ufw allow 4443/udp
+  else
+    ufw delete allow 4443/udp >/dev/null 2>&1 || true
+  fi
   ufw --force enable
-  info "UFW allows SSH port ${SSH_PORT}, 80/tcp, 443/tcp, and 4443/tcp${TCP_PORTS:+, and ${TCP_LO}-${TCP_HI}/tcp for TCP tunnels}"
+  info "UFW allows SSH port ${SSH_PORT}, 80/tcp, 443/tcp, and 4443/tcp${TCP_PORTS:+, and ${TCP_LO}-${TCP_HI}/tcp for TCP tunnels}${quic_note}"
+}
+
+configure_quic_buffers() {
+  if [[ "$QUIC" != on ]]; then
+    rm -f -- "$SYSCTL_PATH"
+    return
+  fi
+  printf 'net.core.rmem_max=7500000\nnet.core.wmem_max=7500000\n' > "$SYSCTL_PATH"
+  chmod 644 "$SYSCTL_PATH"
+  if sysctl -q -p "$SYSCTL_PATH" >/dev/null; then
+    info "raised UDP socket buffer limits for QUIC (${SYSCTL_PATH})"
+  else
+    warn "could not apply ${SYSCTL_PATH}; QUIC works with smaller UDP buffers, so raise net.core.rmem_max and net.core.wmem_max to 7500000 on the host"
+  fi
 }
 
 write_env() {
@@ -621,6 +672,7 @@ ExecStart=/usr/local/bin/ngstoned \
     -domain __NGSTONE_DOMAIN__ \
     __NGSTONE_DNS_PROVIDER_LINE__ \
     __NGSTONE_TCP_PORTS_LINE__ \
+    __NGSTONE_QUIC_LINE__ \
     -cert-email ${NGSTONE_CERT_EMAIL} \
     -acme-ca __NGSTONE_ACME_CA__ \
     -cert-storage ${STATE_DIRECTORY}/certs
@@ -662,6 +714,11 @@ EOF
     sed -i "s/__NGSTONE_TCP_PORTS_LINE__/-tcp-ports ${TCP_PORTS}/" "$temporary"
   else
     sed -i '/__NGSTONE_TCP_PORTS_LINE__/d' "$temporary"
+  fi
+  if [[ "$QUIC" == on ]]; then
+    sed -i "s/__NGSTONE_QUIC_LINE__/-quic/" "$temporary"
+  else
+    sed -i '/__NGSTONE_QUIC_LINE__/d' "$temporary"
   fi
   chown root:root "$temporary"
   chmod 644 "$temporary"
@@ -723,6 +780,7 @@ info "installing hardened systemd unit"
 write_service
 info "configuring firewall"
 configure_firewall
+configure_quic_buffers
 info "starting ngstoned"
 start_service
 wait_for_health
