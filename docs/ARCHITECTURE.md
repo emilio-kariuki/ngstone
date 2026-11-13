@@ -440,7 +440,7 @@ Raw TCP tunnels: each edge with forwarding and `-tcp-ports` enabled polls
 storage every two seconds for live TCP leases held by other edges whose port
 falls in its own range, and opens a proxy listener on `-tcp-bind` for each
 (at most 1024, retrying a failed bind after 30 seconds). A connection to a
-proxy listener is forwarded as a peer-2 TCP frame carrying the port and the real
+proxy listener is forwarded as a peer-2/peer-3 TCP frame carrying the port and the real
 client address; the owner looks the port up locally and never forwards it
 again, and applies allow-CIDR, rate limits and in-flight limits to that client
 address. A requested bind for the same port on the owner closes its proxy
