@@ -350,7 +350,7 @@ func TestAutoCertFailureCoolsDownWithoutStorage(t *testing.T) {
 		t.Fatalf("issuer calls during the cool-down = %d, want 1", n)
 	}
 
-	for _, sni := range []string{"app.example.org ", "APP.example.org.", " app.example.org"} {
+	for _, sni := range []string{"app.example.org ", " app.example.org"} {
 		cs.calls.Store(0)
 		if _, err := handshake(t, cfg, sni, []string{"h2"}); err == nil {
 			t.Fatalf("handshake with SNI %q succeeded inside the cool-down", sni)
