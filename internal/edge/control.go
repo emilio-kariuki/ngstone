@@ -55,6 +55,7 @@ type AgentSession struct {
 	leaseMu             sync.Mutex
 	durableLeases       map[string]string
 	durableLeaseNum     atomic.Int64
+	evicting            atomic.Bool
 	lastHeartbeat       atomic.Int64
 	observabilityMu     sync.Mutex
 	observabilityEvents map[string]struct{}

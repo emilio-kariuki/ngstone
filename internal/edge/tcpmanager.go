@@ -522,6 +522,9 @@ func (tm *tcpManager) lostToPeers(remote map[int]struct{}, since time.Time) map[
 		if id, _ := tt.durableID.Load().(string); id == "" {
 			continue
 		}
+		if tt.session.evicting.Load() {
+			continue
+		}
 		if cur, ok := lost[tt.session]; !ok || port < cur {
 			lost[tt.session] = port
 		}

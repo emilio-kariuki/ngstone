@@ -661,3 +661,35 @@ func TestPollTCPKeepsTunnelWithoutLeaseOrBoundAfterPoll(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 	}
 }
+
+func TestPollTCPEvictsAHalfOpenSessionOnce(t *testing.T) {
+	pc := newPeerCluster(t)
+	a, recA := pc.tcpEdge(t, "edge-a", "127.0.0.1")
+	b, _ := pc.tcpEdge(t, "edge-b", "127.0.0.1")
+	registerPeers(t, a, b)
+	mgr := a.srv.tcpMgr
+	port, _, err := mgr.bind(recA.fx.as, 0, "example.com", nil, false)
+	if err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	mgr.setTunnelID(recA.fx.as, port, "tunnel-a")
+	t.Cleanup(func() { mgr.reconcileRemote(nil, a.srv.peers.forwardTCP) })
+	b.leaseTCP(t, port)
+
+	a.srv.peers.pollTCP(context.Background(), time.Now())
+	a.srv.peers.pollTCP(context.Background(), time.Now())
+
+	if lost := mgr.lostToPeers(map[int]struct{}{port: {}}, time.Now()); len(lost) != 0 {
+		t.Fatalf("an evicted session is still reported lost: %v", lost)
+	}
+	recA.fx.agent.Control().SetReadDeadline(time.Now().Add(3 * time.Second))
+	msg, err := recA.fx.agent.Control().Read()
+	if err != nil || msg.Type != proto.TypeEvicted {
+		t.Fatalf("agent read = %+v, %v, want evicted", msg, err)
+	}
+	waitDead(t, recA.fx.as)
+	recA.fx.agent.Control().SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if msg, err := recA.fx.agent.Control().Read(); err == nil {
+		t.Fatalf("agent got a second frame %q, want a single evicted", msg.Type)
+	}
+}
