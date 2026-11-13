@@ -573,3 +573,24 @@ func TestGroupListReportsTruncationPastEdgeLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestUnshareDropsCachedGroupListing(t *testing.T) {
+	cl := newShareCluster(t)
+	useShareCredentials(cl)
+	token := issueShareToken(t, cl.a, "owner-o")
+	_, m := credentialShare(t, cl.b, token, "sharer", "link-secret")
+	shareID := shareIDOf(t, m)
+	op := startRemoteOperator(t, cl.a, token, "operator")
+	accepted := metricDelta(metricPeerAcceptedConns)
+
+	if ok := listFrom(t, op, 121); accepted() != 1 || len(ok.Shares) != 1 {
+		t.Fatalf("first list accepted=%d shares=%d, want 1 and 1", accepted(), len(ok.Shares))
+	}
+	op.Control().Write(proto.TypeUnshare, 122, proto.Unshare{ShareID: shareID})
+	if m := readSession(t, op); m.Type != proto.TypeUnshareOK {
+		t.Fatalf("unshare = %s %s", m.Type, m.Data)
+	}
+	if ok := listFrom(t, op, 123); len(ok.Shares) != 0 {
+		t.Fatalf("a list right after an unshare still shows %+v from the cache", ok.Shares)
+	}
+}

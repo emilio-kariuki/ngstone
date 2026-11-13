@@ -879,6 +879,7 @@ func (s *Server) handleShare(as *AgentSession, ctrl *proto.Conn, id uint64, req 
 }
 
 func (s *Server) handleUnshare(as *AgentSession, ctrl *proto.Conn, id uint64, req proto.Unshare) {
+	as.remoteShares = nil
 	sh, ok := s.shares.byShareID(req.ShareID)
 	if !ok || !shareVisibleTo(sh, as) {
 		if s.peers != nil && s.revokeRemoteShare(req.ShareID, durableOwnerID(as)) {
