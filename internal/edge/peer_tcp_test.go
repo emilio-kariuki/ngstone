@@ -655,7 +655,9 @@ func TestPollTCPKeepsTunnelWithoutLeaseOrBoundAfterPoll(t *testing.T) {
 	if lost := mgr.lostToPeers(map[int]struct{}{leased: {}}, before); len(lost) != 0 {
 		t.Fatalf("a tunnel bound after the poll started was marked lost: %v", lost)
 	}
-	if isSessionDead(recA.fx.as) {
+	select {
+	case <-recA.fx.as.Done():
 		t.Fatal("session was evicted by a tunnel it holds without a lease or bound after the poll")
+	case <-time.After(300 * time.Millisecond):
 	}
 }
