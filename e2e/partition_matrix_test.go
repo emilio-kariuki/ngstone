@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -190,6 +191,104 @@ func TestPartitionInstantTCPTakeoverPastHalfOpenPeer(t *testing.T) {
 	echoRoundTrip(t, dialTunnel(t, port), "after-takeover\n")
 
 	agentA.cmd.Process.Signal(syscall.SIGCONT)
+}
+
+type controlRelay struct {
+	addr      string
+	mu        sync.Mutex
+	agentSide []net.Conn
+	edgeSide  []net.Conn
+}
+
+func startControlRelay(t *testing.T, target string) *controlRelay {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("relay listen: %v", err)
+	}
+	r := &controlRelay{addr: ln.Addr().String()}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			up, err := net.Dial("tcp", target)
+			if err != nil {
+				c.Close()
+				continue
+			}
+			r.mu.Lock()
+			r.agentSide = append(r.agentSide, c)
+			r.edgeSide = append(r.edgeSide, up)
+			r.mu.Unlock()
+			go io.Copy(up, c)
+			go io.Copy(c, up)
+		}
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for _, c := range append(r.agentSide, r.edgeSide...) {
+			c.Close()
+		}
+	})
+	return r
+}
+
+func (r *controlRelay) dropAgentSides() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range r.agentSide {
+		c.Close()
+	}
+	r.agentSide = nil
+}
+
+func TestPartitionAutoPortTCPRebindsRememberedPortPastHalfOpenSession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping partition matrix test in -short mode")
+	}
+
+	edgeBin, agentBin := buildBinaries(t)
+	echoAddr := startTCPEcho(t)
+
+	token := "tok-auto-port-rebind"
+	domain := "autoport.example.com"
+	controlAddr := freeAddr(t)
+	publicAddr := freeAddr(t)
+	tcpLo, tcpHi := freeTCPRange(t, 30)
+	const instanceID = "fixed-instance-auto-port"
+
+	startEdgeTCP(t, edgeBin, controlAddr, publicAddr, token, domain, tcpLo, tcpHi)
+	relay := startControlRelay(t, controlAddr)
+
+	_, sb := startAgentTCPWithInstanceID(t, agentBin, relay.addr, token, echoAddr, 0, "", instanceID)
+	port := waitTCPAssignedPort(t, sb, 15*time.Second)
+	waitForPort(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	echoRoundTrip(t, dialTunnel(t, port), "before-drop\n")
+
+	relay.dropAgentSides()
+
+	const bound = 10 * time.Second
+	start := time.Now()
+	var adverts [][]string
+	for time.Now().Before(start.Add(bound)) {
+		if adverts = tcpAdvertRe.FindAllStringSubmatch(sb.String(), -1); len(adverts) >= 2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(adverts) < 2 {
+		t.Fatalf("agent did not re-advertise a tcp port within %s of the control drop:\n%s", bound, sb.String())
+	}
+	t.Logf("auto-port rebind past half-open session took %s (asserted bound was %s, the keepalive timeout is 45s)", time.Since(start), bound)
+	if got, _ := strconv.Atoi(adverts[len(adverts)-1][1]); got != port {
+		t.Fatalf("agent re-advertised tcp port %d, want the remembered port %d", got, port)
+	}
+
+	echoRoundTrip(t, dialTunnel(t, port), "after-rebind\n")
 }
 
 func TestPartitionDifferentInstanceRefused(t *testing.T) {
