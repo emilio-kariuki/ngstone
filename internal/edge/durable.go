@@ -159,6 +159,7 @@ func (s *Server) undoDurableLease(as *AgentSession, key string, lease storage.Le
 	defer cancel()
 	if _, err := s.storage.RestoreReplacedLease(ctx, lease); err != nil {
 		slogStorageError("restore replaced connector lease", err)
+		s.releaseDurableLease(as, key, lease.ID)
 	}
 }
 
