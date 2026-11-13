@@ -118,10 +118,11 @@ $ sudo ./deploy/install-edge.sh \\
           written if the installer has not written one before and both
           exceed it. Once the file exists, a rerun keeps its keys at{" "}
           <code>7500000</code>. The installer never lowers a live value, but
-          the file sorts last in <code>sysctl.d</code> and so overrides an
-          earlier drop-in for the same key at boot; edit or remove its key
-          to keep a larger persistent value. <code>off</code> removes the
-          flag, the rule and the file.
+          at boot the file overrides any earlier-sorting drop-in for the
+          same key, though <code>/etc/sysctl.conf</code> or{" "}
+          <code>99-sysctl.conf</code> can still override it; edit or remove
+          its key to keep a larger persistent value. <code>off</code> removes
+          the flag, the rule and the file.
         </Property>
         <Property name="--from-source" type="bool">
           Build <code>ngstoned</code> from the checkout with Go instead of
