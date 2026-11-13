@@ -1291,7 +1291,8 @@ in insecure mode; a caller-supplied public TLS config is rejected with
 hint to check that the edge runs with `-quic` and that UDP is reachable. When
 UDP is blocked, a literal address fails after 10 s. A name with both an IPv4 and
 an IPv6 address tries IPv4 first and then IPv6, so it can take up to 20 s,
-the agent's whole QUIC dial budget. `ngstone doctor` gives the probe
+the agent's whole QUIC dial budget; with more than two records the 20 s may run
+out after the first two. `ngstone doctor` gives the probe
 `--timeout` (5 s by default) instead, so on a link with a round trip above
 about 2.5 s run it with a longer `--timeout`.
 
@@ -1317,9 +1318,10 @@ at most a quarter of `-handshake-concurrency` at once (4 at the default 16, neve
 below 1; set it with `-unauth-per-addr`), counted per IPv4 address or per IPv6
 /48 and shared by TCP, QUIC, WebSocket and forwarded control, where the client
 address is the original one. That is a fairness limit, not a wall: four
-addresses (or four /48s) can still fill the handshake cap. The slot is freed when the connection
-authenticates or closes. A refused client gets no reply: a TCP connection is
-closed at once, a QUIC handshake is refused, a WebSocket upgrade gets
+addresses (or four /48s) can still fill the handshake cap. The slot is freed
+when the connection authenticates or closes. A refused client is turned away
+without any control reply: a TCP connection is closed, a QUIC connection is
+refused with `CONNECTION_REFUSED`, and a WebSocket upgrade gets
 `503 too many connections`. The refusals are counted in
 `ngstoned_rejected_unauth_per_addr_total`. Many agents behind one NAT or one
 IPv6 /48 that start at the same moment can hit the cap; they retry and

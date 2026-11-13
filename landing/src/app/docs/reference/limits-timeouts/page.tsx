@@ -210,9 +210,10 @@ export default function LimitsTimeoutsPage() {
           IPv4 address or per IPv6 /48 and shared by TCP, QUIC, WebSocket and
           forwarded control, where the address is the original client&apos;s.
           Stops one address from filling the handshake cap, though four
-          addresses (or /48s) can still fill it. A refused client gets
-          no reply: a TCP connection is closed at once, a QUIC handshake is
-          refused, and a WebSocket upgrade gets{" "}
+          addresses (or /48s) can still fill it. A refused client is
+          turned away without any control reply: a TCP connection is closed, a
+          QUIC connection is refused with <code>CONNECTION_REFUSED</code>, and
+          a WebSocket upgrade gets{" "}
           <code>503 too many connections</code>. Refusals are counted in{" "}
           <code>ngstoned_rejected_unauth_per_addr_total</code>. Many agents
           behind one NAT or one IPv6 /48 that start together can hit it.
@@ -232,7 +233,8 @@ export default function LimitsTimeoutsPage() {
           Applies only with <code>-quic</code>. The agent&apos;s whole QUIC
           dial budget. With UDP blocked, a literal address fails after 10 s. A
           name with both an IPv4 and an IPv6 address tries IPv4 first and then
-          IPv6, so it fails after up to 20 s.
+          IPv6, so it fails after up to 20 s. With more than two records the 20 s
+          may run out after the first two.
         </Property>
         <Property name="QUIC max idle timeout" type="duration" defaultValue="15s">
           Applies only with <code>-quic</code>. A peer that vanishes without
