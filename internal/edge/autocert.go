@@ -11,6 +11,8 @@ import (
 	"github.com/caddyserver/certmagic"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"golang.org/x/time/rate"
+
+	"ngstone/internal/storage"
 )
 
 const (
@@ -34,6 +36,13 @@ func (m *TLSManager) publicCertificate(hello *tls.ClientHelloInfo) (*tls.Certifi
 		}
 		return m.magic.GetCertificate(hello)
 	}
+	name, ok := storage.NormalizeCustomDomain(hello.ServerName)
+	if !ok {
+		return nil, errAutoCertNotAllowed
+	}
+	canonical := *hello
+	canonical.ServerName = name
+	hello = &canonical
 	if !m.allowed(name) {
 		if !challenge && m.operatorCovers(name) {
 			return m.magic.GetCertificate(hello)

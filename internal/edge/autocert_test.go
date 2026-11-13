@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+
+	"ngstone/internal/storage"
 )
 
 type countingStorage struct {
@@ -322,7 +324,11 @@ func TestAutoCertIssuesOnceForActiveName(t *testing.T) {
 
 func TestAutoCertFailureCoolsDownWithoutStorage(t *testing.T) {
 	allow := newAllowList("app.example.org")
-	mgr, cs, fake := newTestAutoManager(t, allow.allowed)
+	normalized := func(name string) bool {
+		canonical, ok := storage.NormalizeCustomDomain(name)
+		return ok && allow.allowed(canonical)
+	}
+	mgr, cs, fake := newTestAutoManager(t, normalized)
 	fake.setErr(certmagic.ErrNoRetry{Err: errors.New("validation failed")})
 	cfg := mgr.PublicTLSConfig()
 
@@ -342,6 +348,19 @@ func TestAutoCertFailureCoolsDownWithoutStorage(t *testing.T) {
 	}
 	if n := fake.calls.Load(); n != 1 {
 		t.Fatalf("issuer calls during the cool-down = %d, want 1", n)
+	}
+
+	for _, sni := range []string{"app.example.org ", "APP.example.org.", " app.example.org"} {
+		cs.calls.Store(0)
+		if _, err := handshake(t, cfg, sni, []string{"h2"}); err == nil {
+			t.Fatalf("handshake with SNI %q succeeded inside the cool-down", sni)
+		}
+		if n := cs.calls.Load(); n != 0 {
+			t.Fatalf("storage accessed %d times during the cool-down for SNI %q", n, sni)
+		}
+		if n := fake.calls.Load(); n != 1 {
+			t.Fatalf("issuer calls during the cool-down for SNI %q = %d, want 1", sni, n)
+		}
 	}
 
 	advanceIssuanceClock(mgr, autoCertNameInterval+time.Minute)
