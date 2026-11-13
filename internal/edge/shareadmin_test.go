@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -404,6 +405,8 @@ func TestGroupListCaches(t *testing.T) {
 	token := issueShareToken(t, cl.a, "owner-o")
 	_, m := credentialShare(t, cl.b, token, "sharer", "link-secret")
 	shareID := shareIDOf(t, m)
+	var skew atomic.Int64
+	cl.a.srv.shares.now = func() time.Time { return time.Now().Add(time.Duration(skew.Load())) }
 	op := startRemoteOperator(t, cl.a, token, "operator")
 	accepted := metricDelta(metricPeerAcceptedConns)
 
@@ -415,6 +418,12 @@ func TestGroupListCaches(t *testing.T) {
 	if accepted() != 1 {
 		t.Fatalf("a repeat list within the cache window dialed the holder again (%d)", accepted())
 	}
+	skew.Store(int64(remoteListCacheTTL + time.Second))
+	listFrom(t, op, 95)
+	if accepted() != 2 {
+		t.Fatalf("a list after the cache expired did not query the holder again (%d)", accepted())
+	}
+	skew.Store(0)
 
 	newExpiry := time.Now().Add(25 * time.Minute).UnixMilli()
 	op.Control().Write(proto.TypeShareUpdate, 93, proto.ShareUpdate{ShareID: shareID, ExpiresAtMS: newExpiry})

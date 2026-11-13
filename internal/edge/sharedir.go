@@ -504,7 +504,7 @@ func (s *Server) groupShares(as *AgentSession) (shares []proto.ShareInfo, unreac
 	if s.peers == nil || as.viaPeer || as.relayToken == "" {
 		return nil, nil, false
 	}
-	if c := as.remoteShares; c != nil && time.Since(c.at) < remoteListCacheTTL {
+	if c := as.remoteShares; c != nil && s.shares.now().Sub(c.at) < remoteListCacheTTL {
 		return c.shares, c.unreached, true
 	}
 	p := s.peers
@@ -574,6 +574,6 @@ func (s *Server) groupShares(as *AgentSession) (shares []proto.ShareInfo, unreac
 	if truncated {
 		unreached = append(unreached, proto.UnreachedMoreEdges)
 	}
-	as.remoteShares = &remoteShareCache{at: time.Now(), shares: shares, unreached: unreached}
+	as.remoteShares = &remoteShareCache{at: s.shares.now(), shares: shares, unreached: unreached}
 	return shares, unreached, true
 }
