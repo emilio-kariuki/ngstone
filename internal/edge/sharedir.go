@@ -24,8 +24,9 @@ const (
 	remoteListMaxEdges = 32
 	remoteListFanout   = 4
 	remoteListCacheTTL = 2 * time.Second
-	adminRequestID     = 2
 	adminAuthRequestID = 1
+	adminRequestID     = 3
+	adminGoodbyeID     = 5
 )
 
 var errAdminRejected = errors.New("edge: holder rejected the operator credential")
@@ -437,7 +438,12 @@ func (p *peerForwarder) adminExchange(as *AgentSession, holder storage.EdgePeer,
 	if err != nil {
 		return proto.Msg{}, peerDown, err
 	}
-	ctrl.Write(proto.TypeGoodbye, 3, nil)
+	switch reply.Type {
+	case proto.TypeShareOK, proto.TypeSharesOK, proto.TypeKickOK, proto.TypeShareErr, proto.TypeError:
+	default:
+		return proto.Msg{}, peerDown, errors.New("edge: unexpected admin reply " + reply.Type)
+	}
+	ctrl.Write(proto.TypeGoodbye, adminGoodbyeID, nil)
 	return reply, peerOK, nil
 }
 
@@ -446,6 +452,9 @@ func readAdminReply(ctrl *proto.Conn, id uint64) (proto.Msg, error) {
 		m, err := ctrl.Read()
 		if err != nil {
 			return proto.Msg{}, err
+		}
+		if m.Type == proto.TypeGoodbye {
+			return proto.Msg{}, errors.New("edge: holder is draining")
 		}
 		if m.Type == proto.TypePing || m.ID != id {
 			continue

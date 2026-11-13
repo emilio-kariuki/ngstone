@@ -469,3 +469,56 @@ func TestRemoteAdminNeverLogsToken(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteAdminHolderGoodbyeIsNotAReply(t *testing.T) {
+	for _, goodbyeID := range []uint64{2, 3} {
+		cl := newShareCluster(t)
+		useShareCredentials(cl)
+		token := issueShareToken(t, cl.a, "owner-o")
+		_, m := credentialShare(t, cl.b, token, "sharer", "link-secret")
+		shareID := shareIDOf(t, m)
+		fakeHolder(t, cl.b, nil, func(tc net.Conn) {
+			br := bufio.NewReader(tc)
+			if _, err := br.ReadByte(); err != nil {
+				return
+			}
+			if _, err := br.ReadString('\n'); err != nil {
+				return
+			}
+			tc.Write([]byte{peerStatusAccept})
+			sess, err := tunnel.Server(tc)
+			if err != nil {
+				return
+			}
+			defer sess.Close("test done")
+			ctrl := sess.Control()
+			auth, err := ctrl.Read()
+			if err != nil {
+				return
+			}
+			ctrl.Write(proto.TypeAuthOK, auth.ID, proto.AuthOK{})
+			if _, err := ctrl.Read(); err != nil {
+				return
+			}
+			ctrl.Write(proto.TypeGoodbye, goodbyeID, proto.Goodbye{Reason: "edge shutting down"})
+			for {
+				if _, err := ctrl.Read(); err != nil {
+					return
+				}
+			}
+		})
+
+		op := startRemoteOperator(t, cl.a, token, "operator")
+		op.Control().Write(proto.TypeShareUpdate, 55, proto.ShareUpdate{ShareID: shareID, ExpiresAtMS: time.Now().Add(20 * time.Minute).UnixMilli()})
+		m = readSession(t, op)
+		e, _ := proto.Decode[proto.ShareErr](m)
+		if m.Type != proto.TypeShareErr || m.ID != 55 || e.Code != proto.CodeShareNotFound || !strings.Contains(e.Message, "did not answer") {
+			t.Fatalf("extend against a draining holder (goodbye id %d) = %s %s, want share_not_found saying it did not answer", goodbyeID, m.Type, m.Data)
+		}
+		op.Control().Write(proto.TypeKick, 56, proto.Kick{ShareID: shareID, ConnectorID: "c1"})
+		m = readSession(t, op)
+		if k, _ := proto.Decode[proto.Error](m); m.Type != proto.TypeError || m.ID != 56 || !strings.Contains(k.Message, "did not answer") {
+			t.Fatalf("kick against a draining holder (goodbye id %d) = %s %s", goodbyeID, m.Type, m.Data)
+		}
+	}
+}
