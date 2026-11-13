@@ -293,8 +293,10 @@ func TestGroupListShares(t *testing.T) {
 	if len(ok.Shares) != 2 || ok.Shares[0].ShareID != idA || ok.Shares[0].Edge != cl.a.id || ok.Shares[1].ShareID != idB || ok.Shares[1].Edge != cl.b.id {
 		t.Fatalf("shares = %+v, want [%s on %s, %s on %s]", ok.Shares, idA, cl.a.id, idB, cl.b.id)
 	}
-	if !ok.Shares[0].Mine && ok.Shares[0].Edge == cl.a.id && ok.Shares[1].Mine {
-		t.Fatal("a remote row claims to belong to the asking session")
+	for i, wantEdge := range []string{cl.a.id, cl.b.id} {
+		if row := ok.Shares[i]; row.Mine || row.Edge != wantEdge {
+			t.Fatalf("row %s: mine=%v edge=%q, want mine=false edge=%q", row.ShareID, row.Mine, row.Edge, wantEdge)
+		}
 	}
 }
 
