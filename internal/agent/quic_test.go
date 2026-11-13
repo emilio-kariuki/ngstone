@@ -230,6 +230,8 @@ func TestQUICDialErrorHint(t *testing.T) {
 		{"wrapped deadline exceeded", fmt.Errorf("dial: %w", context.DeadlineExceeded), true},
 		{"joined idle timeout", errors.Join(unrelated, &quic.IdleTimeoutError{}), true},
 		{"joined deadline exceeded", errors.Join(unrelated, context.DeadlineExceeded), true},
+		{"dns timeout", &net.DNSError{Err: "i/o timeout", Name: "edge.example.com", IsTimeout: true, UnwrapErr: context.DeadlineExceeded}, false},
+		{"wrapped dns timeout", fmt.Errorf("dial: %w", &net.DNSError{Err: "i/o timeout", Name: "edge.example.com", IsTimeout: true, UnwrapErr: context.DeadlineExceeded}), false},
 		{"unrelated", unrelated, false},
 		{"canceled", context.Canceled, false},
 	}

@@ -129,7 +129,8 @@ func dialQUICControl(ctx context.Context, cfg Config) (net.Conn, error) {
 func quicDialError(addr string, err error) error {
 	var idle *quic.IdleTimeoutError
 	var hs *quic.HandshakeTimeoutError
-	if errors.As(err, &idle) || errors.As(err, &hs) || errors.Is(err, context.DeadlineExceeded) {
+	var dns *net.DNSError
+	if errors.As(err, &idle) || errors.As(err, &hs) || (errors.Is(err, context.DeadlineExceeded) && !errors.As(err, &dns)) {
 		return fmt.Errorf("agent: quic control: no answer from %s over UDP; the edge must run with -quic and UDP must be reachable: %w", addr, err)
 	}
 	return fmt.Errorf("agent: quic control: %w", err)
