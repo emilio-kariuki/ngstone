@@ -474,12 +474,12 @@ func quicBind(t *testing.T, sess tunnel.Session, subdomain string) {
 func TestQUICAuthenticatedSessionSurvivesHardStop(t *testing.T) {
 	shortenAuthDeadline(t, time.Second)
 	_, controlAddr, _ := startQUICEdgeForTest(t, LimitsConfig{UnauthSessions: 1})
-	start := time.Now()
 	sess := dialQUICSession(t, controlAddr)
 	defer sess.Close("done")
 	if typ, err := quicAuth(sess, "tok", "agent-hard-stop"); err != nil || typ != proto.TypeAuthOK {
 		t.Fatalf("auth: %q, %v", typ, err)
 	}
+	start := time.Now()
 	time.Sleep(time.Until(start.Add(authDeadline + 500*time.Millisecond)))
 	quicBind(t, sess, "hardstop")
 }
