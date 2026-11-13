@@ -66,7 +66,7 @@ func (s *Server) handleWebSocketControl(ctx context.Context, w http.ResponseWrit
 		http.Error(w, "too many connections", http.StatusServiceUnavailable)
 		return
 	}
-	releaseAddr, ok := s.acquireUnauthAddr(websocketAddr{network: "tcp", value: r.RemoteAddr})
+	releaseAddr, ok := s.acquireUnauthAddr(websocketAddr{network: "tcp", value: s.admissionAddr(r)})
 	if !ok {
 		admission.release()
 		http.Error(w, "too many connections", http.StatusServiceUnavailable)

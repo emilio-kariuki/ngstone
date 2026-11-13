@@ -549,9 +549,7 @@ func (s *Server) Run(ctx context.Context) error {
 		publicSrv.Protocols = &protocols
 	}
 
-	if s.peers != nil {
-		publicSrv.ConnContext = peerConnContext
-	}
+	publicSrv.ConnContext = publicConnContext
 
 	var httpSrv *http.Server
 	if httpLn != nil {

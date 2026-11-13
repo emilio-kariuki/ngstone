@@ -1,12 +1,15 @@
 package edge
 
 import (
+	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -66,6 +69,31 @@ func (l *proxyProtoListener) Accept() (net.Conn, error) {
 		}
 		return &proxyProtoConn{Conn: conn, timeout: l.timeout}, nil
 	}
+}
+
+type socketPeerKey struct{}
+
+func publicConnContext(ctx context.Context, c net.Conn) context.Context {
+	ctx = peerConnContext(ctx, c)
+	if tc, ok := c.(*tls.Conn); ok {
+		c = tc.NetConn()
+	}
+	if rc, ok := c.(*replayConn); ok {
+		c = rc.Conn
+	}
+	if pc, ok := c.(*proxyProtoConn); ok {
+		ctx = context.WithValue(ctx, socketPeerKey{}, pc.Conn.RemoteAddr())
+	}
+	return ctx
+}
+
+func (s *Server) admissionAddr(r *http.Request) string {
+	if s.cfg.ProxyProtocol && len(s.proxyProtoTrusted) == 0 {
+		if a, ok := r.Context().Value(socketPeerKey{}).(net.Addr); ok {
+			return a.String()
+		}
+	}
+	return r.RemoteAddr
 }
 
 type proxyProtoConn struct {
