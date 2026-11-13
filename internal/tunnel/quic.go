@@ -200,12 +200,12 @@ func DialQUIC(ctx context.Context, addr string, tlsConf *tls.Config) (net.Conn, 
 	for i, ip := range candidates {
 		addrs[i] = net.JoinHostPort(ip.String(), strconv.Itoa(portNum))
 	}
-	return dialQUICFirst(ctx, addrs, func(ctx context.Context, addr string) (net.Conn, error) {
+	return DialQUICFirst(ctx, addrs, func(ctx context.Context, addr string) (net.Conn, error) {
 		return dialQUICAddr(ctx, addr, tlsConf)
 	})
 }
 
-func dialQUICFirst(ctx context.Context, addrs []string, dial func(context.Context, string) (net.Conn, error)) (net.Conn, error) {
+func DialQUICFirst(ctx context.Context, addrs []string, dial func(context.Context, string) (net.Conn, error)) (net.Conn, error) {
 	var failed error
 	for _, addr := range addrs {
 		conn, err := dial(ctx, addr)

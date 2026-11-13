@@ -382,7 +382,7 @@ func TestQUICSessionLargeTransfer(t *testing.T) {
 func TestDialQUICFirstFallsBackToNextAddress(t *testing.T) {
 	want := &quicConn{}
 	var tried []string
-	conn, err := dialQUICFirst(context.Background(), []string{"a", "b", "c"}, func(_ context.Context, addr string) (net.Conn, error) {
+	conn, err := DialQUICFirst(context.Background(), []string{"a", "b", "c"}, func(_ context.Context, addr string) (net.Conn, error) {
 		tried = append(tried, addr)
 		if addr == "a" {
 			return nil, errors.New("a down")
@@ -401,7 +401,7 @@ func TestDialQUICFirstJoinsEveryError(t *testing.T) {
 	first := &quic.HandshakeTimeoutError{}
 	second := errors.New("second down")
 	errs := map[string]error{"a": first, "b": second}
-	_, err := dialQUICFirst(context.Background(), []string{"a", "b"}, func(_ context.Context, addr string) (net.Conn, error) {
+	_, err := DialQUICFirst(context.Background(), []string{"a", "b"}, func(_ context.Context, addr string) (net.Conn, error) {
 		return nil, errs[addr]
 	})
 	if err == nil {
@@ -422,7 +422,7 @@ func TestDialQUICFirstJoinsEveryError(t *testing.T) {
 func TestDialQUICFirstStopsWhenContextIsDone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	calls := 0
-	_, err := dialQUICFirst(ctx, []string{"a", "b", "c"}, func(context.Context, string) (net.Conn, error) {
+	_, err := DialQUICFirst(ctx, []string{"a", "b", "c"}, func(context.Context, string) (net.Conn, error) {
 		calls++
 		cancel()
 		return nil, context.Canceled

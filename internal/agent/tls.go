@@ -22,6 +22,8 @@ const (
 	quicDialTimeout     = 20 * time.Second
 )
 
+var dialQUIC = tunnel.DialQUIC
+
 // tlsServerName picks the name the edge's certificate is verified against:
 // the explicit override when set, otherwise the host part of the control
 // address. The edge serves its apex certificate on the control port, so
@@ -119,7 +121,7 @@ func dialQUICControl(ctx context.Context, cfg Config) (net.Conn, error) {
 	}
 	dctx, cancel := context.WithTimeout(ctx, quicDialTimeout)
 	defer cancel()
-	conn, err := tunnel.DialQUIC(dctx, cfg.ControlAddr, tlsCfg)
+	conn, err := dialQUIC(dctx, cfg.ControlAddr, tlsCfg)
 	if err != nil {
 		return nil, quicDialError(cfg.ControlAddr, err)
 	}

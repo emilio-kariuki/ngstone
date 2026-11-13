@@ -210,8 +210,36 @@ func TestQUICControlSilentUDPHint(t *testing.T) {
 }
 
 func TestQUICDialTimeoutCoversTwoHandshakeWaits(t *testing.T) {
-	if quicDialTimeout != 20*time.Second {
-		t.Fatalf("quicDialTimeout = %v, want 20s so that a blackholed first address still leaves a full 10 s handshake wait for the second", quicDialTimeout)
+	orig := dialQUIC
+	t.Cleanup(func() { dialQUIC = orig })
+	const firstWait = 200 * time.Millisecond
+	var remaining []time.Duration
+	dialQUIC = func(ctx context.Context, _ string, _ *tls.Config) (net.Conn, error) {
+		return tunnel.DialQUICFirst(ctx, []string{"first", "second"}, func(ctx context.Context, addr string) (net.Conn, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Error("the QUIC dial context has no deadline")
+				return nil, errors.New("no deadline")
+			}
+			remaining = append(remaining, time.Until(deadline))
+			if addr == "first" {
+				select {
+				case <-ctx.Done():
+				case <-time.After(firstWait):
+				}
+			}
+			return nil, errors.New(addr + " down")
+		})
+	}
+	_, err := dialQUICControl(context.Background(), Config{ControlAddr: "edge.invalid:4443", Insecure: true})
+	if err == nil {
+		t.Fatal("dialQUICControl succeeded against a fake dial that always fails")
+	}
+	if len(remaining) != 2 {
+		t.Fatalf("addresses attempted = %d, want 2", len(remaining))
+	}
+	if remaining[1] < tlsHandshakeTimeout {
+		t.Fatalf("second address attempted with %v left, want at least a full %v handshake wait", remaining[1], tlsHandshakeTimeout)
 	}
 }
 
