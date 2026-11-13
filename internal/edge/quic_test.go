@@ -575,15 +575,21 @@ func TestQUICListenerConsultsWindowGate(t *testing.T) {
 	}
 	payload := bytes.Repeat([]byte{'x'}, 8<<20)
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write(payload)
+		if _, err := w.Write(payload); err != nil {
+			t.Errorf("write payload: %v", err)
+		}
 	})}
 	go srv.Serve(ln)
 	defer srv.Close()
 	quicBind(t, sess, "gate")
 
-	req, _ := http.NewRequest(http.MethodGet, "http://"+publicAddr+"/", nil)
+	req, err := http.NewRequest(http.MethodGet, "http://"+publicAddr+"/", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
 	req.Host = "gate.example.com"
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("public request: %v", err)
 	}
