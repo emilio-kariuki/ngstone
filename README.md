@@ -1313,14 +1313,16 @@ the root form, `auth`, `port`, `tcp`, `tls`, `doctor`, `share`, `connect` and
 the operator commands; `start` takes the transport from the tunnels file.
 
 The edge also caps unauthenticated control connections per client address:
-at most 8 at once (`-unauth-per-addr`), counted per IPv4 address or per IPv6
-/64 and shared by TCP, QUIC, WebSocket and forwarded control, where the client
-address is the original one. The slot is freed when the connection
+at most a quarter of `-handshake-concurrency` at once (4 at the default 16, never
+below 1; set it with `-unauth-per-addr`), counted per IPv4 address or per IPv6
+/48 and shared by TCP, QUIC, WebSocket and forwarded control, where the client
+address is the original one. That is a fairness limit, not a wall: four
+addresses (or four /48s) can still fill the handshake cap. The slot is freed when the connection
 authenticates or closes. A refused client gets no reply: a TCP connection is
 closed at once, a QUIC handshake is refused, a WebSocket upgrade gets
 `503 too many connections`. The refusals are counted in
 `ngstoned_rejected_unauth_per_addr_total`. Many agents behind one NAT or one
-IPv6 /64 that start at the same moment can hit the cap; they retry and
+IPv6 /48 that start at the same moment can hit the cap; they retry and
 connect as earlier ones authenticate, or you can raise the cap.
 
 Reconnects use decorrelated exponential jitter from 500 ms to a 30 s cap.

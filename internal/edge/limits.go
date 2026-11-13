@@ -29,7 +29,6 @@ const (
 
 	DefaultHandshakeConcurrency = 16
 	DefaultUnauthSessions       = 32
-	DefaultUnauthPerAddr        = 8
 
 	// DefaultPerIPInFlight caps how many HTTP requests and TCP tunnel
 	// connections one client address can have in flight at once, so a
@@ -164,7 +163,7 @@ func (l LimitsConfig) withDefaults() (LimitsConfig, error) {
 		return l, fmt.Errorf("edge: unauth-per-addr must not be negative, got %d", l.UnauthPerAddr)
 	}
 	if l.UnauthPerAddr == 0 {
-		l.UnauthPerAddr = DefaultUnauthPerAddr
+		l.UnauthPerAddr = max(1, l.HandshakeConcurrency/4)
 	}
 	if l.PerIPInFlight < 0 {
 		return l, fmt.Errorf("edge: per-ip-inflight must not be negative, got %d", l.PerIPInFlight)

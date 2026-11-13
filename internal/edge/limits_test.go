@@ -612,14 +612,28 @@ func TestRedirectToHTTPSRejectsUnrelatedHost(t *testing.T) {
 }
 
 func TestLimitsConfigWithDefaultsUnauthPerAddr(t *testing.T) {
-	l, err := LimitsConfig{}.withDefaults()
-	if err != nil {
-		t.Fatalf("withDefaults: %v", err)
+	cases := []struct {
+		name string
+		in   LimitsConfig
+		want int
+	}{
+		{"default handshake cap", LimitsConfig{}, 4},
+		{"follows the handshake cap", LimitsConfig{HandshakeConcurrency: 64}, 16},
+		{"at least one", LimitsConfig{HandshakeConcurrency: 2}, 1},
+		{"explicit value kept", LimitsConfig{UnauthPerAddr: 9}, 9},
 	}
-	if l.UnauthPerAddr != DefaultUnauthPerAddr {
-		t.Fatalf("UnauthPerAddr = %d, want default %d", l.UnauthPerAddr, DefaultUnauthPerAddr)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l, err := tc.in.withDefaults()
+			if err != nil {
+				t.Fatalf("withDefaults: %v", err)
+			}
+			if l.UnauthPerAddr != tc.want {
+				t.Fatalf("UnauthPerAddr = %d, want %d", l.UnauthPerAddr, tc.want)
+			}
+		})
 	}
-	_, err = LimitsConfig{UnauthPerAddr: -1}.withDefaults()
+	_, err := LimitsConfig{UnauthPerAddr: -1}.withDefaults()
 	if err == nil || !strings.Contains(err.Error(), "unauth-per-addr") {
 		t.Fatalf("withDefaults(UnauthPerAddr: -1) error = %v, want one naming unauth-per-addr", err)
 	}

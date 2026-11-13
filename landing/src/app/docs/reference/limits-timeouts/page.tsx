@@ -204,16 +204,18 @@ export default function LimitsTimeoutsPage() {
           later than 5 s after admission and holds its slot until it is
           closed.
         </Property>
-        <Property name=":4443 unauthenticated sessions per address" type="int" defaultValue="8">
-          Set with <code>-unauth-per-addr</code>. Counted per IPv4 address or
-          per IPv6 /64 and shared by TCP, QUIC, WebSocket and forwarded
-          control, where the address is the original client&apos;s. Stops one
-          address from filling the unauthenticated cap. A refused client gets
+        <Property name=":4443 unauthenticated sessions per client address" type="int" defaultValue="4">
+          Set with <code>-unauth-per-addr</code>; the default is a quarter of{" "}
+          <code>-handshake-concurrency</code>, and never below 1. Counted per
+          IPv4 address or per IPv6 /48 and shared by TCP, QUIC, WebSocket and
+          forwarded control, where the address is the original client&apos;s.
+          Stops one address from filling the handshake cap, though four
+          addresses (or /48s) can still fill it. A refused client gets
           no reply: a TCP connection is closed at once, a QUIC handshake is
           refused, and a WebSocket upgrade gets{" "}
           <code>503 too many connections</code>. Refusals are counted in{" "}
           <code>ngstoned_rejected_unauth_per_addr_total</code>. Many agents
-          behind one NAT or one IPv6 /64 that start together can hit it.
+          behind one NAT or one IPv6 /48 that start together can hit it.
         </Property>
         <Property name="QUIC handshake idle timeout" type="duration" defaultValue="10s">
           Applies only with <code>-quic</code>. A QUIC handshake that stalls

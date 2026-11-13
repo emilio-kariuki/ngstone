@@ -190,15 +190,7 @@ func unauthAddrKey(a net.Addr) string {
 	if err != nil {
 		return a.String()
 	}
-	addr := ap.Addr().Unmap()
-	if addr.Is4() {
-		return addr.String()
-	}
-	prefix, err := addr.Prefix(64)
-	if err != nil {
-		return addr.String()
-	}
-	return prefix.String()
+	return rateLimitKey(ap.Addr().Unmap().String())
 }
 
 func (s *Server) acquireUnauthAddr(a net.Addr) (func(), bool) {

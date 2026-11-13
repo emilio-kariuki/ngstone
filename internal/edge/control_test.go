@@ -595,10 +595,11 @@ func TestUnauthAddrKey(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"192.0.2.1:5", "192.0.2.1"},
 		{"[::ffff:192.0.2.1]:5", "192.0.2.1"},
-		{"[2001:db8:1:2::a]:5", "2001:db8:1:2::/64"},
-		{"[2001:db8:1:2:ffff::1]:5", "2001:db8:1:2::/64"},
-		{"[2001:db8:1:3::1]:5", "2001:db8:1:3::/64"},
-		{"[fe80::1%eth0]:5", "fe80::/64"},
+		{"[2001:db8:1:2::a]:5", "2001:db8:1::/48"},
+		{"[2001:db8:1:2:ffff::1]:5", "2001:db8:1::/48"},
+		{"[2001:db8:1:3::1]:5", "2001:db8:1::/48"},
+		{"[2001:db8:2:3::1]:5", "2001:db8:2::/48"},
+		{"[fe80::1%eth0]:5", "fe80::/48"},
 		{"pipe", "pipe"},
 	}
 	for _, tc := range cases {
@@ -608,7 +609,7 @@ func TestUnauthAddrKey(t *testing.T) {
 	}
 }
 
-func TestAcquireUnauthAddrGroupsIPv6By64(t *testing.T) {
+func TestAcquireUnauthAddrGroupsIPv6By48(t *testing.T) {
 	s := &Server{unauthPerAddr: newPerIPInflight(1)}
 	addr := func(ip string) net.Addr { return &net.TCPAddr{IP: net.ParseIP(ip), Port: 1} }
 	release, ok := s.acquireUnauthAddr(addr("2001:db8:1:2::a"))
@@ -616,21 +617,21 @@ func TestAcquireUnauthAddrGroupsIPv6By64(t *testing.T) {
 		t.Fatal("first acquisition refused")
 	}
 	delta := metricDelta(metricRejectedUnauthPerAddr)
-	if _, ok := s.acquireUnauthAddr(addr("2001:db8:1:2::b")); ok {
-		t.Fatal("a second address in the same /64 was admitted")
+	if _, ok := s.acquireUnauthAddr(addr("2001:db8:1:3::b")); ok {
+		t.Fatal("a second /64 in the same /48 was admitted")
 	}
 	if delta() != 1 {
 		t.Fatalf("rejection metric rose by %d, want 1", delta())
 	}
-	release2, ok := s.acquireUnauthAddr(addr("2001:db8:1:3::a"))
+	release2, ok := s.acquireUnauthAddr(addr("2001:db8:2:2::a"))
 	if !ok {
-		t.Fatal("an address in another /64 of the same /48 was refused")
+		t.Fatal("an address in another /48 was refused")
 	}
 	release2()
 	release()
-	release3, ok := s.acquireUnauthAddr(addr("2001:db8:1:2::b"))
+	release3, ok := s.acquireUnauthAddr(addr("2001:db8:1:3::b"))
 	if !ok {
-		t.Fatal("the /64 stayed full after its holder released")
+		t.Fatal("the /48 stayed full after its holder released")
 	}
 	release3()
 }

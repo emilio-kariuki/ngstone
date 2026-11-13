@@ -87,7 +87,7 @@ func main() {
 	perSessionUpgrade := flag.Int64("per-session-upgrade", 0, "per-session concurrent upgraded (websocket/SSE) stream cap; 0 uses the built-in default")
 	handshakeConcurrency := flag.Int("handshake-concurrency", edge.DefaultHandshakeConcurrency, ":4443 concurrent TLS handshake cap")
 	unauthSessions := flag.Int("unauth-sessions", edge.DefaultUnauthSessions, ":4443 unauthenticated-session cap")
-	unauthPerAddr := flag.Int("unauth-per-addr", edge.DefaultUnauthPerAddr, ":4443 unauthenticated-session cap per client address, shared by TCP, QUIC and WebSocket (IPv6 grouped by /64)")
+	unauthPerAddr := flag.Int("unauth-per-addr", 0, ":4443 unauthenticated-session cap per client address, shared by TCP, QUIC, WebSocket and forwarded control (IPv6 grouped by /48); 0 uses a quarter of -handshake-concurrency, at least 1")
 	perIPInFlight := flag.Int("per-ip-inflight", edge.DefaultPerIPInFlight, "max HTTP requests plus TCP tunnel connections one client address can have in flight (IPv6 grouped by /48)")
 	clientIdleTimeout := flag.Duration("client-idle-timeout", edge.DefaultClientIdleTimeout, "max time one read of a request body, or one write of a response, may wait on the public client; a stalled upload gets 408")
 	tcpIdleTimeout := flag.Duration("tcp-idle-timeout", edge.DefaultTCPIdleTimeout, "close a TCP tunnel connection after this long with no bytes in either direction")
