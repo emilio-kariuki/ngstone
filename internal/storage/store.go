@@ -95,6 +95,7 @@ type Lease struct {
 	RenewedAt   time.Time
 	ExpiresAt   time.Time
 	Reconnected bool
+	Replaced    bool
 }
 
 type Tunnel struct {
@@ -792,6 +793,7 @@ func (s *Store) acquireLeaseOnce(ctx context.Context, request LeaseRequest) (Lea
 	}
 	var tunnelID string
 	reconnected := false
+	replaced := false
 	if existing.ID == "" {
 		tunnelID, err = randomID()
 		if err != nil {
@@ -832,6 +834,7 @@ func (s *Store) acquireLeaseOnce(ctx context.Context, request LeaseRequest) (Lea
 			}
 			if sameInstance {
 				reconnected = true
+				replaced = true
 				if (request.MultiConnector || asBool(existing.MultiConnector)) && !leaseConfigMatches(existing, request) {
 					return Lease{}, ErrConnectorConfigMismatch
 				}
@@ -862,7 +865,7 @@ func (s *Store) acquireLeaseOnce(ctx context.Context, request LeaseRequest) (Lea
 	if err := tx.Commit(); err != nil {
 		return Lease{}, fmt.Errorf("storage: commit lease: %w", err)
 	}
-	return Lease{ID: leaseID, TunnelID: tunnelID, Hostname: request.Hostname, Kind: request.Kind, RemotePort: request.RemotePort, InstanceID: request.InstanceID, SessionID: request.SessionID, EdgeID: request.EdgeID, OwnerID: request.OwnerID, AcquiredAt: now, RenewedAt: now, ExpiresAt: request.ExpiresAt, Reconnected: reconnected}, nil
+	return Lease{ID: leaseID, TunnelID: tunnelID, Hostname: request.Hostname, Kind: request.Kind, RemotePort: request.RemotePort, InstanceID: request.InstanceID, SessionID: request.SessionID, EdgeID: request.EdgeID, OwnerID: request.OwnerID, AcquiredAt: now, RenewedAt: now, ExpiresAt: request.ExpiresAt, Reconnected: reconnected, Replaced: replaced}, nil
 }
 
 func (s *Store) checkHostnameKindConflict(ctx context.Context, tx *sql.Tx, request LeaseRequest, now time.Time) error {

@@ -673,6 +673,55 @@ func TestHandleBindTwiceAfterBindErr(t *testing.T) {
 	}
 }
 
+func TestHandleBindTCPTakeoverLocalBindFailureKeepsReplacedLease(t *testing.T) {
+	store, err := storage.Open(storage.Config{DSN: filepath.Join(t.TempDir(), "control.db")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	mgr := newTakeoverManager(t)
+	oldPeer := newTCPPeer(t, "inst-x", tagEchoHandler("old"))
+	newPeer := newTCPPeer(t, "inst-x", tagEchoHandler("new"))
+	defer releaseAll(mgr, oldPeer, newPeer)
+
+	s := newTestServer("tok")
+	s.tcpMgr = mgr
+	s.storage = store
+
+	const port = 20004
+	first := bindTCPVia(t, s, oldPeer, 1, proto.Bind{Kind: proto.KindTCP, RemotePort: port, Takeover: true})
+	if first.Type != proto.TypeBindOK {
+		t.Fatalf("first bind reply = %+v, want bind_ok", first)
+	}
+	for i := 0; i < maxBindsPerSession; i++ {
+		if _, _, err := mgr.bind(newPeer.as, 0, "example.com", nil, false); err != nil {
+			t.Fatalf("fill bind %d: %v", i, err)
+		}
+	}
+
+	second := bindTCPVia(t, s, newPeer, 2, proto.Bind{Kind: proto.KindTCP, RemotePort: port, Takeover: true})
+	if second.Type != proto.TypeBindErr {
+		t.Fatalf("takeover reply = %+v, want bind_err", second)
+	}
+	e, _ := proto.Decode[proto.BindErr](second)
+	if e.Code != proto.CodeTooManyBinds {
+		t.Fatalf("code = %q, want %q", e.Code, proto.CodeTooManyBinds)
+	}
+	if isSessionDead(oldPeer.as) {
+		t.Fatal("a failed takeover closed the old holder's session")
+	}
+	assertOwnedBy(t, mgr, port, oldPeer.as, newPeer.as)
+
+	tunnels, err := store.ListTunnels(context.Background())
+	if err != nil {
+		t.Fatalf("list tunnels: %v", err)
+	}
+	if len(tunnels) != 1 || tunnels[0].Status != "active" || len(tunnels[0].Connectors) != 1 || tunnels[0].Connectors[0].InstanceID != "inst-x" {
+		t.Fatalf("tunnels after the failed takeover = %+v, want one active tunnel with its lease", tunnels)
+	}
+}
+
 func TestHandleBindTCPLeaseStorageErrorIsInternal(t *testing.T) {
 	for _, tc := range []struct {
 		name string

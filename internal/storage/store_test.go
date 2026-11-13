@@ -121,6 +121,9 @@ func TestLeaseConflictRenewalAndRelease(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire first lease: %v", err)
 	}
+	if first.Replaced {
+		t.Fatal("a fresh lease reported replacing another")
+	}
 	other := base
 	other.InstanceID = "instance-2"
 	other.SessionID = "session-2"
@@ -135,6 +138,9 @@ func TestLeaseConflictRenewalAndRelease(t *testing.T) {
 	}
 	if reconnected.TunnelID != first.TunnelID || reconnected.SessionID != "session-3" {
 		t.Fatalf("reconnect lease = %+v", reconnected)
+	}
+	if !reconnected.Replaced {
+		t.Fatal("a same-instance reconnect did not report replacing the live lease")
 	}
 	if count, err := store.RenewSessionLeases(context.Background(), "edge-test", "session-3", time.Now()); err != nil || count != 1 {
 		t.Fatalf("renew session leases = %d, %v", count, err)
