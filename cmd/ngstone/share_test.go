@@ -6,7 +6,6 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -328,12 +327,19 @@ func TestPrintSharesJSON(t *testing.T) {
 	}
 
 	buf.Reset()
-	printSharesJSON(&buf, proto.SharesOK{Group: true, Unreached: []string{"edge-b", "edge-c"}, Shares: []proto.ShareInfo{one}})
-	var wrapped struct {
-		Shares    []proto.ShareInfo `json:"shares"`
-		Unreached []string          `json:"unreached"`
+	unreached := proto.SharesOK{Group: true, Unreached: []string{"edge-b", proto.UnreachedMoreEdges}, Shares: []proto.ShareInfo{one}}
+	printSharesJSON(&buf, unreached)
+	var listed []proto.ShareInfo
+	if err := json.Unmarshal(buf.Bytes(), &listed); err != nil || len(listed) != 1 || listed[0].ShareID != "sh_1" {
+		t.Fatalf("with unreached edges stdout must still be a share array: %q, %v", buf.String(), err)
 	}
-	if err := json.Unmarshal(buf.Bytes(), &wrapped); err != nil || len(wrapped.Shares) != 1 || !reflect.DeepEqual(wrapped.Unreached, []string{"edge-b", "edge-c"}) {
-		t.Fatalf("unreached edges missing from the JSON output: %q, %v", buf.String(), err)
+	if strings.Contains(buf.String(), "+more") || strings.Contains(buf.String(), "edge-b") {
+		t.Fatalf("unreached edges leaked into stdout: %q", buf.String())
+	}
+
+	buf.Reset()
+	printUnreached(&buf, unreached)
+	if got := buf.String(); !strings.Contains(got, "edges edge-b did not answer") || !strings.Contains(got, "more edges were not queried") || strings.Contains(got, "+more") {
+		t.Fatalf("stderr notice: %q", got)
 	}
 }

@@ -1017,6 +1017,7 @@ func cmdShares(args []string) int {
 	}
 	if of.jsonOut {
 		printSharesJSON(os.Stdout, listed)
+		printUnreached(os.Stderr, listed)
 		return 0
 	}
 	printShares(os.Stdout, listed)
@@ -1026,14 +1027,28 @@ func cmdShares(args []string) int {
 func printSharesJSON(w io.Writer, listed proto.SharesOK) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	if len(listed.Unreached) == 0 {
-		enc.Encode(listed.Shares)
+	enc.Encode(listed.Shares)
+}
+
+func printUnreached(w io.Writer, listed proto.SharesOK) {
+	if !listed.Group || len(listed.Unreached) == 0 {
 		return
 	}
-	enc.Encode(struct {
-		Shares    []proto.ShareInfo `json:"shares"`
-		Unreached []string          `json:"unreached"`
-	}{listed.Shares, listed.Unreached})
+	var silent []string
+	more := false
+	for _, e := range listed.Unreached {
+		if e == proto.UnreachedMoreEdges {
+			more = true
+		} else {
+			silent = append(silent, e)
+		}
+	}
+	if len(silent) > 0 {
+		fmt.Fprintf(w, "edges %s did not answer; their shares are not shown.\n", strings.Join(silent, ", "))
+	}
+	if more {
+		fmt.Fprintln(w, "more edges were not queried; their shares are not shown.")
+	}
 }
 
 func printShares(w io.Writer, listed proto.SharesOK) {
@@ -1048,21 +1063,7 @@ func printShares(w io.Writer, listed proto.SharesOK) {
 	}
 	switch {
 	case listed.Group && len(listed.Unreached) > 0:
-		var silent []string
-		more := false
-		for _, e := range listed.Unreached {
-			if e == proto.UnreachedMoreEdges {
-				more = true
-			} else {
-				silent = append(silent, e)
-			}
-		}
-		if len(silent) > 0 {
-			fmt.Fprintf(w, "edges %s did not answer; their shares are not shown.\n", strings.Join(silent, ", "))
-		}
-		if more {
-			fmt.Fprintln(w, "more edges were not queried; their shares are not shown.")
-		}
+		printUnreached(w, listed)
 	case !listed.Group && listed.Edge != "":
 		fmt.Fprintf(w, "Shares on edge %s; other edges may hold more.\n", listed.Edge)
 	}
