@@ -441,7 +441,7 @@ func (p *peerForwarder) adminExchange(as *AgentSession, holder storage.EdgePeer,
 	switch reply.Type {
 	case proto.TypeShareOK, proto.TypeSharesOK, proto.TypeKickOK, proto.TypeShareErr, proto.TypeError:
 	default:
-		return proto.Msg{}, peerDown, errors.New("edge: unexpected admin reply " + reply.Type)
+		return proto.Msg{}, peerDown, errAdminRejected
 	}
 	ctrl.Write(proto.TypeGoodbye, adminGoodbyeID, nil)
 	return reply, peerOK, nil

@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -1604,4 +1605,54 @@ func TestForwardedAdminGate(t *testing.T) {
 			t.Fatalf("kick on an admin session = %s %s, want no_such_connector", m.Type, m.Data)
 		}
 	})
+}
+
+func TestAdminExchangeUnexpectedReplyIsRejected(t *testing.T) {
+	cl := newShareCluster(t)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		raw, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		tc := tls.Server(raw, cl.b.srv.peers.serverTLS())
+		if tc.Handshake() != nil {
+			raw.Close()
+			return
+		}
+		if _, _, _, ok := readPeerFrameHeader(tc); !ok || !writePeerStatus(tc, peerStatusAccept) {
+			tc.Close()
+			return
+		}
+		sess, err := tunnel.Server(tc)
+		if err != nil {
+			tc.Close()
+			return
+		}
+		defer sess.Close("test done")
+		ctrl := sess.Control()
+		auth, err := ctrl.Read()
+		if err != nil {
+			return
+		}
+		ctrl.Write(proto.TypeAuthOK, auth.ID, proto.AuthOK{ProtoVersion: proto.ProtoVersion})
+		req, err := ctrl.Read()
+		if err != nil {
+			return
+		}
+		ctrl.Write(proto.TypeBindOK, req.ID, proto.BindOK{})
+		ctrl.Read()
+	}()
+
+	holder := cl.b.record()
+	holder.PeerAddr = ln.Addr().String()
+	as := &AgentSession{ID: "operator", Remote: netip.MustParseAddrPort("203.0.113.9:4000"), relayToken: "ngs_token"}
+	_, outcome, err := cl.a.srv.peers.adminExchange(as, holder, proto.Msg{Type: proto.TypeListShares}, time.Now().Add(5*time.Second))
+	if !errors.Is(err, errAdminRejected) || outcome != peerDown {
+		t.Fatalf("adminExchange against a holder answering bind_ok = %v, %v, want errAdminRejected", outcome, err)
+	}
 }
