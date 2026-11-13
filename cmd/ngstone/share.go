@@ -1015,15 +1015,25 @@ func cmdShares(args []string) int {
 	if err != nil {
 		return opError(err)
 	}
-	shares := listed.Shares
 	if of.jsonOut {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		enc.Encode(shares)
+		printSharesJSON(os.Stdout, listed)
 		return 0
 	}
 	printShares(os.Stdout, listed)
 	return 0
+}
+
+func printSharesJSON(w io.Writer, listed proto.SharesOK) {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	if len(listed.Unreached) == 0 {
+		enc.Encode(listed.Shares)
+		return
+	}
+	enc.Encode(struct {
+		Shares    []proto.ShareInfo `json:"shares"`
+		Unreached []string          `json:"unreached"`
+	}{listed.Shares, listed.Unreached})
 }
 
 func printShares(w io.Writer, listed proto.SharesOK) {

@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -307,5 +309,25 @@ func TestPrintShares(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPrintSharesJSON(t *testing.T) {
+	one := proto.ShareInfo{ShareID: "sh_1", Edge: "edge-a"}
+	var buf bytes.Buffer
+	printSharesJSON(&buf, proto.SharesOK{Group: true, Shares: []proto.ShareInfo{one}})
+	var plain []proto.ShareInfo
+	if err := json.Unmarshal(buf.Bytes(), &plain); err != nil || len(plain) != 1 || plain[0].ShareID != "sh_1" {
+		t.Fatalf("without unreached edges the output stays a share array: %q, %v", buf.String(), err)
+	}
+
+	buf.Reset()
+	printSharesJSON(&buf, proto.SharesOK{Group: true, Unreached: []string{"edge-b", "edge-c"}, Shares: []proto.ShareInfo{one}})
+	var wrapped struct {
+		Shares    []proto.ShareInfo `json:"shares"`
+		Unreached []string          `json:"unreached"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &wrapped); err != nil || len(wrapped.Shares) != 1 || !reflect.DeepEqual(wrapped.Unreached, []string{"edge-b", "edge-c"}) {
+		t.Fatalf("unreached edges missing from the JSON output: %q, %v", buf.String(), err)
 	}
 }
