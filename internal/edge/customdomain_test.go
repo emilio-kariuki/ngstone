@@ -740,6 +740,14 @@ func TestAutoCertAllowedOnlyOnTerminatingEdge(t *testing.T) {
 	if s.autoCertAllowed("app.example.org") {
 		t.Fatal("remote name must not be allowed on a peered edge")
 	}
+	peeredAlice := ownedSession(t, "alice", nil)
+	if _, _, err := s.registry.BindWithOptions(BindOptions{Host: "web.example.com", Session: peeredAlice}); err != nil {
+		t.Fatalf("bind on peered edge: %v", err)
+	}
+	if !s.autoCertAllowed("app.example.org") {
+		t.Fatal("local name must be allowed on a peered edge")
+	}
+	s.registry.Unbind("web.example.com", peeredAlice)
 	s.peers = nil
 
 	mallory := ownedSession(t, "mallory", nil)
@@ -748,5 +756,31 @@ func TestAutoCertAllowedOnlyOnTerminatingEdge(t *testing.T) {
 	}
 	if s.autoCertAllowed("app.example.org") {
 		t.Fatal("owner-mismatched name must not be allowed")
+	}
+}
+
+func TestServerWiresAutoCertAllowedOnlyWithDurableStorage(t *testing.T) {
+	s := newAliasServer(t)
+	s.cfg.Domain = "example.com"
+	s.cfg.PublicAddr = "127.0.0.1:8443"
+	s.cfg.ACMEEmail = "ops@example.com"
+	s.cfg.CertStoragePath = t.TempDir()
+	s.cfg.DNSProvider = fakeDNSProvider{}
+
+	cfg := s.tlsManagerConfig()
+	if cfg.CustomDomainAllowed == nil {
+		t.Fatal("CustomDomainAllowed is not wired for a server with durable storage")
+	}
+	registerActiveDomain(t, s, "app.example.org", "web.example.com", "http", "alice")
+	if !cfg.CustomDomainAllowed("app.example.org") {
+		t.Fatal("wired CustomDomainAllowed does not consult the alias resolver")
+	}
+	if cfg.CustomDomainAllowed("unregistered.example.org") {
+		t.Fatal("wired CustomDomainAllowed allowed an unregistered name")
+	}
+
+	s.aliases = nil
+	if s.tlsManagerConfig().CustomDomainAllowed != nil {
+		t.Fatal("CustomDomainAllowed wired without durable storage")
 	}
 }
