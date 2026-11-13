@@ -24,19 +24,47 @@ func sumToken(token string) []byte {
 
 func freeTCPAddr(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("freeTCPAddr: %v", err)
+	for i := 0; i < 50; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("freeTCPAddr: %v", err)
+		}
+		addr := ln.Addr().String()
+		pc, uerr := net.ListenPacket("udp", addr)
+		ln.Close()
+		if uerr == nil {
+			pc.Close()
+			return addr
+		}
 	}
-	addr := ln.Addr().String()
-	ln.Close()
-	return addr
+	t.Fatal("freeTCPAddr: no port free on both TCP and UDP")
+	return ""
 }
 
 func waitTCPUp(t *testing.T, addr string) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", addr)
+}
+
+func waitTCPUpOrRunErr(t *testing.T, addr string, runErr chan error) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-runErr:
+			runErr <- err
+			t.Fatalf("edge Run returned before %s came up: %v", addr, err)
+		default:
+		}
 		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
 		if err == nil {
 			conn.Close()
@@ -580,5 +608,33 @@ func TestRedirectToHTTPSRejectsUnrelatedHost(t *testing.T) {
 	}
 	if loc := rec.Header().Get("Location"); loc != "" {
 		t.Fatalf("Location = %q, want empty; must not echo an unvalidated Host header into a redirect", loc)
+	}
+}
+
+func TestLimitsConfigWithDefaultsUnauthPerAddr(t *testing.T) {
+	cases := []struct {
+		name string
+		in   LimitsConfig
+		want int
+	}{
+		{"default handshake cap", LimitsConfig{}, 4},
+		{"follows the handshake cap", LimitsConfig{HandshakeConcurrency: 64}, 16},
+		{"at least one", LimitsConfig{HandshakeConcurrency: 2}, 1},
+		{"explicit value kept", LimitsConfig{UnauthPerAddr: 9}, 9},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			l, err := tc.in.withDefaults()
+			if err != nil {
+				t.Fatalf("withDefaults: %v", err)
+			}
+			if l.UnauthPerAddr != tc.want {
+				t.Fatalf("UnauthPerAddr = %d, want %d", l.UnauthPerAddr, tc.want)
+			}
+		})
+	}
+	_, err := LimitsConfig{UnauthPerAddr: -1}.withDefaults()
+	if err == nil || !strings.Contains(err.Error(), "unauth-per-addr") {
+		t.Fatalf("withDefaults(UnauthPerAddr: -1) error = %v, want one naming unauth-per-addr", err)
 	}
 }

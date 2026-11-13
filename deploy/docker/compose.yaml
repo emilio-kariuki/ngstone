@@ -37,8 +37,18 @@ services:
       # /healthz. Use "docker compose exec ngstoned /ngstoned healthcheck"
       # to check it by hand.
       - -ops=127.0.0.1:4041
+      # To issue credentials (needed for inter-edge forwarding), set
+      # NGSTONE_ADMIN_TOKEN_SHA256 in .env, use -ops=:4041 instead of the line
+      # above, and publish "127.0.0.1:4041:4041" under "ports"; see "Run with
+      # Docker" in deploy/README.md.
       # Raw TCP tunnels: uncomment, and publish the same range under "ports".
       # - -tcp-ports=10000-10100
+      # Inter-edge forwarding (PostgreSQL only): set NGSTONE_DATABASE_URL,
+      # NGSTONE_EDGE_ID and NGSTONE_PEER_ADDR in .env, leave
+      # NGSTONE_TOKEN_SHA256 empty, then uncomment this and the peer port
+      # under "ports". The edge listens on all container interfaces and
+      # advertises NGSTONE_PEER_ADDR to the other edges.
+      # - -peer-listen=:4043
 
     ports:
       - "80:8080"
@@ -46,6 +56,8 @@ services:
       - "4443:4443"
       # Raw TCP tunnel range; it must match -tcp-ports exactly.
       # - "10000-10100:10000-10100"
+      # Peer port for inter-edge forwarding; firewall it to the other edges.
+      # - "4043:4043"
 
     # Certificates and the ACME account. The image creates /data owned by
     # uid 65532, so a new named volume is writable by the container's

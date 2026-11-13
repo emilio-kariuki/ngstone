@@ -108,6 +108,22 @@ $ sudo ./deploy/install-edge.sh \\
           and <code>--tcp-ports off</code> removes it. It must lie within{" "}
           <code>1024-65535</code> and must not include <code>4443</code>.
         </Property>
+        <Property name="--quic" type="on|off" defaultValue="off">
+          Run <code>ngstoned</code> with <code>-quic</code> so agents can use{" "}
+          <code>--transport quic</code>. Opens <code>4443/udp</code> in UFW
+          and writes <code>/etc/sysctl.d/99-ngstone-quic.conf</code> with
+          larger UDP socket buffers (<code>net.core.rmem_max</code> and{" "}
+          <code>net.core.wmem_max</code> of <code>7500000</code>). A key whose
+          live value already exceeds that gets no entry, and no file is
+          written if the installer has not written one before and both
+          exceed it. Once the file exists, a rerun keeps its keys at{" "}
+          <code>7500000</code>. The installer never lowers a live value, but
+          at boot the file overrides any earlier-sorting drop-in for the
+          same key, though <code>/etc/sysctl.conf</code> or{" "}
+          <code>99-sysctl.conf</code> can still override it; edit or remove
+          its key to keep a larger persistent value. <code>off</code> removes
+          the flag, the rule and the file.
+        </Property>
         <Property name="--from-source" type="bool">
           Build <code>ngstoned</code> from the checkout with Go instead of
           downloading a release. Needed for providers other than Cloudflare
@@ -156,8 +172,9 @@ $ sudo ./deploy/install-edge.sh \\
       />
       <Callout variant="warning" title="SSH access is kept">
         The firewall option removes matching allow rules for only{" "}
-        <code>80/tcp</code>, <code>443/tcp</code>, <code>4443/tcp</code>,
-        and the TCP tunnel range if one is configured.
+        <code>80/tcp</code>, <code>443/tcp</code>, <code>4443/tcp</code>,{" "}
+        <code>4443/udp</code> if QUIC was enabled, and the TCP tunnel range
+        if one is configured.
         SSH rules and the source checkout are left in place. If another
         service uses the same allow rule, review it before selecting this
         option. Use <code>--yes</code> only for a deliberate non-interactive
@@ -275,7 +292,9 @@ $ docker compose logs -f ngstoned`}
         <code>--transport auto</code> can fall back to the authenticated
         WebSocket control endpoint on HTTPS <code>:443</code> when WebSockets
         are enabled. Use DNS-only records when forcing{" "}
-        <code>--transport raw</code> or when you want the simplest path.
+        <code>--transport raw</code> or when you want the simplest path.{" "}
+        <code>--transport quic</code> needs UDP on <code>4443</code> and
+        cannot pass through the proxy.
       </Callout>
 
       <Anchor id="dns-provider">Choosing a DNS provider</Anchor>
@@ -427,6 +446,8 @@ $ docker compose logs -f ngstoned`}
         <code>NGSTONE_DATABASE_URL=sqlite:///var/lib/ngstoned/control.db</code>
         in the unit&apos;s environment. For active/active edges, use the same
         PostgreSQL URL on every edge and a different <code>NGSTONE_EDGE_ID</code>.
+        Forwarding a connection between edges also needs{" "}
+        <code>NGSTONE_PEER_ADDR</code>.
       </p>
       <p>
         The edge reads its storage settings, token hash, ACME email, and DNS
@@ -442,6 +463,18 @@ NGSTONE_EDGE_ID=edge-a
 NGSTONE_CERT_EMAIL=you@example.com
 NGSTONE_CF_API_TOKEN=cf_fake_token_value_goes_here`}
       />
+      <p>
+        For active/active edges, point every edge at the same PostgreSQL URL
+        and add <code>NGSTONE_PEER_ADDR</code>; the edge refuses to start with
+        it on SQLite:
+      </p>
+      <CodeBlock
+        filename="/etc/ngstoned/env"
+        language="ini"
+        code={`NGSTONE_DATABASE_URL=postgres://ngstone:<password>@db.internal/ngstone?sslmode=require
+NGSTONE_EDGE_ID=edge-a
+NGSTONE_PEER_ADDR=10.0.0.11:4043`}
+      />
       <ParamTable>
         <Property name="NGSTONE_DATABASE_URL" type="env" required>
           SQLite or PostgreSQL control-plane URL. Use a shared PostgreSQL URL
@@ -449,6 +482,27 @@ NGSTONE_CF_API_TOKEN=cf_fake_token_value_goes_here`}
         </Property>
         <Property name="NGSTONE_EDGE_ID" type="env" required>
           Stable identity for this edge in connector leases and audit events.
+        </Property>
+        <Property name="NGSTONE_PEER_ADDR" type="env">
+          Private <code>&lt;ip&gt;:&lt;port&gt;</code> of this edge, set on
+          every edge that shares the PostgreSQL database. It must be an IP
+          address literal and a port; hostnames and unspecified addresses are
+          rejected. Requires PostgreSQL and is refused with{" "}
+          <code>-insecure</code>. Equivalent flag <code>-peer-addr</code>. With
+          it set, any edge forwards a tunnel&apos;s HTTPS, TLS-passthrough or
+          raw TCP connection once to the edge holding its live connector, and that
+          edge enforces every access rule using the real client address. Keep
+          the port reachable only from the other edges. Empty disables
+          forwarding.
+        </Property>
+        <Property name="NGSTONE_PEER_LISTEN" type="env">
+          Address (<code>&lt;ip&gt;:&lt;port&gt;</code> or{" "}
+          <code>:&lt;port&gt;</code>) on which this edge accepts peer
+          connections when that differs from <code>NGSTONE_PEER_ADDR</code>,
+          for example inside a container. Requires{" "}
+          <code>NGSTONE_PEER_ADDR</code>, which stays the address the other
+          edges dial. Equivalent flag <code>-peer-listen</code>. Defaults to{" "}
+          <code>NGSTONE_PEER_ADDR</code>.
         </Property>
         <Property name="NGSTONE_CREDENTIALS_FILE" type="env">
           Compatibility path to the versioned scoped credential file.
@@ -610,6 +664,11 @@ $ systemctl status ngstoned`}
           Raw control plane. Must be reachable from wherever agents run when
           using <code>--transport raw</code>; <code>--transport auto</code>{" "}
           can fall back through the public <code>:443</code> WebSocket path.
+        </Property>
+        <Property name="-quic" type="bool" defaultValue="false">
+          Also accept agent control connections over QUIC on UDP at the{" "}
+          <code>-control</code> address. Open <code>4443/udp</code>; agents
+          opt in with <code>--transport quic</code>.
         </Property>
         <Property name="-http" type="string" defaultValue=":80">
           Plain HTTP, which only issues <code>301</code> redirects to HTTPS.

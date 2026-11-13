@@ -64,6 +64,7 @@ type LimitsConfig struct {
 
 	HandshakeConcurrency int
 	UnauthSessions       int
+	UnauthPerAddr        int
 
 	PerIPInFlight     int
 	ClientIdleTimeout time.Duration
@@ -157,6 +158,12 @@ func (l LimitsConfig) withDefaults() (LimitsConfig, error) {
 	}
 	if l.UnauthSessions == 0 {
 		l.UnauthSessions = DefaultUnauthSessions
+	}
+	if l.UnauthPerAddr < 0 {
+		return l, fmt.Errorf("edge: unauth-per-addr must not be negative, got %d", l.UnauthPerAddr)
+	}
+	if l.UnauthPerAddr == 0 {
+		l.UnauthPerAddr = max(1, l.HandshakeConcurrency/4)
 	}
 	if l.PerIPInFlight < 0 {
 		return l, fmt.Errorf("edge: per-ip-inflight must not be negative, got %d", l.PerIPInFlight)

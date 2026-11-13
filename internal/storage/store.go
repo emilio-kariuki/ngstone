@@ -41,6 +41,8 @@ var (
 	ErrPolicyConflict          = errors.New("storage: traffic policy conflict")
 	ErrNotFound                = errors.New("storage: record not found")
 	ErrInvalid                 = errors.New("storage: invalid record")
+	ErrShareTaken              = errors.New("storage: share secret is registered by another owner")
+	ErrShareMoved              = errors.New("storage: share row belongs to another registration")
 	ErrHostnameKindConflict    = fmt.Errorf("%w: hostname is used by a tunnel of another kind", ErrTunnelConflict)
 	domainRE                   = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
 )
@@ -93,6 +95,18 @@ type Lease struct {
 	RenewedAt   time.Time
 	ExpiresAt   time.Time
 	Reconnected bool
+	Replaced    bool
+	prior       *replacedLease
+}
+
+type replacedLease struct {
+	id         string
+	sessionID  string
+	edgeID     string
+	acquiredAt string
+	renewedAt  string
+	expiresAt  string
+	tunnel     storedTunnel
 }
 
 type Tunnel struct {
@@ -138,20 +152,27 @@ type AuditEvent struct {
 }
 
 type CustomDomain struct {
-	ID        string    `json:"id"`
-	Domain    string    `json:"domain"`
-	TunnelID  string    `json:"tunnel_id,omitempty"`
-	OwnerID   string    `json:"owner_id"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID          string     `json:"id"`
+	Domain      string     `json:"domain"`
+	TunnelID    string     `json:"tunnel_id,omitempty"`
+	OwnerID     string     `json:"owner_id"`
+	Status      string     `json:"status"`
+	ActivatedAt *time.Time `json:"activated_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+type ActiveCustomDomain struct {
+	Domain   string
+	Hostname string
+	Kind     string
+	OwnerID  string
 }
 
 type CustomDomainSpec struct {
 	Domain   string
 	TunnelID string
 	OwnerID  string
-	Status   string
 }
 
 type TrafficPolicy struct {
@@ -226,6 +247,11 @@ func (s *Store) EdgeID() string {
 		return ""
 	}
 	return s.edgeID
+}
+
+func ResolveDriver(driver, dsn string) (string, error) {
+	resolved, _, err := resolveDatabase(driver, dsn)
+	return resolved, err
 }
 
 func resolveDatabase(driver, dsn string) (string, string, error) {
@@ -778,6 +804,7 @@ func (s *Store) acquireLeaseOnce(ctx context.Context, request LeaseRequest) (Lea
 	}
 	var tunnelID string
 	reconnected := false
+	var prior *replacedLease
 	if existing.ID == "" {
 		tunnelID, err = randomID()
 		if err != nil {
@@ -810,18 +837,20 @@ func (s *Store) acquireLeaseOnce(ctx context.Context, request LeaseRequest) (Lea
 			if existing.OwnerID != request.OwnerID {
 				return Lease{}, ErrTunnelConflict
 			}
-			var sameInstanceLease string
-			err := tx.QueryRowContext(ctx, s.bind(`SELECT id FROM connector_leases WHERE tunnel_id = $1 AND instance_id = $2 AND expires_at > $3`), tunnelID, request.InstanceID, nowString(now)).Scan(&sameInstanceLease)
+			var sameInstanceLease replacedLease
+			err := tx.QueryRowContext(ctx, s.bind(`SELECT id, session_id, edge_id, acquired_at, renewed_at, expires_at FROM connector_leases WHERE tunnel_id = $1 AND instance_id = $2 AND expires_at > $3`), tunnelID, request.InstanceID, nowString(now)).Scan(&sameInstanceLease.id, &sameInstanceLease.sessionID, &sameInstanceLease.edgeID, &sameInstanceLease.acquiredAt, &sameInstanceLease.renewedAt, &sameInstanceLease.expiresAt)
 			sameInstance := err == nil
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return Lease{}, fmt.Errorf("storage: inspect connector lease: %w", err)
 			}
 			if sameInstance {
 				reconnected = true
+				sameInstanceLease.tunnel = existing
+				prior = &sameInstanceLease
 				if (request.MultiConnector || asBool(existing.MultiConnector)) && !leaseConfigMatches(existing, request) {
 					return Lease{}, ErrConnectorConfigMismatch
 				}
-				if _, err := tx.ExecContext(ctx, s.bind(`DELETE FROM connector_leases WHERE id = $1`), sameInstanceLease); err != nil {
+				if _, err := tx.ExecContext(ctx, s.bind(`DELETE FROM connector_leases WHERE id = $1`), sameInstanceLease.id); err != nil {
 					return Lease{}, fmt.Errorf("storage: replace connector lease: %w", err)
 				}
 			} else if !(request.MultiConnector && asBool(existing.MultiConnector) && existing.OwnerID == request.OwnerID && leaseConfigMatches(existing, request)) {
@@ -848,7 +877,52 @@ func (s *Store) acquireLeaseOnce(ctx context.Context, request LeaseRequest) (Lea
 	if err := tx.Commit(); err != nil {
 		return Lease{}, fmt.Errorf("storage: commit lease: %w", err)
 	}
-	return Lease{ID: leaseID, TunnelID: tunnelID, Hostname: request.Hostname, Kind: request.Kind, RemotePort: request.RemotePort, InstanceID: request.InstanceID, SessionID: request.SessionID, EdgeID: request.EdgeID, OwnerID: request.OwnerID, AcquiredAt: now, RenewedAt: now, ExpiresAt: request.ExpiresAt, Reconnected: reconnected}, nil
+	return Lease{ID: leaseID, TunnelID: tunnelID, Hostname: request.Hostname, Kind: request.Kind, RemotePort: request.RemotePort, InstanceID: request.InstanceID, SessionID: request.SessionID, EdgeID: request.EdgeID, OwnerID: request.OwnerID, AcquiredAt: now, RenewedAt: now, ExpiresAt: request.ExpiresAt, Reconnected: reconnected, Replaced: prior != nil, prior: prior}, nil
+}
+
+func (s *Store) RestoreReplacedLease(ctx context.Context, lease Lease) (bool, error) {
+	prior := lease.prior
+	if prior == nil {
+		return false, nil
+	}
+	var txOptions *sql.TxOptions
+	if s.driver == DriverPostgres {
+		txOptions = &sql.TxOptions{Isolation: sql.LevelReadCommitted}
+	}
+	tx, err := s.db.BeginTx(ctx, txOptions)
+	if err != nil {
+		return false, fmt.Errorf("storage: begin lease restore: %w", err)
+	}
+	defer tx.Rollback()
+	if s.driver == DriverPostgres {
+		var lockedID string
+		err := tx.QueryRowContext(ctx, s.bind(`SELECT id FROM tunnels WHERE id = $1 FOR UPDATE`), lease.TunnelID).Scan(&lockedID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("storage: lock tunnel for lease restore: %w", err)
+		}
+	}
+	result, err := tx.ExecContext(ctx, s.bind(`UPDATE connector_leases SET id = $1, session_id = $2, edge_id = $3, acquired_at = $4, renewed_at = $5, expires_at = $6 WHERE id = $7 AND session_id = $8 AND edge_id = $9`), prior.id, prior.sessionID, prior.edgeID, prior.acquiredAt, prior.renewedAt, prior.expiresAt, lease.ID, lease.SessionID, lease.EdgeID)
+	if err != nil {
+		return false, fmt.Errorf("storage: restore connector lease: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("storage: restore connector lease: %w", err)
+	}
+	if affected == 0 {
+		return false, nil
+	}
+	t := prior.tunnel
+	if _, err := tx.ExecContext(ctx, s.bind(`UPDATE tunnels SET name = $1, owner_id = $2, status = $3, edge_id = $4, instance_id = $5, session_id = $6, http2 = $7, multi_connector = $8, connector_token_digest = $9, allow_cidrs_json = $10, access_json = $11, policy_id = $12, policy_digest = $13, updated_at = $14, expires_at = $15 WHERE id = $16`), t.Name, t.OwnerID, t.Status, t.EdgeID, t.InstanceID, t.SessionID, t.HTTP2, t.MultiConnector, t.ConnectorTokenDigest, t.AllowCIDRsJSON, t.AccessJSON, t.PolicyID, t.PolicyDigest, t.UpdatedAt, t.ExpiresAt, t.ID); err != nil {
+		return false, fmt.Errorf("storage: restore tunnel: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("storage: commit lease restore: %w", err)
+	}
+	return true, nil
 }
 
 func (s *Store) checkHostnameKindConflict(ctx context.Context, tx *sql.Tx, request LeaseRequest, now time.Time) error {
@@ -1314,8 +1388,8 @@ func (s *Store) DeleteTrafficPolicy(ctx context.Context, id, ownerID string) err
 }
 
 func (s *Store) CreateCustomDomain(ctx context.Context, spec CustomDomainSpec) (CustomDomain, error) {
-	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(spec.Domain), "."))
-	if !validCustomDomain(domain) {
+	domain, ok := NormalizeCustomDomain(spec.Domain)
+	if !ok {
 		return CustomDomain{}, ErrInvalid
 	}
 	ownerID := strings.TrimSpace(spec.OwnerID)
@@ -1324,26 +1398,26 @@ func (s *Store) CreateCustomDomain(ctx context.Context, spec CustomDomainSpec) (
 	}
 	tunnelID := strings.TrimSpace(spec.TunnelID)
 	if tunnelID != "" {
-		var exists int
-		ownerID = strings.TrimSpace(spec.OwnerID)
-		query := `SELECT 1 FROM tunnels WHERE id = $1`
+		var kind string
+		var remotePort int
+		query := `SELECT kind, remote_port FROM tunnels WHERE id = $1`
 		args := []any{tunnelID}
 		if ownerID != credentials.GlobalOwnerID {
 			query += ` AND owner_id = $2`
 			args = append(args, ownerID)
 		}
-		err := s.db.QueryRowContext(ctx, s.bind(query), args...).Scan(&exists)
+		err := s.db.QueryRowContext(ctx, s.bind(query), args...).Scan(&kind, &remotePort)
 		if errors.Is(err, sql.ErrNoRows) {
 			return CustomDomain{}, ErrNotFound
 		}
 		if err != nil {
 			return CustomDomain{}, fmt.Errorf("storage: inspect custom-domain tunnel: %w", err)
 		}
+		if (kind != "http" && kind != "tls") || remotePort != 0 {
+			return CustomDomain{}, ErrInvalid
+		}
 	}
-	status := strings.TrimSpace(spec.Status)
-	if status == "" {
-		status = "pending"
-	}
+	status := "pending"
 	now := time.Now().UTC()
 	id, err := randomID()
 	if err != nil {
@@ -1359,15 +1433,57 @@ func (s *Store) CreateCustomDomain(ctx context.Context, spec CustomDomainSpec) (
 	return CustomDomain{ID: id, Domain: domain, TunnelID: tunnelID, OwnerID: ownerID, Status: status, CreatedAt: now, UpdatedAt: now}, nil
 }
 
+func NormalizeCustomDomain(raw string) (string, bool) {
+	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(raw), "."))
+	if !validCustomDomain(domain) {
+		return "", false
+	}
+	return domain, true
+}
+
 func validCustomDomain(domain string) bool {
-	if domain == "" || len(domain) > 253 || strings.Contains(domain, "..") || net.ParseIP(domain) != nil {
+	if domain == "" || len(domain) > 253 || strings.Contains(domain, "..") || net.ParseIP(domain) != nil || net.ParseIP(strings.Trim(domain, "[]")) != nil {
 		return false
 	}
-	return domainRE.MatchString(domain)
+	if !domainRE.MatchString(domain) {
+		return false
+	}
+	last := domain[strings.LastIndexByte(domain, '.')+1:]
+	return strings.Trim(last, "0123456789") != ""
+}
+
+const customDomainColumns = `id, domain, COALESCE(tunnel_id, ''), owner_id, status, activated_at, created_at, updated_at`
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanCustomDomain(row rowScanner) (CustomDomain, error) {
+	var value CustomDomain
+	var activatedAt sql.NullString
+	var createdAt, updatedAt string
+	if err := row.Scan(&value.ID, &value.Domain, &value.TunnelID, &value.OwnerID, &value.Status, &activatedAt, &createdAt, &updatedAt); err != nil {
+		return CustomDomain{}, err
+	}
+	var err error
+	if activatedAt.Valid {
+		parsed, err := parseTime(activatedAt.String)
+		if err != nil {
+			return CustomDomain{}, err
+		}
+		value.ActivatedAt = &parsed
+	}
+	if value.CreatedAt, err = parseTime(createdAt); err != nil {
+		return CustomDomain{}, err
+	}
+	if value.UpdatedAt, err = parseTime(updatedAt); err != nil {
+		return CustomDomain{}, err
+	}
+	return value, nil
 }
 
 func (s *Store) ListCustomDomains(ctx context.Context, ownerID string) ([]CustomDomain, error) {
-	query := `SELECT id, domain, COALESCE(tunnel_id, ''), owner_id, status, created_at, updated_at FROM custom_domains`
+	query := `SELECT ` + customDomainColumns + ` FROM custom_domains`
 	args := []any{}
 	ownerID = strings.TrimSpace(ownerID)
 	if ownerID != credentials.GlobalOwnerID {
@@ -1382,23 +1498,67 @@ func (s *Store) ListCustomDomains(ctx context.Context, ownerID string) ([]Custom
 	defer rows.Close()
 	var out []CustomDomain
 	for rows.Next() {
-		var value CustomDomain
-		var createdAt, updatedAt string
-		if err := rows.Scan(&value.ID, &value.Domain, &value.TunnelID, &value.OwnerID, &value.Status, &createdAt, &updatedAt); err != nil {
+		value, err := scanCustomDomain(rows)
+		if err != nil {
 			return nil, fmt.Errorf("storage: scan custom domain: %w", err)
-		}
-		value.CreatedAt, err = parseTime(createdAt)
-		if err != nil {
-			return nil, err
-		}
-		value.UpdatedAt, err = parseTime(updatedAt)
-		if err != nil {
-			return nil, err
 		}
 		out = append(out, value)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("storage: list custom domains: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) SetCustomDomainStatus(ctx context.Context, id, status string) (CustomDomain, error) {
+	now := nowString(time.Now().UTC())
+	var result sql.Result
+	var err error
+	switch status {
+	case "active":
+		result, err = s.exec(ctx, `UPDATE custom_domains SET status = 'active', activated_at = $2, updated_at = $2, owner_id = (SELECT t.owner_id FROM tunnels t WHERE t.id = custom_domains.tunnel_id) WHERE id = $1 AND EXISTS (SELECT 1 FROM tunnels t WHERE t.id = custom_domains.tunnel_id AND t.kind IN ('http', 'tls') AND t.remote_port = 0 AND (custom_domains.owner_id = $3 OR t.owner_id = custom_domains.owner_id))`, id, now, credentials.GlobalOwnerID)
+	case "disabled":
+		result, err = s.exec(ctx, `UPDATE custom_domains SET status = $2, activated_at = NULL, updated_at = $3 WHERE id = $1`, id, status, now)
+	default:
+		return CustomDomain{}, ErrInvalid
+	}
+	if err != nil {
+		return CustomDomain{}, fmt.Errorf("storage: set custom domain status: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return CustomDomain{}, fmt.Errorf("storage: set custom domain status: %w", err)
+	}
+	row := s.db.QueryRowContext(ctx, s.bind(`SELECT `+customDomainColumns+` FROM custom_domains WHERE id = $1`), id)
+	value, err := scanCustomDomain(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CustomDomain{}, ErrNotFound
+	}
+	if err != nil {
+		return CustomDomain{}, fmt.Errorf("storage: read custom domain: %w", err)
+	}
+	if count == 0 {
+		return CustomDomain{}, ErrInvalid
+	}
+	return value, nil
+}
+
+func (s *Store) ActiveCustomDomains(ctx context.Context, limit int) ([]ActiveCustomDomain, error) {
+	rows, err := s.db.QueryContext(ctx, s.bind(`SELECT d.domain, t.hostname, t.kind, d.owner_id FROM custom_domains d JOIN tunnels t ON t.id = d.tunnel_id WHERE d.status = 'active' AND d.activated_at IS NOT NULL AND t.kind IN ('http', 'tls') AND t.remote_port = 0 AND t.owner_id = d.owner_id ORDER BY d.activated_at, d.domain LIMIT $1`), limit)
+	if err != nil {
+		return nil, fmt.Errorf("storage: list active custom domains: %w", err)
+	}
+	defer rows.Close()
+	var out []ActiveCustomDomain
+	for rows.Next() {
+		var value ActiveCustomDomain
+		if err := rows.Scan(&value.Domain, &value.Hostname, &value.Kind, &value.OwnerID); err != nil {
+			return nil, fmt.Errorf("storage: scan active custom domain: %w", err)
+		}
+		out = append(out, value)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("storage: list active custom domains: %w", err)
 	}
 	return out, nil
 }

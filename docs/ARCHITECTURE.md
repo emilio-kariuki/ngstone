@@ -20,7 +20,7 @@ Management drain and active connector replacement enforce the principal
 boundary. Durable leases and the in-memory registry compare access rules
 through `internal/access`; inline policy snapshots are reused by owner and
 digest without overwriting other tunnels' policies. Preview credentials bind
-one assigned hostname and cannot expand into named tunnels or pools.
+one assigned hostname and cannot expand into named tunnels or pools. Share credentials bind nothing: they may send share commands only and manage only the shares of their owner.
 Database migration v4 preserves older ownership and policy associations;
 see the coordinated upgrade procedure in [deploy/README.md](../deploy/README.md#upgrading-existing-control-plane-databases).
 
@@ -64,14 +64,14 @@ Added latency budget: one extra TCP/TLS-encrypted hop + yamux framing ≈ RTT(la
 
 ## 2. Transport: agent ↔ edge
 
-**Decision: `hashicorp/yamux` over a single TLS 1.3 TCP connection, with an authenticated WebSocket-over-TLS fallback on :443.**
+**Decision: `hashicorp/yamux` over a single TLS 1.3 TCP connection, with an authenticated WebSocket-over-TLS fallback on :443 and an opt-in QUIC carrier.**
 
 | Option | Verdict | Why rejected / accepted |
 |---|---|---|
 | **yamux over TLS TCP** | ✅ **chosen** | Symmetric stream opening (either peer can open — critical, since *the edge* initiates per-request streams toward the agent), per-stream flow control with configurable windows, built-in keepalive, ~1k LOC of battle-tested code (Nomad/Consul), zero codegen, trivial to debug. It's a dumb byte-stream multiplexer — exactly the abstraction we need, nothing we don't. (smux is equivalent; yamux wins on maintenance record and window-update semantics.) |
 | HTTP/2 streams (`x/net/http2`) | ✅ **HTTP/2 mode** | Used as a second, explicit data path for HTTP/gRPC binds. The edge opens a yamux stream, the agent serves it with `http2.Server.ServeConn`, and the local target is reached with `http2.Transport`. HTTP/1.1 remains the default for compatibility with ordinary local apps; TCP tunnels still use raw yamux streams. |
 | WebSocket + yamux fallback | ✅ **`--transport websocket` / `auto` fallback** | Uses the existing HTTPS public listener at `/_ngstone/control` to carry the same yamux byte stream through HTTP-aware networks. The WebSocket handshake requires the ngstone control subprotocol; tunnel authentication remains inside the yamux control stream. |
-| QUIC / HTTP3 (`quic-go`) | ❌ *for v1* | The genuinely tempting one: native streams, no TCP HOL blocking, connection migration. Rejected because: UDP is throttled/blocked on enough hotel/corp networks to matter for a laptop-side agent; userspace QUIC costs CPU on a small VPS; `quic-go` API churn; harder ops debugging. At single-user concurrency, TCP HOL blocking is a rounding error. The `tunnel.Session` interface (§7) is deliberately narrow so QUIC can be slotted in later as `transport=quic` without touching the control protocol. |
+| QUIC (`quic-go` v0.61.0) | ✅ **opt-in `--transport quic` / edge `-quic`** | Not a replacement for the yamux session: QUIC only replaces the carrier. The unchanged yamux session runs over exactly one bidirectional QUIC stream (ALPN `ngstone-quic-1`), so the control protocol and `tunnel.Session` (§7) are untouched and QUIC's own stream multiplexing is unused. Off by default, never part of `auto`, never falls back: UDP is throttled or blocked on enough hotel/corp networks that a silent switch would hide failures. The edge listens on UDP at the same address and port as `-control`, forces every connection through address validation (Retry, and NEW_TOKEN tokens also validate the address), shares the TCP handshake, unauthenticated-session and per-address unauthenticated caps, closes a connection that has not authenticated no later than one `authDeadline` (5 s) after admission, as TCP does, and holds its unauthenticated slot until the connection is actually closed, keeps the connection receive window at 64 KiB until the agent authenticates, disables 0-RTT and datagrams, and allows one incoming stream. The agent binds its QUIC socket to the source address of the route to the edge, so a local address change ends the session and the agent reconnects. It needs managed certificates or insecure mode (a caller-supplied public TLS config is rejected). |
 
 **Mechanics:**
 
@@ -87,7 +87,7 @@ Added latency budget: one extra TCP/TLS-encrypted hop + yamux framing ≈ RTT(la
 - **Head-of-line blocking.** Exists at the TCP layer (one lost packet stalls all streams for one RTT). Accepted: single user, a handful of concurrent requests. The session-level keepalive prevents a *stalled* connection from lingering.
 - **Keepalive & dead peers.** yamux `EnableKeepAlive: true, KeepAliveInterval: 10s, ConnectionWriteTimeout: 45s`. The write timeout is deliberately **not** 10 s: in yamux, `ConnectionWriteTimeout` is a whole-session kill switch guarding *every* data send (`waitForSendErr`/`sendNoWait`), not a keepalive knob. At 10 s, a saturated uplink or flaky hotel wifi during one large download would trip `ErrConnectionWriteTimeout` and kill the entire session — every tunnel, every in-flight request — presenting as "tunnel randomly drops under load". 45 s keeps the kill switch for genuinely wedged connections while liveness comes from pings, not from data-write stalls; the yamux shutdown error is logged verbatim so a write-timeout death is distinguishable from a real disconnect. Belt-and-suspenders app-level `ping` on the control stream every 15 s (§3) detects a wedged agent *process* whose kernel still ACKs.
 - **Reconnect with in-flight requests.** Requests in flight when the session dies **fail fast**: edge streams error, ReverseProxy returns `502` with a small branded error page. We deliberately do **not** replay them from the edge — the edge cannot know a request is idempotent (a `POST /charge` replay is worse than a 502). The agent reconnects with decorrelated-jitter backoff (500 ms → 30 s cap), re-authenticates, and re-issues `bind` for its tunnel; the public URL is identical after recovery. Users who want retry get it from their HTTP client, where idempotency is knowable.
-- **Transport fallback.** `--transport auto` tries raw TLS on the configured control address first. A dial, TLS, yamux setup, or pre-bind handshake failure then gets one WebSocket/TLS attempt on port `443`; explicit `raw` and `websocket` modes disable the other path. QUIC is intentionally deferred until a later transport mode.
+- **Transport fallback.** `--transport auto` tries raw TLS on the configured control address first. A dial, TLS, yamux setup, or pre-bind handshake failure then gets one WebSocket/TLS attempt on port `443`; explicit `raw` and `websocket` modes disable the other path. `quic` is a separate explicit mode and is never tried by `auto`.
 
 ---
 
@@ -208,7 +208,7 @@ type StreamOpen struct {
 }
 ```
 
-**Raw TCP tunnels.** `Bind{Kind:"tcp", …}` returns an allocated port in `BindOK`, and `StreamOpen{Kind:"tcp"}` is followed by raw bytes; `ClientAddr` carries what XFF cannot. Allocation is per-tunnel from the operator-configured `-tcp-ports` range (`internal/edge/tcpmanager.go`): a specific port can be requested, or the edge picks the first free one in range. The edge binds each allocated port directly on `-tcp-bind` — a real listener, not routed through the `:443` reverse proxy or any front proxy in front of it — so the range needs its own firewall opening. There is no TLS termination for `Kind:"tcp"`: it's raw pass-through end to end, so the tunneled protocol is only as encrypted as it makes itself. Each TCP connection reuses the same per-session stream-acquisition cap (`tryAcquireStream`) and `inflight` drain accounting that HTTP streams use (§5), so a TCP tunnel counts against the same per-session concurrency budget as HTTP requests. The feature is off entirely unless `-tcp-ports` is set. Native gRPC and h2c are available through the explicit HTTP/2 mode on HTTP binds; TCP remains protocol-agnostic raw pass-through.
+**Raw TCP tunnels.** `Bind{Kind:"tcp", …}` returns an allocated port in `BindOK`, and `StreamOpen{Kind:"tcp"}` is followed by raw bytes; `ClientAddr` carries what XFF cannot. Allocation is per-tunnel from the operator-configured `-tcp-ports` range (`internal/edge/tcpmanager.go`): a specific port can be requested, or the edge picks the first free one in range. A requested port that another tunnel already holds resolves by the same identity rules as a subdomain (§3, below), with `port_unavailable` in place of `subdomain_taken`; a successful takeover hands the existing listener and its accept loop to the new session rather than closing and re-listening, so the port is never free for another process to grab in between, and connections the old session was already relaying stay with it until it is released. The agent sends `Takeover:true` for TCP binds too and, when the user did not pass `--remote-port`, remembers the port from its last `BindOK` and requests it again on reconnect, so the advertised `tcp://host:port` survives a sleep or partition. If that remembered port has meanwhile gone to someone else (`port_unavailable`), the agent forgets it and rebinds with port `0` in the same handshake — it comes up on a new port rather than retrying for one it will not get back; an explicit `--remote-port` is never silently moved. An auto-assigned HTTP or TLS name is remembered and re-requested the same way, and falls back to a random one on `subdomain_taken` or `kind_conflict`; a preview credential, which is bound to a server-assigned name, stops remembering after its first `credential_scope` refusal and keeps that name. The edge binds each allocated port directly on `-tcp-bind` — a real listener, not routed through the `:443` reverse proxy or any front proxy in front of it — so the range needs its own firewall opening. There is no TLS termination for `Kind:"tcp"`: it's raw pass-through end to end, so the tunneled protocol is only as encrypted as it makes itself. Each TCP connection reuses the same per-session stream-acquisition cap (`tryAcquireStream`) and `inflight` drain accounting that HTTP streams use (§5), so a TCP tunnel counts against the same per-session concurrency budget as HTTP requests. The feature is off entirely unless `-tcp-ports` is set. Native gRPC and h2c are available through the explicit HTTP/2 mode on HTTP binds; TCP remains protocol-agnostic raw pass-through.
 
 **TLS passthrough tunnels.** `Bind{Kind:"tls", Subdomain, AllowCIDRs}` claims `<subdomain>.<domain>` (or a server-assigned name) in the same `Registry` as HTTP binds, flagged as passthrough, and `BindOK.URL` is `tls://<hostname>` (with the public port when it is not 443). Basic auth, OIDC visitor login, webhook verification, traffic policies, HTTP/2, multiple connectors and `RemotePort` are rejected with `invalid_access`, because the edge never sees the plaintext. A hostname belongs to one kind at a time: an HTTP bind over a live `tls` binding, or the reverse, is refused with `kind_conflict` (also reported by durable storage, where `http` and `tls` leases share one hostname namespace). Each accepted connection becomes `StreamOpen{Kind:"tls", Host, ClientAddr}` followed by the raw client bytes, starting with the replayed ClientHello; the agent reuses its TCP pipe to dial the local address and splice. See §5 for the listener.
 
@@ -219,8 +219,8 @@ type StreamOpen struct {
 - **Reply correlation (frozen in M0):** a reply carries the **same `Msg.ID` as the request it answers** — `AuthOK` echoes `Auth`'s ID, `BindOK` echoes `Bind`'s, `Pong` echoes `Ping`'s. The odd/even per-direction ID spaces exist *only* so both peers can **initiate** without colliding; they do not apply to replies. Minting a fresh ID for a reply would leave the requester correlating by arrival order, which breaks the moment two requests are in flight.
 - **Versioning:** single integer protocol major. Client offers a set, server picks the max intersection in `AuthOK`. Additive JSON fields never bump the version (unknown fields are ignored); semantic changes do. v1 ships as `1`. Within a negotiated version, an unknown `Msg.Type` or malformed frame on the control stream gets a generic `Error{unknown_type|malformed}` and then session close — never a silent ignore.
 - **Auth:** first message must be `Auth` within 5 s of TLS establishment or the edge closes the conn. In scoped-credential mode, the edge validates the opaque token against the versioned credential file, enforces its exact HTTP or TLS subdomain, or TCP-port, scope, and rechecks expiry/revocation on each heartbeat. The legacy mode uses `subtle.ConstantTimeCompare` against the SHA-256 of the configured shared token. Failures are logged with source IP and rate-limited (max 5 auth attempts / IP / minute).
-- **Subdomain assignment & conflict — takeover is authorized by identity, not liveness.** Names validated as `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`, denylist `{www, mail, ns1, ns2, admin, api-edge}`. A normal binding records one holder's `Auth.InstanceID`; **(a)** the same instance reconnecting past a half-open zombie takes over immediately, **(b)** a different instance can take over a dead holder, and **(c)** a different live instance gets `BindErr{subdomain_taken}`. A bind with `MultiConnector:true` must name an explicit subdomain and include a SHA-256 digest of a shared, high-entropy connector secret. The first connector creates a pool and later connectors with the same flag join it only when the token digest, HTTP/2, access-control, and traffic-policy settings match. The secret is read from an environment variable (the project file stores only that variable's name) and never sent over the control protocol; only its digest crosses the wire. A connector with the same `InstanceID` replaces only its previous pool member. Removing one member unroutes no other member: new requests stop selecting it while its in-flight requests drain. Mixing pooled and normal binds returns `connector_config_mismatch`.
-- **Dead-peer detection:** transport layer — yamux keepalive ping every 10 s, with `ConnectionWriteTimeout: 45s` as the session kill switch (§2 — it guards all sends, so it must not be tight); application layer — control-stream `Ping` every 15 s, 3 consecutive misses (45 s) → session torn down, bindings released. Connector selection also excludes sessions outside that heartbeat health window before opening new streams. Both layers converge on ≈45 s worst-case detection; rule (a) above means the *owner's own* recovery never waits on it.
+- **Subdomain assignment & conflict — takeover is authorized by identity, not liveness.** Names validated as `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`, denylist `{www, mail, ns1, ns2, admin, api-edge}`. A normal binding records one holder's `Auth.InstanceID`; **(a)** the same instance reconnecting past a half-open zombie takes over immediately, **(b)** a different instance can take over a dead holder, and **(c)** a different live instance gets `BindErr{subdomain_taken}`. The agent sends `Takeover:true` for HTTP, TLS and TCP binds. Raw TCP ports follow the same three rules (`tcpManager.bind`), with one prerequisite: the holder and the requester must belong to the same credential owner first, as for subdomains. Rule (c) answers `BindErr{port_unavailable}`, and the `Evicted.hostname` sent to the old session is the `tcp://host:port` URL. A bind with `MultiConnector:true` must name an explicit subdomain and include a SHA-256 digest of a shared, high-entropy connector secret. The first connector creates a pool and later connectors with the same flag join it only when the token digest, HTTP/2, access-control, and traffic-policy settings match. The secret is read from an environment variable (the project file stores only that variable's name) and never sent over the control protocol; only its digest crosses the wire. A connector with the same `InstanceID` replaces only its previous pool member. Removing one member unroutes no other member: new requests stop selecting it while its in-flight requests drain. Mixing pooled and normal binds returns `connector_config_mismatch`.
+- **Dead-peer detection:** transport layer — yamux keepalive ping every 10 s, with `ConnectionWriteTimeout: 45s` as the session kill switch (§2 — it guards all sends, so it must not be tight); application layer — control-stream `Ping` every 15 s, 3 consecutive misses (45 s) → session torn down, bindings released. Connector selection also excludes sessions outside that heartbeat health window before opening new streams. Both layers converge on ≈45 s worst-case detection; rule (a) above means the *owner's own* recovery never waits on it. Over QUIC the yamux and control-ping layers still run, but a `kill -9` of one peer gives no reset on UDP, so QUIC sends a keep-alive every 5 s and drops the connection after a 15 s `MaxIdleTimeout`: a peer that vanishes without closing (crash, power loss) is detected within about 20 s, compared with immediately for a killed process over TCP (the kernel resets the connection) and up to 45 s for a silent TCP path (partition). A graceful shutdown (`Goodbye`, SIGTERM) is noticed at once on every transport.
 - **Graceful shutdown:** on SIGTERM the agent sends `Goodbye{drain_ms:15000}` (fire-and-forget, see schema note), the edge immediately unroutes its hostnames (new requests → 404), then waits on that session's in-flight accounting — a per-session `sync.WaitGroup` (§5), not guesswork — racing a 15 s timer, then closes. Edge shutdown mirrors it: `Goodbye` to all agents, unroute, drain, `http.Server.Shutdown`.
 
 ---
@@ -239,7 +239,7 @@ type StreamOpen struct {
   - **Pin `certmagic` and every `libdns/*` provider to exact versions.** The libdns v1 interface migration (`libdns.RR`) versus certmagic's expected provider interface is a live, recurring source of "it compiled last month" breakage. This is the one dependency pair in the project where a `go get -u` can take the edge down.
 - **Control-plane TLS (:4443):** served by the **apex** cert (`ngstone.site`), a different certificate from the public wildcard, via `tls.Config.GetCertificate`. Agents connect to `ngstone.site:4443`.
 - **Agent-side verification:** standard WebPKI validation (`ServerName: "ngstone.site"`, system roots). **Optional SPKI pin** (`--pin sha256/BASE64`) checked in `VerifyPeerCertificate` *in addition to* chain validation; off by default because pins + auto-renewing certs is a footgun (pin the *key* and reuse it across renewals via certmagic's key reuse if enabled — document loudly).
-- **Agent authentication is a short-lived, per-tunnel bearer credential,** not client certs. The credential file stores only token hashes and can revoke each tunnel independently. The management API supports OIDC browser sessions with group-mapped team roles; mTLS team authentication remains a later extension because it would add a private CA, issuance, and rotation ceremony without replacing the need for scoped tunnel authorization.
+- **Agent authentication is a short-lived, per-tunnel bearer credential,** not client certs. The credential file stores only token hashes and can revoke each tunnel independently. The management API supports OIDC browser sessions with group-mapped team roles; Team members and automation can also reach the management API through a separate, opt-in mTLS listener (`NGSTONE_ADMIN_MTLS_ADDR` with `NGSTONE_ADMIN_MTLS_CLIENT_CA`). On that listener the client certificate is the only authentication: bearer tokens, OIDC cookies, and the loopback bypass are ignored. The certificate must chain to a CA dedicated to ngstone management and carry the clientAuth extended key usage. The role comes from the certificate's `OU` (`admin`, `operator`, or `viewer`) and the audit and ownership principal is `mtls:<cn>` from the `CN`. There is no revocation list: certificates must be short-lived (the hard cap is 30 days; 1-7 days is recommended), and the emergency path is replacing the CA file and restarting every edge. Cross-origin state-changing requests are rejected. Agents still authenticate with scoped per-tunnel credentials; the client certificate never authorizes a tunnel.
 
 Token hygiene: issue with `ngstone credentials issue` on the edge host, save the printed token via `ngstone auth <token>`, and keep the token file mode `0600`. The edge stores only the SHA-256 in `NGSTONE_CREDENTIALS_FILE`; the plaintext token never lives on the VPS disk. `NGSTONE_TOKEN_SHA256` remains a legacy migration path.
 
@@ -322,7 +322,7 @@ in `internal/storage`, backed by SQLite by default and PostgreSQL when
 | `credentials` | scope, owner, token hash, expiry, revocation | plaintext token is never persisted |
 | `connector_leases` | instance, session, edge, renewal and expiry | active lease required to serve; expired leases are reclaimable |
 | `traffic_policies` | owner, name, normalized JSON, digest | policy digest is persisted with the tunnel |
-| `custom_domains` | domain, owner, tunnel association, status | unique domain registration |
+| `custom_domains` | domain, owner, tunnel association, status (`pending`, `active`, `disabled`), activation time | unique domain registration; only `active` rows with a matching tunnel owner route |
 | `audit_events` | edge, actor, action, resource, metadata, timestamp | append-only operational history |
 
 An HTTP, TLS, or TCP bind claims a database lease before entering the local
@@ -338,10 +338,152 @@ The file-backed credential store and `NGSTONE_TOKEN_SHA256` remain compatibility
 paths for existing single-edge deployments. They do not provide durable tunnel
 ownership or active/active coordination and should not be used for a cluster.
 
-Durable ownership is not inter-edge data forwarding. A public request still
-has to arrive at the edge whose local registry contains the connector. A
-shared database therefore needs a compatible load-balancer or DNS strategy
-until an inter-edge forwarding layer is introduced.
+#### Inter-edge forwarding
+
+When `NGSTONE_PEER_ADDR` is set (PostgreSQL only, never `-insecure`), each edge
+registers its peer address and SPKI pin in `edge_peers` and listens for peers
+on that address; when `NGSTONE_PEER_LISTEN` is set the listener binds it
+instead, and the edge always advertises `NGSTONE_PEER_ADDR`. A public
+connection reaching an edge without the connector is forwarded in one hop:
+
+1. The SNI router peeks the ClientHello and finds no local route.
+2. The edge looks up the live owners of the hostname in storage (every edge
+   holding a live lease, ordered by edge id, at most 8), through short-lived
+   owner, miss and peer-down caches, and picks the first that is not marked
+   down. Lookups are coalesced per hostname, and a global cap bounds the
+   concurrent database queries, not the waiters.
+3. It dials the owner over TLS 1.3 with mutual authentication, ALPN
+   `ngstone-peer-3` (or `ngstone-peer-2`, `ngstone-peer-1`), no session resumption, and the
+   peer's certificate pinned to the SPKI hash stored in `edge_peers`.
+4. It writes, in one write, the frame: for `ngstone-peer-2` and `ngstone-peer-3` a type byte
+   (`0x01` SNI, `0x02` TCP followed by a big-endian port, `0x03` control, and on
+   peer-3 only `0x04` admin), then
+   a PROXY v1 line carrying the real client address, then the buffered
+   ClientHello. `ngstone-peer-1` omits the type byte and carries SNI
+   connections only.
+5. The owner reads the frame, classifies the connection as forwarded, and
+   answers with one status byte: accept or not-owner. On accept both sides
+   splice bytes. A forwarded connection is never forwarded again.
+
+The two hop protocols are negotiated by ALPN, and the owner dispatches on the
+negotiated protocol, never on the first byte. Peer-2 carries the frame type so
+TCP and control targets can share the hop; the owner answers not-owner to
+control frames and to TCP frames for a port it does not own or is not
+configured for, and closes on any other type. Peer-1
+remains accepted so edges can be upgraded one at a time: an ingress that
+would need a peer-2 frame skips a peer-1 owner without marking it down and
+counts it in `ngstoned_peer_version_skew_total`.
+
+Peer-3 adds the admin frame (`0x04`, a PROXY v1 line carrying the operator's
+real address and an empty payload), used to manage a share held by another
+edge. After the accept status both sides run yamux, and the ingress is the
+yamux client: it sends `auth` with the operator's token, then exactly one
+request (`share_update`, `kick` or `list_shares`), reads the reply and says
+goodbye. The holder authenticates the token itself as a normal operator
+session, accepts token authentication only (an `auth` carrying a share secret
+is malformed), keys its auth rate limiter on the operator address from the
+PROXY line, and flags the session so that only `share_update`, `kick`,
+`list_shares`, `ping`, `pong` and `goodbye` are served and nothing is forwarded
+again. A peer-2 owner never receives a 0x04 frame and closes one without a
+status byte if it ever does.
+
+| Ingress | Owner | Behaviour |
+|---|---|---|
+| peer-3 | peer-3 | Admin frames work. |
+| peer-3 | peer-2 or peer-1 | The ingress does not send an admin frame, counts it in `ngstoned_peer_version_skew_total`, and tells the operator the holder "runs an older ngstoned". A list shows the edge as not answering. |
+| peer-2 or peer-1 | peer-3 | The owner negotiates the lower protocol; SNI, TCP and control frames work as before and no admin frames are sent. |
+
+An admin call has a 3 second budget in total. A list asks at most 32 edges, 4
+at a time, and reports the edges that missed the budget. The ingress edge holds
+the operator's token in memory for the life of the operator session, only for
+the legacy token or a `share` credential, and never logs it.
+
+Two 421 rules apply when forwarding is enabled: a route miss on a forwarded
+connection, and a route miss on a TLS connection whose SNI differs from the
+Host header, both return 421. The 421 makes the client retry on a new
+connection, whose SNI then routes it to the right edge; a request whose Host is
+bound on the edge it reached is served under that host's own access rules.
+
+Failure behaviour: a not-owner answer or a failed handshake means the cached
+owners are stale, so the ingress drops the cache entry, resolves again and
+retries once against the first candidate that is not marked down and is not the
+identical registration (same edge, address and pin) that just failed, so a stale
+pin or a moved tunnel is retried once against the refreshed registration. A TCP dial failure marks the peer address down for a short time and moves to
+the next candidate; when none is left, the ingress resolves once more if the
+cached entry was resolved before that failure or is older than the down
+window, and otherwise closes without a lookup. If owners exist but none is
+reachable the connection is closed; only a hostname with no live owner in
+storage gets the normal 404. A storage error closes the connection and is
+never cached as a miss, so with forwarding enabled a database outage closes
+connections for tunnel hostnames not bound on the receiving edge, where a
+single edge would answer 404. The router checks the per-IP rate limit once for
+every connection before the owner lookup or any dial.
+
+Operating limits: the peer port accepts at most 64 concurrent handshakes with
+a 5 second deadline and has no per-source limit, so it must be reachable only
+from other edges. A forwarded connection holds one of the client address's
+in-flight slots on the ingress edge for its lifetime and closes after the TCP
+idle timeout (30 minutes by default) of silence in both directions. An ingress
+edge carries at most 1024 concurrent forwarded connections. Edge clocks must
+agree to within about two thirds of the lease TTL (30 s with the default TTL);
+beyond that, peer registrations look expired and forwarding fails closed. Once
+the owner side closes or half-closes its sending direction, the ingress closes
+the client's side five seconds later; a TLS-passthrough backend or a raw TCP
+tunnel that half-closes while still reading sees the client's upload cut after
+five seconds when reached through another edge. Each edge
+needs a distinct `NGSTONE_EDGE_ID`; two edges with the same id overwrite each
+other's registration. Pins carry the registration expiry, so a pin whose row
+expired or was deleted stops being accepted once its cached expiry passes,
+even while storage is unreachable.
+
+Raw TCP tunnels: each edge with forwarding and `-tcp-ports` enabled polls
+storage every two seconds for live TCP leases held by other edges whose port
+falls in its own range, and opens a proxy listener on `-tcp-bind` for each
+(at most 1024, retrying a failed bind after 30 seconds). A connection to a
+proxy listener is forwarded as a peer-2/peer-3 TCP frame carrying the port and the real
+client address; the owner looks the port up locally and never forwards it
+again, and applies allow-CIDR, rate limits and in-flight limits to that client
+address. A requested bind for the same port on the owner closes its proxy
+listener, and auto-allocation skips ports held by proxy listeners. If storage
+stays unreachable for longer than the lease TTL the proxy listeners are closed.
+A port outside an edge's range, or one it cannot bind, is not served by that
+edge, so every edge should use the same range. When the agent holding a port
+reconnects to another edge, that edge takes the lease; the old edge evicts its
+local session at its next poll and then proxies the port to the new owner. A
+different agent instance waits until the old lease is released or expires.
+A client sees up to two seconds of connection refused after the move, and up
+to 30 seconds if the proxy listener bind fails.
+
+Trust model: peers are trusted only through pins in the shared database, so
+write access to that database grants peer status. The owner accepts a
+forwarded client address only on a connection that completed the pinned mutual
+handshake. Connections with no SNI
+or a ClientHello over 16 KiB are not forwarded. Custom domains are forwarded
+(see Custom domains below).
+
+Share links are forwarded as control frames: an edge that does not hold a
+connector's share finds the holding edge in the `share_directory` table (a
+domain-separated key, share id, edge id, owner id, expiry and revoked flag) and
+passes the raw control bytes over the peer hop, and the holding edge
+authenticates the connector with its real address. A share secret registered by
+another owner is refused, and `unshare` from any edge revokes the row for the
+owner. The ingress releases its unauthenticated-session slot (and, for QUIC,
+opens flow control and cancels the hard stop) only after the holder's first
+control message is `auth_ok`.
+
+### Custom domains
+
+A `custom_domains` row maps an externally owned name to one HTTP or TLS tunnel. Rows start `pending`; only an administrator moves one to `active` (which stamps `activated_at` and re-takes the tunnel owner) or `disabled`. `ActiveCustomDomains` joins each row to its tunnel and returns it only when the status is `active`, `activated_at` is set, the tunnel is `http` or `tls` with no remote port, and the tunnel owner equals the domain owner.
+
+Resolution never touches storage on the public path. Each edge loads every active row with `ActiveCustomDomains` (at most 10,000, ordered by activation time and then domain, so the most recently activated domains are the ones left out when the limit is exceeded) into an in-memory snapshot, once before the listeners start and then every 5 s. A name that is not the edge domain, a subdomain of it, or the visitor-login host is looked up in that snapshot only, so a random-host flood costs no storage queries. A failed load keeps the previous snapshot until it is older than the lease TTL, then empties it, so an edge that cannot read the database stops routing custom domains. The edge that handled an admin status change or delete refreshes its own snapshot immediately if it can read the database, otherwise at its next poll; other edges converge within one poll interval. Over the limit, activation still returns `active`, the omitted domains are not routed, and the edge logs a warning when it crosses the limit (and an info line when it returns under it); `ngstoned_custom_domains_active` pinned at 10000 while the database holds more active rows is the other signal. In that window a stale edge may forward a connection that the owner, whose snapshot already dropped the name, refuses; the visitor sees a closed connection. The binding's live owner is compared on every route.
+
+HTTP requests are routed to the tunnel's binding with `Host` left as the custom name; the binding's owner must equal the domain's owner or the request is refused. A tunnel with a visitor-login rule answers 403, since the sign-in flow is tied to the edge domain. For TLS tunnels, the SNI router resolves the custom name the same way and splices to the agent without terminating TLS.
+
+HTTP tunnels need an edge certificate for the name. `-custom-certs` points at a directory of `<name>.crt`/`<name>.key` pairs; `New` validates the whole directory (permissions, expiry, key match, reserved and overlapping names, duplicates, a common name that is empty or one of the DNS names, no IP, e-mail or URI names) before any listener opens and before certificate management starts, and `Run` caches each pair as an unmanaged certmagic certificate without OCSP stapling. Any problem stops the edge. Operator certificates are per edge and read once at start-up.
+
+Without an operator certificate, an active HTTP custom domain gets one on demand. A dispatcher in front of certmagic sends edge-domain names to the managed config, refuses any name the in-memory alias snapshot does not allow on this edge (local tunnel, or no peering and tunnel offline; never `tls` kind) without touching storage, and sends allowed names to an on-demand config whose decision function repeats the same check. Issuance uses TLS-ALPN-01 only; the validation hello is routed like any visitor, so the edge holding the tunnel answers it. `acme-tls/1` is offered in ALPN only when this is enabled. Orders are limited to one per name per 15 minutes and a global 20-burst, 1-per-2-min budget for new names. On-demand certificates renew on handshake and are not renewed once the domain is no longer allowed.
+
+An edge that does not hold the binding forwards the connection to the owning edge (`peerForwarder`) after resolving the alias locally. The owner repeats the alias resolution, refuses a name that is not bound to a local tunnel of the same owner, and serves it. A random-host flood therefore costs no storage query and never an owner lookup, since an unresolved name is not eligible for forwarding. Any operator can register a name and hold it `pending`; the real owner gets a conflict until an administrator deletes the row.
 
 ### Public-side protocol handling
 
@@ -381,6 +523,10 @@ The listener chain is `net.Listener` → PROXY protocol (when enabled) → SNI r
 | **Peak tunnel buffering** | 64 × 1 MiB = **64 MiB** per side | the largest buffer in the system |
 | :4443 concurrent TLS handshakes | 16 | unauthenticated handshake flood |
 | :4443 unauthenticated sessions | 32 | slow-auth session hoarding |
+| :4443 unauthenticated sessions per client address | a quarter of the handshake cap, 4 by default and at least 1 (`-unauth-per-addr`); IPv4 address or IPv6 /48, shared by TCP, QUIC, WebSocket and forwarded control (original client address); four addresses (or /48s) can still fill the handshake cap; refusals are silent apart from `ngstoned_rejected_unauth_per_addr_total` | one address filling the global unauthenticated cap |
+| QUIC handshake idle (client / edge) / max idle timeout / keep-alive | 10 s / 2.5 s / 15 s / 5 s | stalled handshakes; vanished peers. The client wait covers the Retry round trip plus the first handshake flight; a round trip above about 4.5 s cannot connect over QUIC. Agents older than this release wait 5 s and are limited to about 2.5 s. The agent's whole QUIC dial gets 20 s, so with UDP blocked a literal address fails after 10 s and a dual-stack name (IPv4 then IPv6) after up to 20 s; with more than two records the 20 s may run out after the first two |
+| QUIC unauthenticated lifetime from admission | closed no later than one `authDeadline` (5 s) after admission; the slot is held until the connection closes | silent connections hoarding an unauthenticated slot |
+| QUIC connection receive window before auth / after | 64 KiB / up to 1 MiB | unauthenticated memory use |
 
 **The window budget is the real memory ceiling.** yamux allocates a receive buffer per stream that can grow to `MaxStreamWindowSize`. At the original numbers — 1 MiB windows × 512 global in-flight — that is **512 MiB per session, on both the VPS and the laptop**, dwarfing everything else and invalidating §9.7's "every buffer has a cap" and §6's ~100 MiB figure as system-level claims. It appeared nowhere in the original table. Resolution: keep the 1 MiB window (it is what makes single-stream throughput tolerable at 100 ms RTT) and **cut global in-flight to 64**, giving a stated 64 MiB peak. For a single-user tunnel, 64 concurrent in-flight requests is generous; if you ever need more, the trade is explicit — drop to the 256 KiB default window and raise the cap.
 
@@ -510,14 +656,14 @@ ngstone/
 └── Makefile                        # build, test, cross-compile linux/amd64, deploy scp target
 ```
 
-**Dependency budget (exhaustive):** `hashicorp/yamux`, `caddyserver/certmagic` + the vetted `libdns/*` providers in `dnsprovider.go` (**all pinned to exact versions** — §4), `golang.org/x/time/rate`, `golang.org/x/sync/errgroup` + `semaphore`, `hashicorp/golang-lru/v2` (the per-IP limiter's 10k-entry LRU — an earlier draft called the list exhaustive while quietly needing this), `oklog/ulid/v2`. Everything else is stdlib (`net/http`, `httputil`, `crypto/tls`, `compress/gzip`, `log/slog`, `embed`, `expvar`).
+**Dependency budget (exhaustive):** `hashicorp/yamux`, `caddyserver/certmagic` + the vetted `libdns/*` providers in `dnsprovider.go` (**all pinned to exact versions** — §4), `quic-go/quic-go` (opt-in QUIC control transport, pinned to v0.61.0), `golang.org/x/time/rate`, `golang.org/x/sync/errgroup` + `semaphore`, `hashicorp/golang-lru/v2` (the per-IP limiter's 10k-entry LRU — an earlier draft called the list exhaustive while quietly needing this), `oklog/ulid/v2`. Everything else is stdlib (`net/http`, `httputil`, `crypto/tls`, `compress/gzip`, `log/slog`, `embed`, `expvar`).
 
 > `ulid`'s monotonic entropy reader is **not goroutine-safe**. IDs are minted concurrently on both the edge (per request) and the agent (per exchange), so wrap it in `ulid.LockedMonotonicReader` — or accept torn IDs under load, which is exactly the kind of bug that only shows up in the artifact you use to debug other bugs.
 
 ### Core interfaces & structs (the load-bearing five)
 
 ```go
-// internal/tunnel/session.go — the transport seam (yamux today, QUIC someday)
+// internal/tunnel/session.go — the transport seam (yamux over TCP, WebSocket or one QUIC stream)
 type Session interface {
     // OpenStream opens a data stream and writes the preamble. Edge-side hot path.
     // ctx is honored by us, NOT by yamux: see §2 — the open runs in a goroutine and
@@ -560,13 +706,13 @@ func (s *Store) Subscribe(ctx context.Context) <-chan *Exchange
 
 | Failure | Detection | Handling |
 |---|---|---|
-| **Agent process dies mid-request** | Stream read/write error on edge (session RST) | In-flight requests → `502` error page immediately; session `Done()` fires; `ReleaseSession` **compare-and-deletes** hostnames (§5) → subsequent requests get the cheap `404`. No replay (§2). A restarted agent gets a *new* `InstanceID`, so it reclaims its name via the dead-holder rule, not the same-identity rule. |
+| **Agent process dies mid-request** | Stream read/write error on edge (session RST) | In-flight requests → `502` error page immediately; session `Done()` fires; `ReleaseSession` **compare-and-deletes** hostnames (§5) → subsequent requests get the cheap `404`. No replay (§2). A restarted agent gets a *new* `InstanceID`, so it reclaims its name via the dead-holder rule, not the same-identity rule. A restarted agent remembers nothing, so a TCP tunnel without `--remote-port` gets a new port. |
 | **Edge restarts** (deploy, OOM, reboot) | Agent's control read / keepalive errors | All state rebuilt by clients: agent backoff-reconnects, re-`Auth`s, re-`Bind`s with `Takeover:true` → same URL, typically < 2 s downtime with `systemd Restart=always`. Certs come from the `StateDirectory` cache — **provided the systemd unit is correct** (M3); get it wrong and every restart re-issues against LE rate limits. |
-| **Network partition** (laptop sleeps, ISP blip) | yamux keepalive or 3 missed app pings (≈45 s either way) | Edge frees bindings (→ 404s). The agent does **not** wait for that: on reconnect its unchanged `InstanceID` matches the zombie binding's, so takeover rule (a) rebinds immediately even while the old session still looks alive (§3). The zombie is sent `Evicted` and force-closed. |
+| **Network partition** (laptop sleeps, ISP blip) | yamux keepalive or 3 missed app pings (≈45 s either way) | Edge frees bindings (→ 404s). The agent does **not** wait for that: on reconnect its unchanged `InstanceID` matches the zombie binding's, so takeover rule (a) rebinds immediately even while the old session still looks alive (§3). The zombie is sent `Evicted` and force-closed. TCP tunnels get the same treatment and keep their port: the agent re-requests the port it last held, and an auto-assigned HTTP or TLS name is re-requested the same way. |
 | **Slow/hung local app** | `ResponseHeaderTimeout` 30 s | `504` to the public client; tunnel/session unaffected. Post-header slowness is legal (streaming) and bounded by client patience + flow control. |
 | **Saturated uplink during a large transfer** | yamux `ErrConnectionWriteTimeout`, logged verbatim | With `ConnectionWriteTimeout` at 45 s rather than 10 s, a stalled send no longer kills the whole session (§2). If it *does* fire, the verbatim log distinguishes "we killed it" from a real disconnect — otherwise this presents as "the tunnel randomly drops under load", which is miserable to diagnose. |
 | **Oversized request body** | `ContentLength` pre-check; else `MaxBytesReader` + `ErrorHandler` | Declared-length → real `413`, nothing crosses the tunnel. Chunked → `413` synthesized from `*http.MaxBytesError`, with the caveat that the agent may already have forwarded a partial body (§5). The naive `MaxBytesReader`-only design returned `502` *after* shipping 256 MiB. |
-| **Subdomain collision** | `Registry.Bind` under lock | Normal bind: different live `InstanceID` → `BindErr{subdomain_taken}`. Multi-connector bind: same explicit subdomain joins the pool when settings match; a mismatch returns `connector_config_mismatch`. Reconnect replaces only the matching connector, and releasing one connector drains it without removing its peers. |
+| **Subdomain collision** | `Registry.Bind` under lock | Normal bind: different live `InstanceID` → `BindErr{subdomain_taken}`; an auto-assigned name that the agent remembered and re-requested falls back to a fresh random name in the same handshake, while an explicit name stays fatal. Multi-connector bind: same explicit subdomain joins the pool when settings match; a mismatch returns `connector_config_mismatch`. Reconnect replaces only the matching connector, and releasing one connector drains it without removing its peers. |
 | **Apex cert fails to issue/renew** | Startup check + `/healthz` per-cert `NotAfter` | Public traffic keeps working on the wildcard while **no agent can connect** — so `ngstoned` refuses to accept on :4443 without a loadable apex cert and exits loudly rather than failing mysteriously (§4). |
 | **Credential leak or revocation** | Auth result logs plus credential status; live sessions rechecked on the 15 s heartbeat | A scoped credential can bind only its exact subdomain (HTTP or TLS credential) or TCP port and expires automatically. Revoke its ID to disconnect that tunnel on the next heartbeat. A legacy shared-token leak still permits any non-denylisted subdomain and requires rotating `token_sha256`. Auth attempts are rate-limited (5/min). |
 | **Abusive public traffic** | Limiter counters on `expvar` | Layered: unknown-host fast-404 → per-IP token bucket `429` → global in-flight cap 512 → header/body/time limits. Volumetric DoS is the VPS provider's problem (accepted). Optional `--allow-cidr` flips a tunnel to allowlist-only; an HTTP `--policy-file` is evaluated before a request stream is opened and can return `403` without touching the agent. |
@@ -583,8 +729,8 @@ func (s *Store) Subscribe(ctx context.Context) <-chan *Exchange
 4. **MITM agent↔edge** — TLS 1.3 with WebPKI validation (+ optional SPKI pin); the scoped bearer credential is only sent inside the tunnel TLS.
 5. **Header spoofing** — inbound `Forwarded`/`X-Forwarded-*` are stripped by `Rewrite` and replaced by `SetXForwarded` at the edge; `X-Real-IP` is stripped explicitly (it is not in the stdlib delete set). The local app can trust them **only if the agent-side proxy preserves them** — see §6, where the same stdlib behavior silently deletes them if you use `Rewrite` on the agent.
 6. **Malicious web page attacking the inspector (CSRF / DNS rebinding)** — not applicable as shipped. The original design's `127.0.0.1:4040` API would have needed the `X-Ngstone` header + Origin/Host checks described in earlier drafts of this document, but the inspector shipped as a terminal UI instead (§6): there is no listening port, no HTTP API, and therefore nothing for a browser tab to reach or rebind to.
-7. **Resource exhaustion** — every buffer has a stated cap, *including the yamux receive windows* (§5 table) that an earlier draft omitted while claiming completeness; no code path buffers an entire body. The unauthenticated surface on :4443 is separately capped (concurrent handshakes, unauthenticated sessions) so a stranger cannot hoard control-plane resources for the cost of a TCP connect.
-8. **Visitor login (OIDC wall)** — a tunnel bound with `oidc` is enforced on the edge, never in the agent, so a visitor without a session cannot open a stream to the laptop. The edge reuses `internal/oidc` (discovery, PKCE, RS256 ID-token checks, AES-GCM cookie codec) with its own client from `NGSTONE_VISITOR_OIDC_*`. The visitor codec key is the cookie secret with a fixed domain-separation prefix, so a visitor token can never be decoded as an ops-dashboard session even if the operator reuses one secret. Every sealed value carries a purpose (`return`, `state`, `ticket`, `session`) that is checked on open, so one cannot stand in for another. The callback lives on one apex host because providers need a fixed redirect URI. The return host and path travel only inside sealed, ten-minute state, which blocks open redirects. The callback hands the browser to the tunnel host with a one-minute ticket that is consumed once per edge process. The resulting session cookie is host-only and records its host, so a cookie issued for one tunnel is rejected by every other tunnel. Allow lists require `email_verified` and are re-checked on every request, so changing a tunnel's list on rebind takes effect immediately. The ticket is bound to the browser that started the login by a `HttpOnly` binding cookie that is checked on `/.ngstone/auth/finish` and cleared only after a ticket is accepted, so a ticket pasted into another browser is refused. On the secure scheme the session, state and binding cookies carry the `__Host-` prefix, so a sibling tunnel cannot plant them; under `-insecure` (development only) these protections do not apply. Before proxying, the edge removes every visitor cookie from `Cookie`, every inbound `X-Ngstone-*` header on all tunnels, and every spelling of the headers it asserts upstream (`Forwarded`, `X-Real-IP`, `X-Forwarded-*`, `X-Ngstone-*`, matched after folding case and any non-alphanumeric byte to `-`, so `X_Ngstone_User_Email` and `X.Ngstone.User.Email` cannot shadow the real ones in CGI-style stacks). The login rule is stored in the durable lease record, so it survives an edge restart. It then sets `X-Ngstone-User-Email`, `-Subject`, and `-Name` from the session, so the local app may trust those headers only when it is reachable solely through the tunnel. Order of checks: CIDR → per-IP rate limit → basic auth → visitor login → traffic policy, so policies can match on verified identity. Residual risks: all tunnels share one registrable domain, so `SameSite=Lax` does not separate sibling tunnels and apps still need their own CSRF/`Origin` checks; one IdP client is shared by all tunnel owners, so an owner can learn the email, subject and name of anyone who follows a link to their walled tunnel; the ticket replay cache is per edge process (a ticket captured from a URL could be replayed once on another edge within its one-minute lifetime); sessions are stateless and cannot be revoked before their 8-hour expiry except by rotating the cookie secret; `/.ngstone/auth/finish` and `/.ngstone/auth/logout` are reserved on login-protected tunnels.
+7. **Resource exhaustion** — every buffer has a stated cap, *including the yamux receive windows* (§5 table) that an earlier draft omitted while claiming completeness; no code path buffers an entire body. The unauthenticated surface on :4443 is separately capped (concurrent handshakes, unauthenticated sessions, and unauthenticated sessions per client address) so a stranger cannot hoard control-plane resources for the cost of a TCP connect. The per-address cap is a quarter of the handshake cap, so four addresses (or /48s) can still fill the handshake cap.
+8. **Visitor login (OIDC wall)** — a tunnel bound with `oidc` is enforced on the edge, never in the agent, so a visitor without a session cannot open a stream to the laptop. The edge reuses `internal/oidc` (discovery, PKCE, RS256 ID-token checks, AES-GCM cookie codec) with its own client from `NGSTONE_VISITOR_OIDC_*`. The visitor codec key is the cookie secret with a fixed domain-separation prefix, so a visitor token can never be decoded as an ops-dashboard session even if the operator reuses one secret. Every sealed value carries a purpose (`return`, `state`, `ticket`, `session`) that is checked on open, so one cannot stand in for another. The callback lives on one apex host because providers need a fixed redirect URI. The return host and path travel only inside sealed, ten-minute state, which blocks open redirects. The callback hands the browser to the tunnel host with a one-minute ticket that is consumed once per edge process. The resulting session cookie is host-only and records its host, so a cookie issued for one tunnel is rejected by every other tunnel. Allow lists require `email_verified` and are re-checked on every request, so changing a tunnel's list on rebind takes effect immediately. The ticket is bound to the browser that started the login by a `HttpOnly` binding cookie that is checked on `/.ngstone/auth/finish` and cleared only after a ticket is accepted, so a ticket pasted into another browser is refused. On the secure scheme the session, state and binding cookies carry the `__Host-` prefix, so a sibling tunnel cannot plant them; under `-insecure` (development only) these protections do not apply. Before proxying, the edge removes every visitor cookie from `Cookie`, every inbound `X-Ngstone-*` header on all tunnels, and every spelling of the headers it asserts upstream (`Forwarded`, `X-Real-IP`, `X-Forwarded-*`, `X-Ngstone-*`, matched after folding case and any non-alphanumeric byte to `-`, so `X_Ngstone_User_Email` and `X.Ngstone.User.Email` cannot shadow the real ones in CGI-style stacks). The login rule is stored in the durable lease record, so it survives an edge restart. It then sets `X-Ngstone-User-Email`, `-Subject`, and `-Name` from the session, so the local app may trust those headers only when it is reachable solely through the tunnel. Order of checks: CIDR → per-IP rate limit → basic auth → visitor login → traffic policy, so policies can match on verified identity. Residual risks: all tunnels share one registrable domain, so `SameSite=Lax` does not separate sibling tunnels and apps still need their own CSRF/`Origin` checks; one IdP client is shared by all tunnel owners, so an owner can learn the email, subject and name of anyone who follows a link to their walled tunnel; the ticket replay cache is per edge process, so with inter-edge forwarding a ticket captured from a URL could be replayed once more within the ticket's one-minute lifetime, but only if tunnel ownership moves between edges or the tunnel has connectors on two edges (each edge keeps its own replay cache), and the browser-binding cookie is still required; sessions are stateless and cannot be revoked before their 8-hour expiry except by rotating the cookie secret; `/.ngstone/auth/finish` and `/.ngstone/auth/logout` are reserved on login-protected tunnels.
 
 Out of scope, accepted for a single-user v1:
 

@@ -132,13 +132,21 @@ listening  127.0.0.1:6380          redis     ->  redis-cli -p 6380`}
           Optional SPKI pin, checked in addition to normal chain
           validation.
         </Property>
+        <Property name="--transport" type="string" defaultValue="auto">
+          Control transport: <code>auto</code>, <code>raw</code>,{" "}
+          <code>websocket</code> or <code>quic</code>. Share, connect and the
+          management commands all take it; <code>quic</code> is never part of{" "}
+          <code>auto</code>.
+        </Property>
       </ParamTable>
 
       <Anchor id="managing">Managing shares from anywhere</Anchor>
       <p>
-        Any terminal with the token can see and manage every share, not
-        only the one that started it. These open a fresh session, do one
-        thing and exit, so they work from scripts too.
+        Any terminal with the legacy shared token can see and manage every
+        share, not only the one that started it. These open a fresh session,
+        do one thing and exit, so they work from scripts too. A{" "}
+        <code>share</code> credential manages only the shares of its own
+        owner.
       </p>
       <CodeBlock
         language="bash"
@@ -278,7 +286,9 @@ y alice
           <strong>Revocation.</strong> Ctrl-C on the sharer, or{" "}
           <code>ngstone unshare</code> from anywhere, tells every connector{" "}
           <code>revoked</code>. <code>kick</code> does the same for one
-          connector. Same exit codes as expiry.
+          connector, and <code>extend</code>, <code>kick</code> and{" "}
+          <code>shares</code> reach shares held by any edge in a multi-edge
+          deployment. Same exit codes as expiry.
         </li>
         <li>
           <strong>Idle.</strong> With <code>--idle</code>, a share with no

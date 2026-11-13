@@ -114,7 +114,9 @@ verified against ngstone.site:4443 and saved`} />
           Control transport. <code>auto</code> tries raw TLS first and falls
           back to the authenticated WebSocket endpoint on HTTPS port{" "}
           <code>443</code>; use <code>raw</code> or{" "}
-          <code>websocket</code> to force one path.
+          <code>websocket</code> to force one path. <code>quic</code> carries
+          the session over UDP to an edge started with <code>-quic</code>; it
+          is never part of <code>auto</code> and never falls back.
         </Property>
         <Property name="--insecure" type="bool" defaultValue="false">
           Dial the control plane in plaintext. Dev/test only — no
@@ -196,7 +198,8 @@ $ ngstone doctor --json`}
         </Property>
         <Property name="--transport" type="string" defaultValue="auto">
           Control transport to validate and use for authentication:
-          <code>auto</code>, <code>raw</code>, or <code>websocket</code>.
+          <code>auto</code>, <code>raw</code>, <code>websocket</code>, or{" "}
+          <code>quic</code>.
         </Property>
         <Property name="--admin-server" type="string">
           Optional management API URL. HTTPS is required outside loopback
@@ -230,8 +233,9 @@ $ ngstone doctor --json`}
         <Property name="issue" type="subcommand">
           Creates an HTTP credential scoped to <code>--subdomain</code>, or a
           TCP credential scoped to <code>--remote-port</code> with{" "}
-          <code>--kind tcp</code>. The default TTL is 24 hours and the maximum
-          is 720 hours.
+          <code>--kind tcp</code>. <code>--kind share</code> issues a credential
+          for <code>ngstone share</code> that manages only its owner&apos;s
+          shares. The default TTL is 24 hours and the maximum is 720 hours.
         </Property>
         <Property name="list" type="subcommand">
           Prints credential metadata and status. It never prints token
@@ -263,7 +267,9 @@ $ ngstone admin credentials revoke <credential-id>
 $ ngstone admin policies list
 $ ngstone admin policies apply --name web --file traffic-policy.json
 $ ngstone admin domains list
-$ ngstone admin domains add --domain demo.example.org
+$ ngstone admin domains add --domain app.example.org --tunnel-id <tunnel-id>
+$ ngstone admin domains activate <domain-id>
+$ ngstone admin domains disable <domain-id>
 $ ngstone admin tunnel drain demo`}
       />
       <Anchor id="operator-shortcuts">Operator shortcuts</Anchor>
@@ -301,6 +307,7 @@ DELETE /api/v1/policies/{id}
 GET    /api/v1/domains
 POST   /api/v1/domains
 DELETE /api/v1/domains/{id}
+POST   /api/v1/domains/{id}/status
 POST   /api/v1/tunnels/{hostname}/drain`}
       />
       <CodeBlock
@@ -324,6 +331,14 @@ POST   /api/v1/tunnels/{hostname}/drain`}
           status-code counts, active connectors, reconnects, bytes, and
           credential lifecycle counters. Add <code>--json</code> for
           dashboards and automation.
+        </Property>
+        <Property name="domains" type="subcommand">
+          Register a custom domain for an HTTP or TLS tunnel with{" "}
+          <code>add --domain NAME --tunnel-id ID</code>; it stays{" "}
+          <code>pending</code> and serves nothing. <code>activate</code> and{" "}
+          <code>disable</code> need the administrator role. For HTTP tunnels
+          the edge obtains a certificate automatically, or uses one from{" "}
+          <code>-custom-certs</code>; see the README, Custom domains.
         </Property>
         <Property name="credentials issue" type="subcommand">
           Issue a scoped HTTP, TCP, or TLS credential. Use <code>--kind tcp</code>{" "}
@@ -574,7 +589,9 @@ $ ngstone port 3000 --subdomain demo --multi-connector`}
           Control transport. <code>auto</code> tries raw TLS first and falls
           back to the authenticated WebSocket endpoint on HTTPS port{" "}
           <code>443</code>; use <code>raw</code> or{" "}
-          <code>websocket</code> to force one path.
+          <code>websocket</code> to force one path. <code>quic</code> carries
+          the session over UDP to an edge started with <code>-quic</code>; it
+          is never part of <code>auto</code> and never falls back.
         </Property>
         <Property name="--token" type="string">
           Auth token override. Defaults to <code>NGSTONE_TOKEN</code> or the
@@ -694,7 +711,8 @@ $ ngstone tcp db.local:5432 --remote-port 15432`}
         <Property name="--transport" type="string" defaultValue="auto">
           Control transport. <code>auto</code> tries raw TLS first and falls
           back to the authenticated WebSocket endpoint on HTTPS port{" "}
-          <code>443</code>.
+          <code>443</code>. <code>quic</code> needs an edge started with{" "}
+          <code>-quic</code> and is never part of <code>auto</code>.
         </Property>
         <Property name="--token" type="string">
           Auth token override. Defaults to <code>NGSTONE_TOKEN</code> or the
@@ -996,7 +1014,7 @@ $ ngstone share tcp:9000 --single-use --idle 30m --audit-log share.jsonl`}
         <Property name="--audit-log" type="string">
           Append every audit event to this file as JSON Lines.
         </Property>
-        <Property name="--server, --token, --insecure, --server-name, --pin" type="various">
+        <Property name="--server, --token, --transport, --insecure, --server-name, --pin" type="various">
           As for <code>ngstone tcp</code>. With <code>--insecure</code> the
           printed hint tells connectors to pass it too.
         </Property>
@@ -1041,6 +1059,10 @@ $ NGSTONE_SHARE_LINK=ngstone://... ngstone connect --port 15432 --port redis=638
         <Property name="--pin" type="string">
           Optional SPKI pin, checked in addition to chain validation.
         </Property>
+        <Property name="--transport" type="string" defaultValue="auto">
+          Control transport: <code>auto</code>, <code>raw</code>,{" "}
+          <code>websocket</code> or <code>quic</code>.
+        </Property>
       </ParamTable>
       <p>
         Exit status is <code>0</code> on Ctrl-C, <code>3</code> when the
@@ -1066,10 +1088,21 @@ $ ngstone unshare sh_7f3a...     # revoke`}
       />
       <p>
         All take <code>--server</code>, <code>--token</code>,{" "}
-        <code>--insecure</code>, <code>--server-name</code> and{" "}
-        <code>--pin</code> like the other verbs. A revoked sharer&apos;s
+        <code>--transport</code>, <code>--insecure</code>,{" "}
+        <code>--server-name</code> and <code>--pin</code> like the other
+        verbs. A revoked sharer&apos;s
         terminal says <code>share revoked by another terminal</code> and
         exits 0.
+      </p>
+      <p>
+        With several edges sharing a database, <code>shares</code>,{" "}
+        <code>extend</code> and <code>kick</code> act on every edge that
+        holds your shares, whichever edge you reach. <code>shares</code> adds
+        an <code>EDGE</code> column and names any edge that did not answer
+        within 3 seconds; it asks at most 32 edges. An edge running an older
+        ngstoned answers <code>share_not_found</code> saying so.{" "}
+        <code>--watch</code> and approvals work only on the edge holding the
+        share.
       </p>
 
       <Anchor id="ngstone-config">ngstone config</Anchor>

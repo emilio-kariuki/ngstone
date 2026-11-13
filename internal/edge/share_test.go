@@ -386,7 +386,7 @@ func authAs(t *testing.T, s *Server, client, server tunnel.Session, auth proto.A
 	if remote != "" {
 		rp = netip.MustParseAddrPort(remote)
 	}
-	as, err := s.authenticate(context.Background(), server, rp.Addr().String(), rp, time.Now().Add(5*time.Second))
+	as, err := s.authenticate(context.Background(), server, rp.Addr().String(), rp, time.Now().Add(5*time.Second), authDirect)
 	if err != nil {
 		t.Fatalf("authenticate: %v", err)
 	}
@@ -487,7 +487,7 @@ func TestShareRelayEndToEnd(t *testing.T) {
 	go func() {
 		badClient.Control().Write(proto.TypeAuth, 1, proto.Auth{ShareSecret: "nope", InstanceID: "x", ProtoVersions: proto.SupportedVersions})
 	}()
-	if _, err := s.authenticate(context.Background(), badServer, "203.0.113.5", netip.MustParseAddrPort("203.0.113.5:1"), time.Now().Add(5*time.Second)); err == nil {
+	if _, err := s.authenticate(context.Background(), badServer, "203.0.113.5", netip.MustParseAddrPort("203.0.113.5:1"), time.Now().Add(5*time.Second), authDirect); err == nil {
 		t.Fatalf("bad share secret must fail auth")
 	}
 	badReply := readType(t, badClient.Control(), proto.TypeAuthErr)

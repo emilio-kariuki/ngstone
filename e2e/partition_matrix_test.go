@@ -3,16 +3,23 @@ package e2e
 import (
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
 
 func TestPartitionKillAgentMidRequest(t *testing.T) {
+	partitionKillAgentMidRequest(t, 10*time.Second, false)
+}
+
+func partitionKillAgentMidRequest(t *testing.T, detectBound time.Duration, allowBadGateway bool) {
 	if testing.Short() {
 		t.Skip("skipping partition matrix test in -short mode")
 	}
@@ -64,6 +71,7 @@ func TestPartitionKillAgentMidRequest(t *testing.T) {
 		t.Fatal("client never received response headers for the in-flight request")
 	}
 
+	killedAt := time.Now()
 	if err := agentProc.cmd.Process.Kill(); err != nil {
 		t.Fatalf("kill -9 agent: %v", err)
 	}
@@ -79,7 +87,12 @@ func TestPartitionKillAgentMidRequest(t *testing.T) {
 		t.Fatalf("expected the in-flight request to fail after kill -9, but it completed cleanly: status=%d body=%q", res.status, res.body)
 	}
 
-	waitStatus(t, publicAddr, hostname, "/", http.StatusNotFound, 10*time.Second)
+	if allowBadGateway {
+		waitNotFoundThrough502(t, publicAddr, hostname, "/", detectBound-time.Since(killedAt))
+		t.Logf("agent kill detected %s after the kill", time.Since(killedAt))
+	} else {
+		waitStatus(t, publicAddr, hostname, "/", http.StatusNotFound, detectBound)
+	}
 	t.Log("confirmed: subsequent request got 404, not 502, after agent death")
 
 	startAgent(t, agentBin, controlAddr, token, origin.URL, "app", "")
@@ -134,6 +147,148 @@ func TestPartitionInstantTakeoverPastHalfOpenPeer(t *testing.T) {
 	}
 
 	agentA.cmd.Process.Signal(syscall.SIGCONT)
+}
+
+func TestPartitionInstantTCPTakeoverPastHalfOpenPeer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping partition matrix test in -short mode")
+	}
+
+	edgeBin, agentBin := buildBinaries(t)
+	echoAddr := startTCPEcho(t)
+
+	token := "tok-instant-tcp-takeover"
+	domain := "tcptakeover.example.com"
+	controlAddr := freeAddr(t)
+	publicAddr := freeAddr(t)
+	tcpLo, tcpHi := freeTCPRange(t, 30)
+	const instanceID = "fixed-instance-tcp-half-open"
+
+	startEdgeTCP(t, edgeBin, controlAddr, publicAddr, token, domain, tcpLo, tcpHi)
+
+	agentA, sbA := startAgentTCPWithInstanceID(t, agentBin, controlAddr, token, echoAddr, 0, "", instanceID)
+	port := waitTCPAssignedPort(t, sbA, 15*time.Second)
+	waitForPort(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	echoRoundTrip(t, dialTunnel(t, port), "before-takeover\n")
+
+	if err := agentA.cmd.Process.Signal(syscall.SIGSTOP); err != nil {
+		t.Fatalf("SIGSTOP agent A: %v", err)
+	}
+	t.Cleanup(func() {
+		agentA.cmd.Process.Signal(syscall.SIGCONT)
+	})
+
+	_, sbB := startAgentTCPWithInstanceID(t, agentBin, controlAddr, token, echoAddr, port, "", instanceID)
+
+	const bound = 10 * time.Second
+	start := time.Now()
+	got := waitTCPAssignedPort(t, sbB, bound)
+	t.Logf("instant tcp takeover past half-open peer: rebind took %s (asserted bound was %s)", time.Since(start), bound)
+	if got != port {
+		t.Fatalf("agent B advertised tcp port %d, want the port agent A held (%d)", got, port)
+	}
+
+	echoRoundTrip(t, dialTunnel(t, port), "after-takeover\n")
+
+	agentA.cmd.Process.Signal(syscall.SIGCONT)
+}
+
+type controlRelay struct {
+	addr      string
+	mu        sync.Mutex
+	agentSide []net.Conn
+	edgeSide  []net.Conn
+}
+
+func startControlRelay(t *testing.T, target string) *controlRelay {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("relay listen: %v", err)
+	}
+	r := &controlRelay{addr: ln.Addr().String()}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			up, err := net.Dial("tcp", target)
+			if err != nil {
+				c.Close()
+				continue
+			}
+			r.mu.Lock()
+			r.agentSide = append(r.agentSide, c)
+			r.edgeSide = append(r.edgeSide, up)
+			r.mu.Unlock()
+			go io.Copy(up, c)
+			go io.Copy(c, up)
+		}
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		for _, c := range append(r.agentSide, r.edgeSide...) {
+			c.Close()
+		}
+	})
+	return r
+}
+
+func (r *controlRelay) dropAgentSides() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, c := range r.agentSide {
+		c.Close()
+	}
+	r.agentSide = nil
+}
+
+func TestPartitionAutoPortTCPRebindsRememberedPortPastHalfOpenSession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping partition matrix test in -short mode")
+	}
+
+	edgeBin, agentBin := buildBinaries(t)
+	echoAddr := startTCPEcho(t)
+
+	token := "tok-auto-port-rebind"
+	domain := "autoport.example.com"
+	controlAddr := freeAddr(t)
+	publicAddr := freeAddr(t)
+	tcpLo, tcpHi := freeTCPRange(t, 30)
+	const instanceID = "fixed-instance-auto-port"
+
+	startEdgeTCP(t, edgeBin, controlAddr, publicAddr, token, domain, tcpLo, tcpHi)
+	relay := startControlRelay(t, controlAddr)
+
+	_, sb := startAgentTCPWithInstanceID(t, agentBin, relay.addr, token, echoAddr, 0, "", instanceID)
+	port := waitTCPAssignedPort(t, sb, 15*time.Second)
+	waitForPort(t, net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	echoRoundTrip(t, dialTunnel(t, port), "before-drop\n")
+
+	relay.dropAgentSides()
+
+	const bound = 10 * time.Second
+	start := time.Now()
+	var adverts [][]string
+	for time.Now().Before(start.Add(bound)) {
+		if adverts = tcpAdvertRe.FindAllStringSubmatch(sb.String(), -1); len(adverts) >= 2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(adverts) < 2 {
+		t.Fatalf("agent did not re-advertise a tcp port within %s of the control drop:\n%s", bound, sb.String())
+	}
+	t.Logf("auto-port rebind past half-open session took %s (asserted bound was %s, the keepalive timeout is 45s)", time.Since(start), bound)
+	if got, _ := strconv.Atoi(adverts[len(adverts)-1][1]); got != port {
+		t.Fatalf("agent re-advertised tcp port %d, want the remembered port %d", got, port)
+	}
+
+	echoRoundTrip(t, dialTunnel(t, port), "after-rebind\n")
 }
 
 func TestPartitionDifferentInstanceRefused(t *testing.T) {
@@ -228,6 +383,10 @@ func TestPartitionTakeoverVictimEvicted(t *testing.T) {
 }
 
 func TestPartitionEdgeRestart(t *testing.T) {
+	partitionEdgeRestart(t, 30*time.Second)
+}
+
+func partitionEdgeRestart(t *testing.T, rebindBound time.Duration) {
 	if testing.Short() {
 		t.Skip("skipping partition matrix test in -short mode")
 	}
@@ -260,7 +419,7 @@ func TestPartitionEdgeRestart(t *testing.T) {
 
 	startEdge(t, edgeBin, controlAddr, publicAddr, token, domain)
 
-	elapsed := waitBoundWithin(t, publicAddr, hostname, 30*time.Second)
+	elapsed := waitBoundWithin(t, publicAddr, hostname, rebindBound)
 	t.Logf("edge restart recovery took %s", elapsed)
 
 	status, body, err = doGet(publicAddr, hostname, "/")

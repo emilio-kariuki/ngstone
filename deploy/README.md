@@ -34,6 +34,25 @@ range in UFW (`--tcp-ports off` removes it), and `--from-source` builds
 release that predates a provider cannot use it; the installer checks this
 before replacing the installed binary.
 
+`--quic on` runs `ngstoned` with `-quic`, so agents can use
+`--transport quic` over UDP on the control port. It opens `4443/udp` in UFW and
+writes `/etc/sysctl.d/99-ngstone-quic.conf` (`net.core.rmem_max` and
+`net.core.wmem_max` of 7500000) so QUIC can use larger UDP socket buffers. A
+key whose live value already exceeds 7500000 gets no entry, so on a host where
+the installer has not written its file and both keys exceed 7500000, no file is
+written. Once the file exists, a rerun keeps its keys at 7500000. The installer
+never lowers a live value, but at boot the file overrides any earlier-sorting
+drop-in for the same key, though `/etc/sysctl.conf` or `99-sysctl.conf` can
+still override it; to keep a larger persistent value, edit or remove that key
+in this file.
+`--quic off` (the default) removes the `-quic` flag, the UFW rule and that
+file; leaving the option out keeps the current setting. QUIC sends a keep-alive
+every 5 s with a 15 s idle timeout, so a peer that vanishes without closing
+(crash, power loss) is detected within about 20 s, compared with immediately
+for a killed process over TCP (the kernel resets the connection) and up to 45 s
+for a silent TCP path (partition). A graceful
+shutdown is noticed at once on every transport.
+
 For a disposable VPS, the same installer can be fetched directly after
 reviewing the script:
 
@@ -56,7 +75,8 @@ the Compose plugin. The [DNS records](#dns-records) and
 [provider credentials](#dns-provider-credentials) are the same as for the
 systemd install, and the host's firewall must allow `80`, `443` and `4443`
 (plus any TCP tunnel range). The installer's UFW and DNS checks do not run,
-so do those yourself.
+so do those yourself. QUIC is not enabled in the Compose file; to use it, add
+`-quic` to the command and publish `4443/udp` as well.
 
 Copy [`docker/compose.yaml`](docker/compose.yaml) and
 [`docker/.env.example`](docker/.env.example) into a directory on the host,
@@ -108,6 +128,33 @@ How the container differs from the systemd unit:
   range in `compose.yaml`; the published range must equal `-tcp-ports`
   exactly. Docker sets up forwarding per published port, so keep the range
   small.
+- **Inter-edge forwarding.** Under Docker's bridge network the host's address
+  cannot be bound inside the container. Set `NGSTONE_DATABASE_URL`,
+  `NGSTONE_EDGE_ID` and `NGSTONE_PEER_ADDR` (the host's `ip:port` as the other
+  edges reach it) in `.env`, and leave `NGSTONE_TOKEN_SHA256` empty: the
+  legacy token cannot be combined with a database, so agents use scoped
+  credentials (see the next bullet). Then uncomment the `-peer-listen=:4043`
+  line and the `"4043:4043"` port in `compose.yaml`. The Compose file sets the
+  `-peer-listen` flag, so the edge listens on `:4043` and still advertises
+  `NGSTONE_PEER_ADDR`. Firewall the peer port to the other edges.
+- **Management API.** The image has no `ngstone` CLI, so issue credentials from
+  a machine that has it. The API is served on the ops endpoint, which stays on
+  the container's loopback and is not reachable through a published port, and
+  without `NGSTONE_ADMIN_TOKEN_SHA256` the API accepts loopback clients only.
+  To reach it, set `NGSTONE_ADMIN_TOKEN_SHA256` in `.env` (generate the pair as
+  in [Management API and CLI](#management-api-and-cli)), change `-ops` in
+  `compose.yaml` to `-ops=:4041` (the health check still reaches it on the
+  container's loopback), and publish `"127.0.0.1:4041:4041"`. Then, on the
+  Docker host or through `ssh -L 4041:127.0.0.1:4041`:
+
+  ```
+  NGSTONE_ADMIN_TOKEN=<admin token> ngstone admin credentials issue \
+    --server http://127.0.0.1:4041 --subdomain demo --ttl 24h
+  ```
+
+  The ops endpoint also serves pprof, expvar and metrics without
+  authentication, so publish it on the host's loopback only, never on a public
+  interface.
 
 To build the image from a checkout instead of pulling it, replace `image:`
 with the commented `build: ../..` in `compose.yaml`, or run
@@ -143,8 +190,9 @@ sudo ./deploy/uninstall.sh --remove-state --remove-firewall-rules
 ```
 
 `--remove-firewall-rules` removes matching allow rules for only `80/tcp`,
-`443/tcp`, `4443/tcp` and the TCP tunnel range, if one was configured; it
-leaves SSH rules alone. If another service
+`443/tcp`, `4443/tcp`, `4443/udp` if QUIC was enabled, and the TCP tunnel
+range, if one was configured; it leaves SSH rules alone. The uninstaller also
+removes `/etc/sysctl.d/99-ngstone-quic.conf`. If another service
 uses the same allow rule, review it before selecting this option. The source
 checkout is never removed. Use `--yes` only when running the uninstall
 non-interactively.
@@ -163,7 +211,9 @@ The agent's default `--transport auto` first uses the raw control listener on
 `:4443`, then falls back to the authenticated WebSocket control endpoint on
 HTTPS `:443`. A proxied Cloudflare record can therefore support the fallback
 when WebSockets are enabled, but DNS-only records remain the least surprising
-setup and are required when forcing `--transport raw`.
+setup and are required when forcing `--transport raw`. `--transport quic` is
+separate: it is never tried by `auto`, needs `4443/udp` and the edge's `-quic`,
+and cannot go through a proxied record.
 
 ## DNS provider credentials
 
@@ -240,6 +290,9 @@ NGSTONE_OIDC_VIEWER_GROUPS=ngstone-viewers
 # Optional: restrict login and set an explicit fallback role
 NGSTONE_OIDC_ALLOWED_EMAIL_DOMAINS=example.com
 NGSTONE_OIDC_DEFAULT_ROLE=
+# Optional: management API over mTLS with client certificates
+# NGSTONE_ADMIN_MTLS_ADDR=:4044
+# NGSTONE_ADMIN_MTLS_CLIENT_CA=/etc/ngstoned/admin-ca.pem
 # Optional: lifecycle alert webhook
 NGSTONE_ALERT_WEBHOOK_URL=https://alerts.example.com/ngstone
 NGSTONE_ALERT_WEBHOOK_TOKEN=<webhook secret>
@@ -253,10 +306,44 @@ NGSTONE_DATABASE_URL=postgres://ngstone:<password>@db.internal/ngstone?sslmode=r
 NGSTONE_EDGE_ID=edge-b
 ```
 
-The shared database coordinates names and leases, but public request routing
-is still local to the edge that receives the request. Use a load balancer or
-DNS strategy that targets the edge holding the connector; inter-edge request
-forwarding is a later layer.
+To let any edge serve any tunnel, enable inter-edge forwarding. Add the edge's
+private address and a peer port to the same root-only environment file on every
+edge:
+
+```
+NGSTONE_PEER_ADDR=10.0.0.11:4043
+```
+
+Then open that port to the other edges only, for example:
+
+```
+sudo ufw allow from 10.0.0.0/24 to any port 4043 proto tcp
+```
+
+Forwarding requires PostgreSQL (not SQLite, not `-insecure`), a concrete
+private address, a certificate for the same domain on every edge (share the
+certificate storage to stay under the ACME duplicate-certificate limit), and
+identical `NGSTONE_VISITOR_OIDC_*` values, including the cookie secret, on
+every edge. Raw TCP tunnels are forwarded when every edge uses the same
+`-tcp-ports` range: each edge opens the tunnel's port within about two seconds
+and forwards to the owner, which enforces allow-CIDR with the real client
+address (open the range in every edge's firewall). Share links are forwarded
+for sharers using a `share` credential. Custom domains are forwarded too, provided every edge has the certificate for an HTTP tunnel's name (see [Custom domains](#custom-domains)). With Docker's bridge network, set `NGSTONE_PEER_LISTEN` (or
+`-peer-listen`) to the address inside the container and publish that port; see
+[Run with Docker](#run-with-docker). `NGSTONE_PEER_ADDR` stays the address the
+other edges dial.
+
+The peer port must be reachable only from other edges: it accepts at most 64
+concurrent handshakes with a 5 second deadline and has no per-source limit.
+Each edge needs a distinct `NGSTONE_EDGE_ID`; two edges with the same id
+overwrite each other's registration. A forwarded connection holds one of the
+client address's in-flight slots on the ingress edge for its lifetime and
+closes after the TCP idle timeout (30 minutes by default) of silence in both
+directions, so long-lived WebSocket and SSE connections need traffic or
+keep-alives within that window. During a database outage, connections for
+tunnel hostnames not bound on the receiving edge are closed, where a single
+edge would answer 404, and share connectors arriving at an edge that does not
+hold their share are disconnected and retry.
 
 Keep the PostgreSQL URL in the root-only environment file or a secret manager;
 do not put it in `ExecStart`, because a password in a process argument is
@@ -277,7 +364,9 @@ and a credential is limited to one exact HTTP subdomain, one exact TCP
 remote port, or one edge-assigned preview hostname. For `ngstone preview`,
 issue with `--kind preview --ttl 2h` and omit `--subdomain` / `--remote-port`.
 The preview credential retains its assigned hostname across reconnects;
-issue another credential for a new URL.
+issue another credential for a new URL. For `ngstone share`, issue with
+`--kind share --ttl 24h`; it takes no `--subdomain` / `--remote-port` and
+manages only the shares of its owner.
 The edge rechecks active credentials during the heartbeat, so
 revocation and expiry close live sessions shortly afterward.
 
@@ -316,8 +405,8 @@ resources are `GET /api/v1/status`, `GET /api/v1/tunnels`, `GET|POST
 /api/v1/policies`, `DELETE /api/v1/policies/{id}`, `GET|POST
 /api/v1/domains`, `DELETE /api/v1/domains/{id}`, and `POST
 /api/v1/tunnels/{hostname}/drain`. Traffic policies are validated and stored
-by digest; custom domains start in `pending` status until DNS and certificate
-automation is attached. The API also exposes `GET
+by digest; custom domains start in `pending` status and serve nothing until an
+administrator activates them (see [Custom domains](#custom-domains)). The API also exposes `GET
 /api/v1/observability/tunnels` for per-tunnel request counts, approximate
 p50/p95/p99 latency, status-code counts, connector health, reconnects, bytes,
 and credential lifecycle counters. Configure `NGSTONE_ALERT_WEBHOOK_URL` to
@@ -368,7 +457,152 @@ root-only environment file; do not put either in `ExecStart` or a shell
 command-line argument. The management bearer token remains useful for CI and
 other non-browser automation.
 
+### mTLS team access
+
+Set `NGSTONE_ADMIN_MTLS_ADDR` and `NGSTONE_ADMIN_MTLS_CLIENT_CA` together to
+open a separate TLS listener for the management API. On that listener a client
+certificate is the only authentication: bearer tokens, OIDC cookies, and the
+loopback bypass do not apply, and nothing changes while both settings are
+unset. The listener serves only the management API and dashboard state, not
+metrics, health, or pprof. Every edge needs the same CA file.
+
+An unauthenticated peer can still complete TCP connections and occupy the 32
+connection slots. Open the port only to the networks your team uses, for
+example with a firewall rule; the loopback ops port remains available as a
+fallback.
+
+Create a CA used only for ngstone management, then issue short-lived client
+certificates from it:
+
+```sh
+openssl req -x509 -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1825 -subj "/CN=ngstone management CA" -keyout admin-ca.key -out admin-ca.pem -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign"
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=alice/OU=operator" -keyout alice.key -out alice.csr
+printf 'basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n' > client.ext
+openssl x509 -req -in alice.csr -CA admin-ca.pem -CAkey admin-ca.key -CAcreateserial -days 7 -extfile client.ext -out alice.pem
+chmod 600 alice.key
+ngstone admin status --server https://<apex-domain>:4044 --client-cert alice.pem --client-key alice.key
+```
+
+The person signing decides the role: inspect the request's subject with
+`openssl req -in alice.csr -noout -subject`, or set it with `-subj` when
+signing, rather than accepting a requester's `OU`. Always sign with
+`client.ext` so the certificate cannot act as a CA.
+
+Copy `admin-ca.pem` (never the key) to `/etc/ngstoned/admin-ca.pem` on every
+edge. Guidance:
+
+- Keep `admin-ca.key` offline and use that CA only for ngstone.
+- The role comes from `OU=admin`, `OU=operator`, or `OU=viewer`; a certificate
+  without one of them is rejected, and the highest role wins if several are set.
+- The `CN` becomes the audit and ownership principal `mtls:<cn>`. It must be
+  lowercase `[a-z0-9._@-]`.
+- Certificates must carry the clientAuth extended key usage and live at most
+  30 days. Prefer 1-7 days, and never request exactly 720 h.
+- There is no revocation list. To cut off every certificate at once, replace
+  the CA file and restart every edge.
+- The server certificate is the edge's apex certificate. To reach one edge by
+  IP, pass `--server-name <apex-domain>`; use `--ca` to verify the server
+  against a private bundle instead of the system roots.
+- The client key must be readable only by its owner (`chmod 600`); the CLI
+  refuses a group- or world-readable key.
+
 Secrets must only ever reach `ngstoned` through `EnvironmentFile=`, never through `ExecStart` flags: `/proc/<pid>/cmdline` is world-readable, so any local user can read a flag value with `ps auxww`, but not the process's environment. `ngstoned` reads `$NGSTONE_CREDENTIALS_FILE`, the legacy `$NGSTONE_TOKEN_SHA256`, and `$NGSTONE_CF_API_TOKEN` in preference to their equivalent flags for exactly this reason, and other providers' credentials have no flags at all — do not add those flags to the unit's `ExecStart`. The agent has the same exposure: prefer `$NGSTONE_TOKEN` over `-token` whenever the agent runs somewhere another local user could run `ps`.
+
+## Custom domains
+
+A custom domain lets an HTTP or TLS tunnel answer on a name you own, such as
+`app.example.org`, as well as on its `subdomain.example.com` name. It needs
+durable storage (SQLite or PostgreSQL), a public TLS listener (not
+`-insecure`), and, for HTTP tunnels, a certificate you supply. Raw TCP tunnels
+are addressed by port, not by name.
+
+Operator workflow:
+
+1. Register the name for an existing tunnel. It is `pending` and serves
+   nothing:
+
+   ```
+   ngstone admin domains add --domain app.example.org --tunnel-id <id>
+   ```
+
+2. Point the name's DNS at the edges (A or AAAA records).
+3. For an HTTP tunnel, obtain a certificate for the name yourself. Place
+   `<name>.crt` (the certificate with its chain) and `<name>.key` in the
+   `-custom-certs` directory (`NGSTONE_CUSTOM_CERTS_DIR`) on **every** edge,
+   with the key at mode `0600`, then restart the edges one at a time. A TLS
+   tunnel needs no edge certificate; its local service presents the
+   certificate for the custom name.
+4. An administrator verifies outside ngstone that the requester controls the
+   name, then runs `ngstone admin domains activate <id>`.
+5. Test it: `curl -I https://app.example.org/`. Disable it with
+   `ngstone admin domains disable <id>`.
+
+Operators may register names for their own tunnels; activating and disabling
+need the administrator role. See [Management API and CLI](#management-api-and-cli).
+
+The directory must be a real directory that is not group or world writable,
+and every `.crt` needs a matching `.key` (and the reverse). Names that the
+edge itself serves, and wildcard names overlapping the edge domain, are
+refused, as are two certificates covering the same name.
+
+**systemd.** The unit's state directory is `StateDirectory=ngstoned`, which is
+`/var/lib/ngstoned` and mode `0700`. Keep the pairs in a subdirectory next to
+`certs`, for example `/var/lib/ngstoned/custom-certs` (mode `0700`), and set
+`NGSTONE_CUSTOM_CERTS_DIR=/var/lib/ngstoned/custom-certs` in
+`/etc/ngstoned/env` (the env file does not expand `${STATE_DIRECTORY}`), or
+add `-custom-certs ${STATE_DIRECTORY}/custom-certs` to `ExecStart`. The unit
+runs as a dynamic user, so the files must end up readable by that user: systemd
+re-owns the state directory tree to it when the unit starts.
+
+**Docker.** Mount the directory read-only and point the edge at it:
+
+```
+# compose.yaml, under the ngstoned service
+volumes:
+  - ./custom-certs:/custom-certs:ro
+
+# .env
+NGSTONE_CUSTOM_CERTS_DIR=/custom-certs
+```
+
+The container runs as uid and gid 65532, so own the files by that user and
+keep the key at `0600`:
+`sudo chown -R 65532:65532 custom-certs && chmod 0700 custom-certs && chmod 0600 custom-certs/*.key`.
+
+Limits:
+
+- No automatic certificates. You obtain and renew them.
+- No ownership verification. Activation is the trust decision.
+- Certificates are per edge and are loaded at start-up; replacing one needs a
+  restart of that edge.
+- An expired, unreadable or mismatched certificate stops the edge from
+  starting, before certificate management begins.
+- Tunnels that require visitor sign-in answer 403 on custom domains.
+- Activation, disabling and deletion take effect at once on the edge that
+  handled the admin call if that edge can read the database, otherwise at its
+  next poll, and reach other edges within one poll interval
+  (about 5 seconds). During that window a stale edge can forward a connection
+  that the owning edge then refuses; the visitor sees a closed connection.
+- An edge that cannot read the database keeps routing the domains it already
+  knows until that list is older than the lease TTL, then stops routing them.
+- At most 10,000 active custom domains are routed, the earliest activated
+  first. Beyond that the most recently activated domains are not routed;
+  activation still returns `active`. The edge logs a warning ("active custom
+  domains exceed the routing cap") and `ngstoned_custom_domains_active` stays
+  at 10000, so an edge that reports 10000 with more active rows in the
+  database is over the cap.
+- Any operator can register a name, with or without a tunnel, and leave it
+  `pending`. The real owner then gets a conflict until an administrator
+  deletes that row.
+- An active custom domain for an HTTP tunnel with no certificate in the
+  `-custom-certs` directory fails the TLS handshake; there is no default
+  certificate.
+- A certificate's common name must be empty or equal to one of its DNS names,
+  and it must not carry IP, e-mail or URI names. OCSP stapling is not done
+  for these certificates.
+- Internationalised names must be registered in `xn--` form.
+- Raw TCP tunnels are not addressed by name.
+- No `Strict-Transport-Security` header is set.
 
 ## Staging -> production promotion
 

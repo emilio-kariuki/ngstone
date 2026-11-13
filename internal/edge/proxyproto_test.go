@@ -687,3 +687,112 @@ func TestProxyProtoConnCloseWriteHalfCloses(t *testing.T) {
 		t.Fatalf("RemoteAddr = %q, want 203.0.113.7:5555", got)
 	}
 }
+
+func TestProxyProtoV1LineRoundTrip(t *testing.T) {
+	cases := []struct {
+		name string
+		src  netip.AddrPort
+		line string
+		want netip.AddrPort
+	}{
+		{name: "ipv4", src: netip.MustParseAddrPort("203.0.113.9:51234"), line: "PROXY TCP4 203.0.113.9 203.0.113.9 51234 51234\r\n", want: netip.MustParseAddrPort("203.0.113.9:51234")},
+		{name: "ipv6", src: netip.MustParseAddrPort("[2001:db8::7]:443"), line: "PROXY TCP6 2001:db8::7 2001:db8::7 443 443\r\n", want: netip.MustParseAddrPort("[2001:db8::7]:443")},
+		{name: "4in6", src: netip.MustParseAddrPort("[::ffff:1.2.3.4]:8080"), line: "PROXY TCP4 1.2.3.4 1.2.3.4 8080 8080\r\n", want: netip.MustParseAddrPort("1.2.3.4:8080")},
+		{name: "zone", src: netip.MustParseAddrPort("[fe80::1%en0]:9000"), line: "PROXY TCP6 fe80::1 fe80::1 9000 9000\r\n", want: netip.MustParseAddrPort("[fe80::1]:9000")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line, err := proxyProtoV1Line(tc.src)
+			if err != nil {
+				t.Fatalf("proxyProtoV1Line: %v", err)
+			}
+			if line != tc.line {
+				t.Fatalf("line = %q, want %q", line, tc.line)
+			}
+			addr, err := readProxyProtoHeader(strings.NewReader(line), nil)
+			if err != nil {
+				t.Fatalf("parse %q: %v", line, err)
+			}
+			got := addr.(*net.TCPAddr).AddrPort()
+			if got != tc.want {
+				t.Fatalf("parsed = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if _, err := proxyProtoV1Line(netip.AddrPort{}); !errors.Is(err, errProxyProtoMalformed) {
+		t.Fatalf("invalid addr err = %v, want errProxyProtoMalformed", err)
+	}
+}
+
+func startProxyProtoWebSocketEdge(t *testing.T, trusted []string) string {
+	t.Helper()
+	publicAddr := freeTCPAddr(t)
+	s, err := New(Config{
+		ControlAddr:          freeTCPAddr(t),
+		PublicAddr:           publicAddr,
+		Domain:               "example.com",
+		TokenSHA256:          sumToken("tok"),
+		PublicScheme:         "http",
+		Insecure:             true,
+		ProxyProtocol:        true,
+		ProxyProtocolTrusted: trusted,
+		Limits:               LimitsConfig{UnauthPerAddr: 1},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runErrCh := make(chan error, 1)
+	go func() { runErrCh <- s.Run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		<-runErrCh
+	})
+	waitTCPUp(t, publicAddr)
+	return publicAddr
+}
+
+func webSocketUpgradeStatus(t *testing.T, addr, claimedSrc string) (int, net.Conn) {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial public listener: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
+	header := v2Header(proxyProtoV2CmdProxy, 0x11, v2INETPayload(t, claimedSrc, "10.0.1.7", 40000, 443))
+	req := "GET " + controlWebSocketPath + " HTTP/1.1\r\nHost: example.com\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Protocol: " + controlWebSocketSubprotocol + "\r\n\r\n"
+	if _, err := conn.Write(append(header, req...)); err != nil {
+		t.Fatalf("write upgrade: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read upgrade response: %v", err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode, conn
+}
+
+func TestProxyProtoWebSocketAdmissionKeysOnTheSocketPeerWithoutATrustedList(t *testing.T) {
+	addr := startProxyProtoWebSocketEdge(t, nil)
+	if code, _ := webSocketUpgradeStatus(t, addr, "198.51.100.1"); code != http.StatusSwitchingProtocols {
+		t.Fatalf("first upgrade = %d, want 101", code)
+	}
+	if code, _ := webSocketUpgradeStatus(t, addr, "198.51.100.2"); code != http.StatusServiceUnavailable {
+		t.Fatalf("second upgrade from the same socket peer claiming another address = %d, want 503; a PROXY header chosen by the client must not pick the per-address slot", code)
+	}
+}
+
+func TestProxyProtoWebSocketAdmissionKeysOnTheHeaderAddressWithATrustedList(t *testing.T) {
+	addr := startProxyProtoWebSocketEdge(t, []string{"127.0.0.0/8"})
+	if code, _ := webSocketUpgradeStatus(t, addr, "198.51.100.1"); code != http.StatusSwitchingProtocols {
+		t.Fatalf("first upgrade = %d, want 101", code)
+	}
+	if code, _ := webSocketUpgradeStatus(t, addr, "198.51.100.2"); code != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade for a different client behind the trusted proxy = %d, want 101", code)
+	}
+	if code, _ := webSocketUpgradeStatus(t, addr, "198.51.100.1"); code != http.StatusServiceUnavailable {
+		t.Fatalf("second upgrade for the same client behind the trusted proxy = %d, want 503", code)
+	}
+}

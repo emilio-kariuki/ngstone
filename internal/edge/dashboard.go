@@ -81,6 +81,31 @@ type dashboardMetrics struct {
 	TCPRejectedBindCap       int64 `json:"tcp_rejected_bind_cap"`
 	TCPRejectedRateLimited   int64 `json:"tcp_rejected_rate_limited"`
 	TCPRejectedForbiddenCIDR int64 `json:"tcp_rejected_forbidden_cidr"`
+	PeerForwardedConns       int64 `json:"peer_forwarded_conns"`
+	PeerForwardFailed        int64 `json:"peer_forward_failed"`
+	PeerForwardStale         int64 `json:"peer_forward_stale"`
+	PeerLookups              int64 `json:"peer_lookups"`
+	PeerLookupErrors         int64 `json:"peer_lookup_errors"`
+	PeerRejectedLookupCap    int64 `json:"peer_rejected_lookup_cap"`
+	PeerRejectedForwardCap   int64 `json:"peer_rejected_forward_cap"`
+	PeerAcceptedConns        int64 `json:"peer_accepted_conns"`
+	PeerRejectedAuth         int64 `json:"peer_rejected_auth"`
+	PeerVersionSkew          int64 `json:"peer_version_skew"`
+	PeerMisdirected421       int64 `json:"peer_misdirected_421"`
+	PeerApexRuleLookups      int64 `json:"peer_apex_rule_lookups"`
+	ActivePeerForwards       int64 `json:"active_peer_forwards"`
+	PeerTCPForwarded         int64 `json:"peer_tcp_forwarded"`
+	PeerControlForwarded     int64 `json:"peer_control_forwarded"`
+	PeerControlForwardFailed int64 `json:"peer_control_forward_failed"`
+	ShareDirectoryErrors     int64 `json:"share_directory_errors"`
+	PeerTCPBindFailed        int64 `json:"peer_tcp_bind_failed"`
+	PeerTCPListeners         int64 `json:"peer_tcp_listeners"`
+	AdminMTLSRejected        int64 `json:"admin_mtls_rejected"`
+
+	CustomDomainsActive       int64 `json:"custom_domains_active"`
+	CustomDomainLookupErrors  int64 `json:"custom_domain_lookup_errors"`
+	CustomDomainOwnerMismatch int64 `json:"custom_domain_owner_mismatch"`
+	CustomDomainLoginRejected int64 `json:"custom_domain_login_rejected"`
 }
 
 func (s *Server) dashboardState(r *http.Request) dashboardState {
@@ -327,6 +352,31 @@ func dashboardMetricsSnapshot() dashboardMetrics {
 		TCPRejectedBindCap:       metricTCPRejectedBindCap.Value(),
 		TCPRejectedRateLimited:   metricTCPRejectedRateLimited.Value(),
 		TCPRejectedForbiddenCIDR: metricTCPRejectedForbiddenCIDR.Value(),
+		PeerForwardedConns:       metricPeerForwardedConns.Value(),
+		PeerForwardFailed:        metricPeerForwardFailed.Value(),
+		PeerForwardStale:         metricPeerForwardStale.Value(),
+		PeerLookups:              metricPeerLookups.Value(),
+		PeerLookupErrors:         metricPeerLookupErrors.Value(),
+		PeerRejectedLookupCap:    metricPeerRejectedLookupCap.Value(),
+		PeerRejectedForwardCap:   metricPeerRejectedForwardCap.Value(),
+		PeerAcceptedConns:        metricPeerAcceptedConns.Value(),
+		PeerRejectedAuth:         metricPeerRejectedAuth.Value(),
+		PeerVersionSkew:          metricPeerVersionSkew.Value(),
+		PeerMisdirected421:       metricPeerMisdirected.Value(),
+		PeerApexRuleLookups:      metricPeerApexRuleLookups.Value(),
+		ActivePeerForwards:       metricActivePeerForwards.Value(),
+		PeerTCPForwarded:         metricPeerTCPForwarded.Value(),
+		PeerControlForwarded:     metricPeerControlForwarded.Value(),
+		PeerControlForwardFailed: metricControlForwardFailed.Value(),
+		ShareDirectoryErrors:     metricShareDirectoryErrors.Value(),
+		PeerTCPBindFailed:        metricPeerTCPBindFailed.Value(),
+		PeerTCPListeners:         metricPeerTCPListeners.Value(),
+		AdminMTLSRejected:        metricAdminMTLSRejected.Value(),
+
+		CustomDomainsActive:       metricCustomDomainsActive.Value(),
+		CustomDomainLookupErrors:  metricCustomDomainLookupErrors.Value(),
+		CustomDomainOwnerMismatch: metricCustomDomainOwnerMismatch.Value(),
+		CustomDomainLoginRejected: metricCustomDomainLoginRejected.Value(),
 	}
 }
 
@@ -370,6 +420,30 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	writePrometheusCounter(w, "ngstoned_tcp_rejected_bind_cap_total", "TCP binds rejected by the per-session bind cap.", metrics.TCPRejectedBindCap)
 	writePrometheusCounter(w, "ngstoned_tcp_rejected_rate_limited_total", "TCP connections rejected by the per-IP rate limiter.", metrics.TCPRejectedRateLimited)
 	writePrometheusCounter(w, "ngstoned_tcp_rejected_forbidden_cidr_total", "TCP connections rejected by an IP allowlist.", metrics.TCPRejectedForbiddenCIDR)
+	writePrometheusCounter(w, "ngstoned_peer_forwarded_conns_total", "Public connections forwarded to the edge that owns the tunnel.", metrics.PeerForwardedConns)
+	writePrometheusCounter(w, "ngstoned_peer_forward_failed_total", "Forwards closed because no peer edge accepted the connection.", metrics.PeerForwardFailed)
+	writePrometheusCounter(w, "ngstoned_peer_forward_stale_total", "Forwards refused by a peer edge that no longer owns the tunnel.", metrics.PeerForwardStale)
+	writePrometheusCounter(w, "ngstoned_peer_lookups_total", "Tunnel owner lookups issued for forwarding.", metrics.PeerLookups)
+	writePrometheusCounter(w, "ngstoned_peer_lookup_errors_total", "Tunnel owner lookups that failed.", metrics.PeerLookupErrors)
+	writePrometheusCounter(w, "ngstoned_peer_rejected_lookup_cap_total", "Forwards rejected by the owner lookup concurrency cap.", metrics.PeerRejectedLookupCap)
+	writePrometheusCounter(w, "ngstoned_peer_rejected_forward_cap_total", "Forwards rejected by the forwarded connection concurrency cap.", metrics.PeerRejectedForwardCap)
+	writePrometheusCounter(w, "ngstoned_peer_accepted_conns_total", "Forwarded connections accepted from peer edges.", metrics.PeerAcceptedConns)
+	writePrometheusCounter(w, "ngstoned_peer_rejected_auth_total", "Peer connections rejected during authentication.", metrics.PeerRejectedAuth)
+	writePrometheusCounter(w, "ngstoned_peer_version_skew_total", "Forwards skipped because the owner edge only speaks an older peer protocol.", metrics.PeerVersionSkew)
+	writePrometheusCounter(w, "ngstoned_peer_misdirected_421_total", "Requests answered with 421 because the connection targeted another edge.", metrics.PeerMisdirected421)
+	writePrometheusCounter(w, "ngstoned_peer_apex_rule_lookups_total", "Visitor login rules read from shared storage for tunnels owned by another edge.", metrics.PeerApexRuleLookups)
+	writePrometheusGauge(w, "ngstoned_active_peer_forwards", "Currently spliced forwarded connections.", metrics.ActivePeerForwards)
+	writePrometheusCounter(w, "ngstoned_peer_tcp_forwarded_total", "Raw TCP connections forwarded to the edge that owns the tunnel.", metrics.PeerTCPForwarded)
+	writePrometheusCounter(w, "ngstoned_peer_control_forwarded_total", "Share-link connector sessions forwarded to the edge that holds the share.", metrics.PeerControlForwarded)
+	writePrometheusCounter(w, "ngstoned_peer_control_forward_failed_total", "Share-link connector sessions closed because the share's holding edge could not be looked up or reached.", metrics.PeerControlForwardFailed)
+	writePrometheusCounter(w, "ngstoned_share_directory_errors_total", "Share directory writes that failed after the share was accepted.", metrics.ShareDirectoryErrors)
+	writePrometheusCounter(w, "ngstoned_peer_tcp_bind_failed_total", "Ports of TCP tunnels on other edges that this edge could not bind.", metrics.PeerTCPBindFailed)
+	writePrometheusGauge(w, "ngstoned_peer_tcp_listeners", "Ports currently open to forward raw TCP tunnels owned by other edges.", metrics.PeerTCPListeners)
+	writePrometheusCounter(w, "ngstoned_admin_mtls_rejected_total", "Management connections rejected for an invalid client certificate.", metrics.AdminMTLSRejected)
+	writePrometheusGauge(w, "ngstoned_custom_domains_active", "Active custom domains in the routing snapshot.", metrics.CustomDomainsActive)
+	writePrometheusCounter(w, "ngstoned_custom_domain_lookup_errors_total", "Custom domain snapshot loads that failed.", metrics.CustomDomainLookupErrors)
+	writePrometheusCounter(w, "ngstoned_custom_domain_owner_mismatch_total", "Custom domain requests refused because the bound tunnel owner differs from the domain owner.", metrics.CustomDomainOwnerMismatch)
+	writePrometheusCounter(w, "ngstoned_custom_domain_login_rejected_total", "Custom domain requests refused because the tunnel requires visitor sign-in.", metrics.CustomDomainLoginRejected)
 	writePrometheusGauge(w, "ngstoned_active_tunnels", "Currently routed HTTP and TCP tunnels.", int64(len(s.dashboardTunnels())))
 	writePrometheusGauge(w, "ngstoned_uptime_seconds", "Seconds since ngstoned started.", uptimeSeconds(s.startedAt))
 	fmt.Fprintln(w, "# HELP ngstoned_tunnel_requests_total Requests observed for a tunnel.")
@@ -481,7 +555,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if s.oidcEnabled() {
+	if auth, ok := adminAuthFromContext(r.Context()); ok && auth.AuthType == adminAuthTypeMTLS {
+		if !s.authorizeAdminRole(w, r, auth) {
+			return
+		}
+	} else if s.oidcEnabled() {
 		if _, ok := s.oidcSessionFromRequest(r); !ok {
 			http.Redirect(w, r, "/api/v1/auth/oidc/start", http.StatusFound)
 			return

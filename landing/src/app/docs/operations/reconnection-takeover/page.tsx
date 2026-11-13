@@ -44,8 +44,9 @@ export default function ReconnectionTakeoverPage() {
 
       <Anchor id="takeover-rules">The takeover rules</Anchor>
       <p>
-        When a <code>Bind</code> request names a subdomain that&apos;s already
-        held, the edge resolves it with three rules, in order:
+        When a <code>Bind</code> request names a subdomain — or, for a TCP
+        tunnel, a port — that&apos;s already held, the edge resolves it with
+        three rules, in order:
       </p>
       <Steps>
         <Step title="Same InstanceID — immediate takeover">
@@ -59,9 +60,10 @@ export default function ReconnectionTakeoverPage() {
           dead. The new session takes the binding.
         </Step>
         <Step title="Different InstanceID, live holder — rejected">
-          The edge returns <code>BindErr{"{subdomain_taken}"}</code>. Two
-          separate agents shouldn&apos;t silently fight over a name — liveness
-          is only consulted in this one case.
+          The edge returns <code>BindErr{"{subdomain_taken}"}</code>, or{" "}
+          <code>BindErr{"{port_unavailable}"}</code> for a TCP port. Two
+          separate agents shouldn&apos;t silently fight over a name or a port
+          — liveness is only consulted in this one case.
         </Step>
       </Steps>
       <p>
@@ -69,7 +71,12 @@ export default function ReconnectionTakeoverPage() {
         <code>Evicted{"{hostname, reason: \"takeover\"}"}</code>, force-closes
         it, and rebinds atomically under the registry lock. The evicted agent
         updates its status line instead of continuing to advertise a URL it
-        no longer owns.
+        no longer owns. For a TCP tunnel, <code>hostname</code> carries the{" "}
+        <code>tcp://host:port</code> URL, and the takeover hands the
+        port&apos;s existing listener to the new session instead of closing
+        and reopening it, so no other process can grab the port in between.
+        As for subdomains, the holder and the requester must belong to the
+        same credential owner before any of these rules apply.
       </p>
       <p>
         A named tunnel can opt into a connector pool with{" "}
@@ -88,8 +95,20 @@ export default function ReconnectionTakeoverPage() {
         falls back to an authenticated WebSocket carrying the same yamux
         session through <code>/_ngstone/control</code> on HTTPS{" "}
         <code>:443</code>. Use <code>--transport raw</code> or{" "}
-        <code>--transport websocket</code> to force a path. QUIC is reserved
-        for a later transport mode.
+        <code>--transport websocket</code> to force a path.
+      </p>
+      <p>
+        <code>--transport quic</code> is opt-in: start the edge with{" "}
+        <code>-quic</code> and open <code>4443/udp</code>. The same yamux
+        session runs over one bidirectional QUIC stream, every connection is
+        address-validated (Retry, and NEW_TOKEN tokens also validate the
+        address), closed if unauthenticated 5 s after admission as on TCP, and
+        the agent never falls back to another transport. QUIC sends a keep-alive every 5 s with a 15 s idle
+        timeout, so a peer that vanishes without closing is detected within
+        about 20 s, compared with immediately for a killed process over TCP
+        (the kernel resets the connection) and up to 45 s for a silent TCP
+        path (partition). A graceful shutdown is noticed at
+        once on every transport.
       </p>
 
       <Anchor id="reconnect-backoff">Reconnect backoff</Anchor>
@@ -101,6 +120,34 @@ export default function ReconnectionTakeoverPage() {
         effectively instant — the agent doesn&apos;t sit around waiting out the
         45 s dead-peer detection window before it can have its own name
         back.
+      </p>
+      <p>
+        TCP tunnels get the same instant reconnect. When you didn&apos;t pass{" "}
+        <code>--remote-port</code>, the agent remembers the port the edge
+        last gave it and requests that port again on reconnect, so the
+        advertised <code>tcp://host:port</code> stays the same. If that port
+        has since gone to another tunnel, the edge answers{" "}
+        <code>port_unavailable</code>. The agent then drops the remembered
+        port and binds a fresh one in the same handshake, so the tunnel still
+        comes up, at a new address. An explicit <code>--remote-port</code>{" "}
+        is never moved: the agent keeps retrying for that port.
+      </p>
+      <p>
+        HTTP and TLS tunnels without <code>--subdomain</code> do the same
+        with their auto-assigned name. If the name is taken
+        (<code>subdomain_taken</code>) or now belongs to a tunnel of another
+        kind (<code>kind_conflict</code>), the agent binds a fresh random name
+        in the same handshake. A preview credential keeps the one name the
+        edge assigned it; after its first refusal the agent stops asking for
+        remembered names and ports. An explicit <code>--subdomain</code> is
+        never changed.
+      </p>
+      <p>
+        When the agent reconnects to a different edge in a multi-edge
+        deployment, the new edge takes the port&apos;s lease and the old edge
+        evicts its local session at its next poll. Clients can see connection
+        refused for up to about two seconds during the move, and up to 30
+        seconds if the proxy listener on the old edge cannot bind.
       </p>
 
       <Anchor id="dead-peer-detection">Dead-peer detection</Anchor>
@@ -138,6 +185,12 @@ export default function ReconnectionTakeoverPage() {
         eventual cleanup from deleting a binding that a newer session already
         took over — the operation is idempotent, since it can be triggered
         both from the session-death path and from a graceful drain.
+      </p>
+      <p>
+        TCP ports work the same way. A takeover moves the port out of the
+        old session&apos;s ownership, so when the old session is finally
+        released it closes only the connections it was already relaying and
+        leaves the port, and its listener, with the new owner.
       </p>
     </DocsArticle>
   )

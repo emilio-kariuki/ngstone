@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -29,15 +30,90 @@ func mustSHA256(s string) []byte {
 	return sum[:]
 }
 
+const quicStreamMarker = "result=ok transport=quic"
+
+var (
+	quicControl       bool
+	quicAgentsStarted int
+	quicEdgeLog       *syncBuf
+)
+
+func useQUIC(t *testing.T) {
+	t.Helper()
+	quicControl = true
+	quicAgentsStarted = 0
+	quicEdgeLog = &syncBuf{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, quicEdgeLog), nil)))
+	t.Cleanup(func() {
+		defer func() {
+			slog.SetDefault(prev)
+			quicControl = false
+			quicAgentsStarted = 0
+			quicEdgeLog = nil
+		}()
+		want := quicAgentsStarted
+		deadline := time.Now().Add(5 * time.Second)
+		for strings.Count(quicEdgeLog.String(), quicStreamMarker) < want && time.Now().Before(deadline) {
+			time.Sleep(50 * time.Millisecond)
+		}
+		if got := strings.Count(quicEdgeLog.String(), quicStreamMarker); got < want {
+			t.Errorf("edge authenticated %d QUIC control sessions for %d agents started in QUIC mode", got, want)
+		}
+	})
+}
+
+func quicEdge(cmd *exec.Cmd) *exec.Cmd {
+	if quicControl {
+		cmd.Args = append(cmd.Args, "-quic")
+	}
+	return cmd
+}
+
+func edgeLogBuf() *syncBuf {
+	sb := &syncBuf{}
+	if quicControl {
+		quicEdgeLog = sb
+	}
+	return sb
+}
+
+func quicAgent(cmd *exec.Cmd) *exec.Cmd {
+	if quicControl {
+		cmd.Args = append(cmd.Args, "-transport", "quic")
+		quicAgentsStarted++
+	}
+	return cmd
+}
+
+func quicTransport() string {
+	if quicControl {
+		quicAgentsStarted++
+		return "quic"
+	}
+	return ""
+}
+
 func freeAddr(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("freeAddr: %v", err)
+	for i := 0; i < 50; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("freeAddr: %v", err)
+		}
+		addr := ln.Addr().String()
+		ln.Close()
+		if quicControl {
+			pc, err := net.ListenPacket("udp", addr)
+			if err != nil {
+				continue
+			}
+			pc.Close()
+		}
+		return addr
 	}
-	addr := ln.Addr().String()
-	ln.Close()
-	return addr
+	t.Fatalf("freeAddr: no port free for both TCP and UDP")
+	return ""
 }
 
 func waitForPort(t *testing.T, addr string) {
@@ -135,7 +211,7 @@ func (p *managedProc) killAndWait() {
 
 func startEdge(t *testing.T, edgeBin, controlAddr, publicAddr, token, domain string) (*managedProc, *syncBuf) {
 	t.Helper()
-	cmd := exec.Command(edgeBin,
+	cmd := quicEdge(exec.Command(edgeBin,
 		"-public", publicAddr,
 		"-control", controlAddr,
 		"-token-sha256", sha256Hex(token),
@@ -143,8 +219,8 @@ func startEdge(t *testing.T, edgeBin, controlAddr, publicAddr, token, domain str
 		"-public-scheme", "http",
 		"-insecure",
 		"-ops", "",
-	)
-	sb := &syncBuf{}
+	))
+	sb := edgeLogBuf()
 	cmd.Stdout = io.MultiWriter(os.Stderr, sb)
 	cmd.Stderr = io.MultiWriter(os.Stderr, sb)
 	p := newManagedProc(cmd)
@@ -176,7 +252,7 @@ func freeTCPRange(t *testing.T, span int) (lo, hi int) {
 
 func startEdgeTCP(t *testing.T, edgeBin, controlAddr, publicAddr, token, domain string, tcpLo, tcpHi int) (*managedProc, *syncBuf) {
 	t.Helper()
-	cmd := exec.Command(edgeBin,
+	cmd := quicEdge(exec.Command(edgeBin,
 		"-public", publicAddr,
 		"-control", controlAddr,
 		"-token-sha256", sha256Hex(token),
@@ -186,8 +262,8 @@ func startEdgeTCP(t *testing.T, edgeBin, controlAddr, publicAddr, token, domain 
 		"-ops", "",
 		"-tcp-ports", strconv.Itoa(tcpLo)+"-"+strconv.Itoa(tcpHi),
 		"-tcp-bind", "127.0.0.1",
-	)
-	sb := &syncBuf{}
+	))
+	sb := edgeLogBuf()
 	cmd.Stdout = io.MultiWriter(os.Stderr, sb)
 	cmd.Stderr = io.MultiWriter(os.Stderr, sb)
 	p := newManagedProc(cmd)
@@ -206,6 +282,11 @@ func startAgentTCP(t *testing.T, agentBin, controlAddr, token, localTarget strin
 
 func startAgentTCPWithAllowCIDR(t *testing.T, agentBin, controlAddr, token, localTarget string, remotePort int, allowCIDR string) (*managedProc, *syncBuf) {
 	t.Helper()
+	return startAgentTCPWithInstanceID(t, agentBin, controlAddr, token, localTarget, remotePort, allowCIDR, "")
+}
+
+func startAgentTCPWithInstanceID(t *testing.T, agentBin, controlAddr, token, localTarget string, remotePort int, allowCIDR, instanceID string) (*managedProc, *syncBuf) {
+	t.Helper()
 	args := []string{
 		"tcp", localTarget,
 		"-server", controlAddr,
@@ -218,7 +299,10 @@ func startAgentTCPWithAllowCIDR(t *testing.T, agentBin, controlAddr, token, loca
 	if allowCIDR != "" {
 		args = append(args, "-allow-cidr", allowCIDR)
 	}
-	cmd := exec.Command(agentBin, args...)
+	if instanceID != "" {
+		args = append(args, "-instance-id", instanceID)
+	}
+	cmd := quicAgent(exec.Command(agentBin, args...))
 	sb := &syncBuf{}
 	cmd.Stdout = io.MultiWriter(os.Stderr, sb)
 	cmd.Stderr = io.MultiWriter(os.Stderr, sb)
@@ -262,7 +346,7 @@ func startAgent(t *testing.T, agentBin, controlAddr, token, target, subdomain, i
 	if instanceID != "" {
 		args = append(args, "-instance-id", instanceID)
 	}
-	cmd := exec.Command(agentBin, args...)
+	cmd := quicAgent(exec.Command(agentBin, args...))
 	sb := &syncBuf{}
 	cmd.Stdout = io.MultiWriter(os.Stderr, sb)
 	cmd.Stderr = io.MultiWriter(os.Stderr, sb)
@@ -342,6 +426,23 @@ func waitStatus(t *testing.T, publicAddr, hostname, path string, want int, max t
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for status %d on %s%s within %s; last status=%d err=%v", want, hostname, path, max, lastStatus, lastErr)
+}
+
+func waitNotFoundThrough502(t *testing.T, publicAddr, hostname, path string, max time.Duration) time.Duration {
+	t.Helper()
+	start := time.Now()
+	var lastStatus int
+	var lastErr error
+	for time.Since(start) < max {
+		status, _, err := doGet(publicAddr, hostname, path)
+		lastStatus, lastErr = status, err
+		if err == nil && status == http.StatusNotFound {
+			return time.Since(start)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for 404 on %s%s within %s; last status=%d err=%v", hostname, path, max, lastStatus, lastErr)
+	return 0
 }
 
 func waitLogContains(t *testing.T, sb *syncBuf, substr string, max time.Duration) {

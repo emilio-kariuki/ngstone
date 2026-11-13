@@ -138,9 +138,11 @@ export default function SecurityModelPage() {
         real ceiling and neither number alone tells the whole story. No code
         path buffers an entire request or response body in memory. The
         unauthenticated surface on <code>:4443</code> is separately capped
-        (concurrent handshakes, unauthenticated sessions) so a stranger
-        can&apos;t hoard control-plane resources for the price of a bare TCP
-        connect.
+        (concurrent handshakes, unauthenticated sessions, and unauthenticated
+        sessions per client address) so a stranger can&apos;t hoard
+        control-plane resources for the price of a bare TCP connect. The
+        per-address cap is a quarter of the handshake cap, so four addresses
+        (or /48s) can still fill the handshake cap.
       </p>
 
       <Anchor id="out-of-scope">Out of scope</Anchor>
@@ -160,7 +162,6 @@ export default function SecurityModelPage() {
           Compromise of the VPS itself — it terminates TLS and sees
           plaintext, so it&apos;s treated as trusted infrastructure
         </li>
-        <li>mTLS team authentication</li>
       </ul>
     </DocsArticle>
   )

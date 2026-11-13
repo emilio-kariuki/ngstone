@@ -138,10 +138,66 @@ policies, and custom-domain registrations. Connector leases are renewed by
 heartbeats, so several edge processes can share one database and only the
 process holding a live lease serves a tunnel.
 
-This coordinates ownership; it does not yet proxy public requests between
-edge processes. Put a load balancer or DNS strategy in front that sends a
-tunnel's traffic to the edge holding its live connector, or keep the public
-listener on one edge until inter-edge forwarding is added.
+#### Inter-edge forwarding
+
+With PostgreSQL and `NGSTONE_PEER_ADDR=<private-ip>:<port>` set on every edge,
+an edge that receives a public connection for a tunnel owned by another edge
+forwards it to the owner over a pinned mutual-TLS connection, so any edge can
+sit behind your load balancer or DNS round robin. HTTP, WebSocket, SSE, TLS
+passthrough, and raw TCP tunnels are forwarded; the forwarding is a single hop.
+
+Requirements:
+
+- PostgreSQL storage; `-peer-addr` / `NGSTONE_PEER_ADDR` is rejected with
+  SQLite and with `-insecure`. The address must be an IP address literal and a
+  port, not `0.0.0.0` or port 0; hostnames are rejected.
+- Every edge must reach every other edge's peer address. Bind it to a private
+  interface and firewall the port to the other edges only: the peer port
+  accepts at most 64 concurrent handshakes with a 5 second deadline and has no
+  per-source limit.
+- Each edge needs a distinct `NGSTONE_EDGE_ID`; two edges with the same id
+  overwrite each other's registration.
+- Each edge needs its own certificate for the same domain and wildcard.
+  Issuing a certificate per edge can hit the ACME duplicate-certificate rate
+  limit, so share certificate storage or use one certificate on every edge.
+  The same applies to automatic custom-domain certificates.
+- Visitor-login settings (`NGSTONE_VISITOR_OIDC_*`), including
+  `NGSTONE_VISITOR_OIDC_COOKIE_SECRET`, must be identical on every edge.
+
+Trust model: edges authenticate each other by the SPKI pins each edge
+publishes in the shared database, so anyone who can write that database can
+add a peer. The owner trusts the forwarded client address only from a pinned
+peer.
+
+Raw TCP tunnels: every edge started with the same `-tcp-ports` range opens the
+tunnel's port within about two seconds of the owner binding it, and forwards
+connections to the owner. The owner enforces allow-CIDR and limits with the
+real client address. A port outside an edge's own range, or one it cannot bind,
+is not served by that edge, so give every edge the same range.
+
+Share links are forwarded when the sharer authenticated with a `share`
+credential. Custom domains are forwarded too. Not forwarded: connections with
+no SNI or a ClientHello over 16 KiB, and anything under `-insecure`. A
+request for one of these must reach the owning edge directly.
+
+A forwarded connection holds one of the client address's in-flight slots on
+the ingress edge for its lifetime, and closes after the TCP idle timeout (30
+minutes by default) of silence in both directions. An ingress edge carries at
+most 1024 concurrent forwarded connections. Edge clocks must agree to within
+about two thirds of the lease TTL (30 s with the default TTL); beyond that,
+peer registrations look expired and forwarding fails closed. Long-lived
+WebSocket and SSE connections that stay silent need traffic or keep-alives
+within that 30-minute idle timeout. Once the owner side closes or half-closes
+its sending direction, the ingress closes the client's side five seconds later;
+a TLS-passthrough backend or a raw TCP tunnel that half-closes while still
+reading sees the client's upload cut after five seconds when reached through
+another edge. With
+forwarding enabled, a database outage closes connections for tunnel hostnames
+not bound on the receiving edge, where a single edge would answer 404.
+
+Under Docker's bridge network, set `-peer-listen` (or `NGSTONE_PEER_LISTEN`) to
+the address inside the container, for example `:4043`, and publish that port;
+`NGSTONE_PEER_ADDR` stays the address the other edges dial.
 
 For multiple edge servers, point every process at PostgreSQL and give each
 process a stable edge ID:
@@ -210,9 +266,20 @@ credential is issued or a `tls` tunnel is bound, because an older `ngstoned`
 rejects a credentials file containing an unknown credential kind and does not
 apply the shared `http`/`tls` hostname rule.
 
-Database-share commands require a legacy shared-token operator session. Scoped
-tunnel credentials cannot create, inspect, or manage database shares. Configure
-each edge for either scoped credentials or the legacy shared-token mode.
+Share credentials create and manage database shares:
+`ngstone credentials issue --kind share` or
+`ngstone admin credentials issue --kind share`. A share credential takes no
+subdomain or remote port and cannot bind tunnels; it may manage only shares
+that belong to its owner. Credentials issued through the management API belong
+to the issuing principal, so every share credential issued by the same
+principal manages the same shares. A credential issued with
+`ngstone credentials issue` has no owner and manages only its own shares. HTTP,
+TCP, TLS and preview credentials cannot use share commands. A legacy
+shared-token session still manages every share. Every edge sharing a
+credentials file or database must be upgraded before a `share` credential is
+issued: an older `ngstoned` rejects a credentials file containing the `share`
+kind, and an older edge on a shared database accepts the token but refuses
+every share command.
 
 The same management API persists traffic policies and custom domains:
 
@@ -221,6 +288,7 @@ ngstone admin policies apply --name web --file traffic-policy.json
 ngstone admin policies list
 ngstone admin domains add --domain demo.example.org --tunnel-id <tunnel-id>
 ngstone admin domains list
+ngstone admin domains activate <domain-id>
 ```
 
 For a multi-tunnel project, create `ngstone.json` in the project directory:
@@ -521,6 +589,100 @@ Policies are HTTP-only and are not access control by themselves: combine
 them with `--basic-auth`, `--allow-cidr`, or `--oidc` when the tunnel must be
 private.
 
+### Custom domains
+
+An HTTP or TLS tunnel can also answer on a name you own, such as
+`app.example.org`, in addition to its `subdomain.example.com` name. Custom
+domains need durable storage. For an HTTP tunnel the edge obtains a
+certificate from its ACME CA (`-acme-ca`) on the first visit, unless you
+provide one. Raw TCP tunnels are addressed by port, not by name.
+
+1. Register the name for an existing tunnel. It starts as `pending` and
+   serves nothing:
+
+   ```
+   ngstone admin domains add --domain app.example.org --tunnel-id <id>
+   ```
+
+2. Point the name's DNS at every edge (A or AAAA records).
+3. For an HTTP tunnel, nothing to do: the edge that holds the tunnel obtains
+   a certificate with the TLS-ALPN-01 challenge on the first HTTPS request, so
+   port 443 on every edge must be reachable from the internet without a
+   TLS-terminating proxy. To use your own certificate instead, put
+   `<name>.crt` and `<name>.key` in the directory given to `ngstoned
+   -custom-certs` (or `NGSTONE_CUSTOM_CERTS_DIR`) on every edge (mode
+   `0600`) and restart the edges one at a time; it takes precedence. A TLS
+   tunnel needs no edge certificate: its local service presents the
+   certificate for the custom name.
+4. An administrator verifies outside ngstone that the requester controls the
+   name, then runs `ngstone admin domains activate <id>`.
+5. Test with `curl https://app.example.org/`. `ngstone admin domains disable
+   <id>` stops it again.
+
+Registering is open to operators for their own tunnels. Activating and
+disabling are administrator-only.
+
+Limits:
+
+- Automatic certificates use the TLS-ALPN-01 challenge only; the edge must
+  receive TLS on port 443 directly.
+- The first HTTPS request to a new domain waits for issuance; if that takes
+  longer than the read-header timeout (10 s default) that request fails and
+  the next one succeeds. A failed first issuance holds that request for about
+  a minute before it fails.
+- A failed issuance is retried no sooner than 15 minutes later for that name,
+  and at most about 30 new certificates are ordered per hour per edge (burst
+  20); renewals are not counted.
+- With several edges, only the edge that holds the tunnel obtains a
+  certificate; the others forward the visitor. Edges that do not share
+  `-cert-storage` each obtain their own certificate, which counts against the
+  CA's duplicate-certificate limit. A tunnel connected to several edges at
+  once needs shared certificate storage, or validation can fail. Multi-edge
+  automatic certificates need peering (`-peer-addr`): without it every edge
+  tries to issue.
+- With peering, a domain whose tunnel is offline fails the TLS handshake
+  unless an operator certificate covers it.
+- Disabling or deleting a domain stops its certificate from being presented
+  within one poll interval and stops renewal. The certificate files stay in
+  `-cert-storage`; ngstone does not revoke or delete them.
+- No ownership verification. Activation is the trust decision.
+- Operator certificates are per edge and are read at start-up, so a change
+  needs a restart. An expired, unreadable, mismatched or unsafely permissioned
+  certificate stops the edge from starting, before certificate management
+  begins.
+- A tunnel that requires visitor sign-in (`--oidc`) answers 403 on its custom
+  domain.
+- Activation, disabling and deletion take effect at once on the edge that
+  handled the admin call if that edge can read the database, otherwise at its
+  next poll, and reach other edges within one poll interval
+  (about 5 seconds). During that window a stale edge can forward a connection
+  that the owning edge then refuses; the visitor sees a closed connection.
+- An edge that cannot read the database keeps routing the domains it already
+  knows until that list is older than the lease TTL, then stops routing them.
+- At most 10,000 active custom domains are routed, the earliest activated
+  first. Beyond that the most recently activated domains are not routed;
+  activation still returns `active`. The edge logs a warning ("active custom
+  domains exceed the routing cap") and `ngstoned_custom_domains_active` stays
+  at 10000, so an edge that reports 10000 with more active rows in the
+  database is over the cap.
+- Any operator can register a name, with or without a tunnel, and leave it
+  `pending`. The real owner then gets a conflict until an administrator
+  deletes that row.
+- An active custom domain for an HTTP tunnel with no operator certificate is
+  served with an automatic certificate; until one is issued the TLS handshake
+  fails.
+- A certificate's common name must be empty or equal to one of its DNS names,
+  and it must not carry IP, e-mail or URI names. OCSP stapling is not done
+  for these certificates. OCSP stapling is not disabled for automatic
+  certificates.
+- Register internationalised names in `xn--` form.
+- No `Strict-Transport-Security` header is set on custom domains.
+
+Edges forward custom-domain traffic to the owning edge like any other tunnel
+(see [Inter-edge forwarding](#inter-edge-forwarding)). See
+[deploy/README.md](deploy/README.md#custom-domains) for the systemd and
+Docker layouts.
+
 ### Visitor login (OIDC)
 
 Put an edge-enforced login wall in front of an HTTP tunnel. Visitors sign in
@@ -729,12 +891,17 @@ ngstone connect ngstone://example.com:4443/s/...
 Ctrl-C on the sharer revokes the link and connectors are told within a
 second. `--allow-cidr`, `--max-conns`, `--max-connectors`, `--max-uses`,
 `--single-use`, `--idle`, `--approve` and `--passphrase` set the policy;
-`--audit-log` writes every event as JSON Lines. Several services go in one
+`--audit-log` writes every event as JSON Lines. `share`, `connect` and the
+management commands take `--transport` (auto, raw, websocket or quic), the
+same as `http` and `tcp`. Several services go in one
 link (`ngstone share postgres redis:6380`), and connectors can name
 themselves (`--as alice`). From any terminal with the token, `ngstone
 shares` lists live shares (`--watch` tails their events), `ngstone extend`
 moves an expiry, `ngstone kick` drops a connector and `ngstone unshare`
-revokes. The full design is in [docs/SHARE-DESIGN.md](docs/SHARE-DESIGN.md).
+revokes. With several edges sharing a database, `shares`, `extend` and `kick`
+reach every edge holding your shares: the listing has an `EDGE` column and
+names any edge that did not answer within 3 seconds, and `approve` and
+`--watch` work only on the edge holding the share. The full design is in [docs/SHARE-DESIGN.md](docs/SHARE-DESIGN.md).
 
 ## Run it locally, no TLS
 
@@ -877,6 +1044,16 @@ When OIDC is enabled, browser access to the dashboard and management API uses
 the OIDC session and team roles instead of the loopback bypass. Keep the ops
 listener private or put it behind HTTPS; the OIDC callback must be reachable by
 the browser and must exactly match the registered provider callback.
+
+Team members and automation can instead authenticate with client certificates
+on a separate mTLS listener, enabled with `NGSTONE_ADMIN_MTLS_ADDR` and
+`NGSTONE_ADMIN_MTLS_CLIENT_CA`. The certificate is the only authentication on
+that listener; its `OU` sets the role and its `CN` the audit principal. The CLI
+presents one with `--client-cert` and `--client-key` (or
+`NGSTONE_ADMIN_CLIENT_CERT` and `NGSTONE_ADMIN_CLIENT_KEY`), with `--ca` and
+`--server-name` available for private server certificates. See
+[mTLS team access](deploy/README.md#mtls-team-access) for the CA and
+certificate recipe.
 
 For lifecycle alerts, set `NGSTONE_ALERT_WEBHOOK_URL` and optionally
 `NGSTONE_ALERT_WEBHOOK_TOKEN` in the edge environment. ngstoned sends
@@ -1038,6 +1215,10 @@ endpoint on HTTPS `:443`, which can traverse a proxy when WebSockets are
 enabled. Keeping both records DNS-only remains the simplest deployment and
 also supports explicit `--transport raw`.
 
+QUIC is an opt-in transport: run the edge with `-quic` and the agent with
+`--transport quic`. It needs UDP on the control port (`4443/udp`) and does not
+pass through Cloudflare's proxy.
+
 To remove the edge later, run `sudo ./deploy/uninstall.sh` from the checkout.
 It removes the service, binaries, and secrets while preserving certificates
 and default SQLite control-plane state. See
@@ -1082,7 +1263,8 @@ connections, so there's nothing to open on your home firewall or NAT. By
 default it tries one TLS yamux connection to `:4443`, then falls back to the
 same yamux session inside an authenticated WebSocket upgrade at
 `/_ngstone/control` on `:443`. Use `--transport raw` or
-`--transport websocket` to force one path. Every proxied HTTP request gets its
+`--transport websocket` to force one path, or `--transport quic` (with the
+edge's `-quic`) to carry the same session over one QUIC stream on UDP. Every proxied HTTP request gets its
 own yamux stream inside the selected session, opened by the edge and read by
 the agent. A `tls` tunnel's connections are routed by ClientHello SNI before
 the edge terminates TLS and ride their stream as raw bytes. Certificates for both the apex and the wildcard are issued and
@@ -1096,10 +1278,60 @@ The default `--transport auto` tries raw TCP/TLS on the configured control
 address first, then retries the same agent session over WebSocket/TLS on port
 443. In insecure development mode the fallback uses plain WebSocket on port
 443. `--transport raw` and `--transport websocket` are available when an
-operator needs a deterministic path; QUIC is intentionally reserved for a
-later transport mode.
+operator needs a deterministic path.
+
+`--transport quic` is never part of `auto` and never falls back to another
+transport. The edge must run with `-quic`; it then listens on UDP at the same
+address and port as `-control` and runs the same yamux session over a single
+bidirectional QUIC stream. Every QUIC connection goes through address
+validation (Retry) before the edge spends handshake work on it. The edge
+serves its managed apex certificate, or an ephemeral self-signed certificate
+in insecure mode; a caller-supplied public TLS config is rejected with
+`-quic`. A handshake that gets no answer times out after 10 s, with a
+hint to check that the edge runs with `-quic` and that UDP is reachable. When
+UDP is blocked, a literal address fails after 10 s. A name with both an IPv4 and
+an IPv6 address tries IPv4 first and then IPv6, so it can take up to 20 s,
+the agent's whole QUIC dial budget; with more than two records the 20 s may run
+out after the first two. `ngstone doctor` gives the probe
+`--timeout` (5 s by default) instead, so on a link with a round trip above
+about 2.5 s run it with a longer `--timeout`.
+
+QUIC has no peer-death signal like a TCP reset, so it sends a keep-alive every
+5 s with a 15 s idle timeout: a peer that vanishes without closing (crash,
+power loss) is detected within about 20 s, compared with immediately for a
+killed process over TCP (the kernel resets the connection) and up to 45 s for a
+silent TCP path (partition). A graceful shutdown is noticed at once on every
+transport. A QUIC connection that has not authenticated is closed no later
+than 5 s after it was admitted, and holds its unauthenticated slot until it is
+closed. The edge sends a QUIC Retry before it admits a connection, so the
+agent's first handshake reply arrives two round trips after it starts. The
+agent waits up to 10 s for it, and the whole handshake and authentication must
+fit in the 5 s pre-authentication budget after admission. A link with a round
+trip above about 4.5 s cannot connect over QUIC and should use TCP. Agents
+older than this release wait 5 s and are limited to about 2.5 s, so upgrade the
+agents to get the slow-link fix. `--transport quic` is a flag of
+the root form, `auth`, `port`, `tcp`, `tls`, `doctor`, `share`, `connect` and
+the operator commands; `start` takes the transport from the tunnels file.
+
+The edge also caps unauthenticated control connections per client address:
+at most a quarter of `-handshake-concurrency` at once (4 at the default 16, never
+below 1; set it with `-unauth-per-addr`), counted per IPv4 address or per IPv6
+/48 and shared by TCP, QUIC, WebSocket and forwarded control, where the client
+address is the original one. That is a fairness limit, not a wall: four
+addresses (or four /48s) can still fill the handshake cap. The slot is freed
+when the connection authenticates or closes. A refused client is turned away
+without any control reply: a TCP connection is closed, a QUIC connection is
+refused with `CONNECTION_REFUSED`, and a WebSocket upgrade gets
+`503 too many connections`. The refusals are counted in
+`ngstoned_rejected_unauth_per_addr_total`. Many agents behind one NAT or one
+IPv6 /48 that start at the same moment can hit the cap; they retry and
+connect as earlier ones authenticate, or you can raise the cap.
 
 Reconnects use decorrelated exponential jitter from 500 ms to a 30 s cap.
+An agent without `--remote-port` or `--subdomain` remembers the port or name the
+edge assigned and requests it again on reconnect, taking it over by agent
+identity even past a half-open connection; if it was taken meanwhile, the agent
+binds a new one in the same handshake. A restarted agent starts fresh.
 The edge and agent exchange control pings, skip connectors that have exceeded
 the heartbeat health window, and drain active HTTP/TCP streams before closing
 on shutdown, credential revocation, lease loss, or management drain.

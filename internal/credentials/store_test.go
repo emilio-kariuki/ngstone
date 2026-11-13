@@ -199,6 +199,19 @@ func TestNormalizeSpecTLS(t *testing.T) {
 	}
 }
 
+func TestNormalizeSpecShare(t *testing.T) {
+	got, err := normalizeSpec(Spec{Kind: " Share ", OwnerID: " owner-a "})
+	if err != nil || got.Kind != KindShare || got.OwnerID != "owner-a" {
+		t.Fatalf("normalizeSpec share = %+v, %v, want kind share owner owner-a", got, err)
+	}
+	if _, err := normalizeSpec(Spec{Kind: KindShare, Subdomain: "demo"}); err == nil {
+		t.Fatalf("share credential with a subdomain was accepted")
+	}
+	if _, err := normalizeSpec(Spec{Kind: KindShare, RemotePort: 9000}); err == nil {
+		t.Fatalf("share credential with a remote port was accepted")
+	}
+}
+
 func TestConcurrentIssueDoesNotLoseCredentials(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "credentials.json")
 	store, err := Open(path)

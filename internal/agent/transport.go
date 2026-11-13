@@ -16,6 +16,7 @@ const (
 	TransportAuto      = "auto"
 	TransportRaw       = "raw"
 	TransportWebSocket = "websocket"
+	TransportQUIC      = "quic"
 
 	controlWebSocketPath        = "/_ngstone/control"
 	controlWebSocketSubprotocol = "ngstone-control-v1"
@@ -34,8 +35,10 @@ func transportModes(raw string) ([]string, error) {
 		return []string{TransportRaw}, nil
 	case TransportWebSocket, "ws", "wss", "https":
 		return []string{TransportWebSocket}, nil
+	case TransportQUIC:
+		return []string{TransportQUIC}, nil
 	default:
-		return nil, fmt.Errorf("agent: transport must be auto, raw, or websocket; got %q", raw)
+		return nil, fmt.Errorf("agent: transport must be auto, raw, websocket, or quic; got %q", raw)
 	}
 }
 
@@ -45,6 +48,8 @@ func dialControlMode(ctx context.Context, cfg Config, mode string) (net.Conn, er
 		return dialRawControl(ctx, cfg)
 	case TransportWebSocket:
 		return dialWebSocketControl(ctx, cfg)
+	case TransportQUIC:
+		return dialQUICControl(ctx, cfg)
 	default:
 		return nil, fmt.Errorf("agent: unsupported control transport %q", mode)
 	}
@@ -105,6 +110,31 @@ func controlHost(addr string) (string, error) {
 		return "", fmt.Errorf("agent: invalid control address %q", addr)
 	}
 	return addr, nil
+}
+
+var dialControlSessionFn = dialControlSession
+
+func dialControlSessionModes(ctx context.Context, cfg Config) (tunnel.Session, error) {
+	modes, err := transportModes(cfg.Transport)
+	if err != nil {
+		return nil, err
+	}
+	var failed error
+	for _, mode := range modes {
+		sess, err := dialControlSessionFn(ctx, cfg, mode)
+		if err == nil {
+			return sess, nil
+		}
+		if failed == nil {
+			failed = err
+		} else {
+			failed = fmt.Errorf("%w; %w", failed, err)
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, failed
 }
 
 func dialControlSession(ctx context.Context, cfg Config, mode string) (tunnel.Session, error) {

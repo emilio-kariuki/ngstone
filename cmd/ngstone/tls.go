@@ -35,7 +35,7 @@ func newTLSFlagSet() (*flag.FlagSet, *tlsFlags) {
 	fs.StringVar(&tf.subdomain, "subdomain", "", "requested subdomain (empty = server-assigned)")
 	fs.StringVar(&tf.subdomain, "s", "", "shorthand for -subdomain")
 	fs.StringVar(&tf.server, "server", "", "edge control plane address override (defaults to config or "+defaultServer+")")
-	fs.StringVar(&tf.transport, "transport", agent.TransportAuto, "control transport: auto, raw, or websocket (auto falls back to HTTPS on port 443)")
+	fs.StringVar(&tf.transport, "transport", agent.TransportAuto, "control transport: auto, raw, websocket, or quic (auto falls back to HTTPS on port 443)")
 	fs.StringVar(&tf.token, "token", "", "auth token override (defaults to NGSTONE_TOKEN or the saved config)")
 	fs.StringVar(&tf.instanceID, "instance-id", "", "internal/undocumented: force a specific instance id (testing only)")
 	fs.BoolVar(&tf.insecure, "insecure", false, "dial the control plane in plaintext (dev/test only, no certificates involved)")

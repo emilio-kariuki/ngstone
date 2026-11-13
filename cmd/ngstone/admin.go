@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -60,6 +62,8 @@ func printAdminUsage(w *os.File) {
 	fmt.Fprintln(w, "  domains list                               list durable custom domains")
 	fmt.Fprintln(w, "  domains add --domain NAME                  register a custom domain")
 	fmt.Fprintln(w, "  domains delete <id>                        delete a custom domain")
+	fmt.Fprintln(w, "  domains activate <id>                      activate a custom domain (administrators only)")
+	fmt.Fprintln(w, "  domains disable <id>                       disable a custom domain (administrators only)")
 	fmt.Fprintln(w, "  tunnel drain <hostname|subdomain>          gracefully drain a tunnel")
 }
 
@@ -93,9 +97,13 @@ func cmdAdminLogin(args []string) int {
 }
 
 type adminCLIFlags struct {
-	server string
-	token  string
-	json   bool
+	server     string
+	token      string
+	json       bool
+	clientCert string
+	clientKey  string
+	ca         string
+	serverName string
 }
 
 func newAdminFlagSet(name string) (*flag.FlagSet, *adminCLIFlags) {
@@ -109,11 +117,66 @@ func newAdminFlagSet(name string) (*flag.FlagSet, *adminCLIFlags) {
 	fs.StringVar(&flags.server, "server", serverDefault, "management API URL (defaults to NGSTONE_ADMIN_SERVER or loopback)")
 	fs.StringVar(&flags.token, "token", flags.token, "management bearer token (defaults to NGSTONE_ADMIN_TOKEN; prefer the environment)")
 	fs.BoolVar(&flags.json, "json", false, "print machine-readable JSON")
+	flags.clientCert = os.Getenv("NGSTONE_ADMIN_CLIENT_CERT")
+	flags.clientKey = os.Getenv("NGSTONE_ADMIN_CLIENT_KEY")
+	flags.ca = os.Getenv("NGSTONE_ADMIN_CA")
+	flags.serverName = os.Getenv("NGSTONE_ADMIN_SERVER_NAME")
+	fs.StringVar(&flags.clientCert, "client-cert", flags.clientCert, "management client certificate PEM (defaults to NGSTONE_ADMIN_CLIENT_CERT)")
+	fs.StringVar(&flags.clientKey, "client-key", flags.clientKey, "management client private key PEM, readable only by its owner (defaults to NGSTONE_ADMIN_CLIENT_KEY)")
+	fs.StringVar(&flags.ca, "ca", flags.ca, "PEM bundle that verifies the server instead of the system roots (defaults to NGSTONE_ADMIN_CA)")
+	fs.StringVar(&flags.serverName, "server-name", flags.serverName, "TLS name to verify, for reaching one edge by address (defaults to NGSTONE_ADMIN_SERVER_NAME)")
 	return fs, flags
 }
 
+func adminTLSConfig(flags *adminCLIFlags) (*tls.Config, error) {
+	if flags.clientCert == "" && flags.clientKey == "" && flags.ca == "" && flags.serverName == "" {
+		return nil, nil
+	}
+	if (flags.clientCert == "") != (flags.clientKey == "") {
+		return nil, errors.New("--client-cert and --client-key must be set together")
+	}
+	config := &tls.Config{MinVersion: tls.VersionTLS13, ServerName: flags.serverName}
+	if flags.clientKey != "" {
+		info, err := os.Stat(flags.clientKey)
+		if err != nil {
+			return nil, fmt.Errorf("reading client key: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("client key must be a regular file")
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			return nil, fmt.Errorf("client key %s must be readable only by its owner (chmod 600)", flags.clientKey)
+		}
+		pair, err := tls.LoadX509KeyPair(flags.clientCert, flags.clientKey)
+		if err != nil {
+			return nil, fmt.Errorf("loading client certificate: %w", err)
+		}
+		config.Certificates = []tls.Certificate{pair}
+	}
+	if flags.ca != "" {
+		data, err := os.ReadFile(flags.ca)
+		if err != nil {
+			return nil, fmt.Errorf("reading CA bundle: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(data) {
+			return nil, fmt.Errorf("CA bundle %s contains no certificates", flags.ca)
+		}
+		config.RootCAs = pool
+	}
+	return config, nil
+}
+
 func adminClient(flags *adminCLIFlags) (*adminapi.Client, error) {
-	client, err := adminapi.NewClient(flags.server, flags.token)
+	tlsConfig, err := adminTLSConfig(flags)
+	if err != nil {
+		return nil, err
+	}
+	token := flags.token
+	if flags.clientCert != "" {
+		token = ""
+	}
+	client, err := adminapi.NewClientTLS(flags.server, token, tlsConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +306,7 @@ func cmdAdminCredentials(args []string) int {
 
 func cmdAdminCredentialIssue(args []string) int {
 	fs, flags := newAdminFlagSet("admin credentials issue")
-	kind := fs.String("kind", credentials.KindHTTP, "credential kind: http, tcp, tls, or preview")
+	kind := fs.String("kind", credentials.KindHTTP, "credential kind: http, tcp, tls, preview, or share")
 	subdomain := fs.String("subdomain", "", "exact HTTP or TLS subdomain this credential may bind")
 	remotePort := fs.Int("remote-port", 0, "exact TCP port this credential may bind")
 	ttl := fs.String("ttl", "24h", "credential lifetime, up to 720h")
@@ -433,7 +496,7 @@ func cmdAdminPolicies(args []string) int {
 
 func cmdAdminDomains(args []string) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
-		fmt.Fprintln(os.Stderr, "usage: ngstone admin domains <list|add|delete>")
+		fmt.Fprintln(os.Stderr, "usage: ngstone admin domains <list|add|delete|activate|disable>")
 		return 2
 	}
 	switch args[0] {
@@ -455,7 +518,7 @@ func cmdAdminDomains(args []string) int {
 			return printAdminJSON(list)
 		}
 		for _, value := range list {
-			fmt.Printf("%s\t%s\t%s\n", value.ID, value.Domain, value.Status)
+			fmt.Printf("%s\t%s\t%s\t%s\n", value.ID, value.Domain, value.TunnelID, value.Status)
 		}
 		return 0
 	case "add":
@@ -495,6 +558,30 @@ func cmdAdminDomains(args []string) int {
 			return printAdminClientError(err)
 		}
 		fmt.Printf("domain %s deleted\n", positionals[0])
+		return 0
+	case "activate", "disable":
+		status := "active"
+		if args[0] == "disable" {
+			status = "disabled"
+		}
+		fs, flags := newAdminFlagSet("admin domains " + args[0])
+		positionals, err := parsePermissive(fs, args[1:])
+		if err != nil || len(positionals) != 1 {
+			fmt.Fprintf(os.Stderr, "usage: ngstone admin domains %s <id> [--server URL] [--token TOKEN] [--json]\n", args[0])
+			return 2
+		}
+		client, err := adminClient(flags)
+		if err != nil {
+			return printAdminClientError(err)
+		}
+		var value adminapi.CustomDomain
+		if err := client.Post(adminapi.APIPrefix+"/domains/"+url.PathEscape(positionals[0])+"/status", adminapi.CustomDomainStatusRequest{Status: status}, &value); err != nil {
+			return printAdminClientError(err)
+		}
+		if flags.json {
+			return printAdminJSON(value)
+		}
+		fmt.Printf("domain %s %s\n", value.Domain, value.Status)
 		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "ngstone: unknown admin domains subcommand %q\n", args[0])

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -94,4 +95,71 @@ func doctorAdminEndpointMust(raw, path string, allowInsecure bool) string {
 		panic(err)
 	}
 	return value
+}
+
+func TestDoctorEndpointHintsAtUDPWhenQUICDialRunsOutOfTime(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	addr := pc.LocalAddr().String()
+	opts := doctorOptions{
+		Transport: "quic",
+		Timeout:   300 * time.Millisecond,
+		Insecure:  true,
+		LookupHost: func(context.Context, string) ([]string, error) {
+			return []string{"127.0.0.1"}, nil
+		},
+		DialQUIC: agent.DialQUICControl,
+	}
+	check := checkDoctorEndpoint(opts, addr)
+	if check.Status != doctorFail || check.Name != "control.network" {
+		t.Fatalf("check = %+v", check)
+	}
+	if !strings.Contains(check.Message, "no answer from "+addr+" over UDP") || !strings.Contains(check.Message, "-quic") {
+		t.Fatalf("doctor message lacks the UDP hint: %q", check.Message)
+	}
+}
+
+func TestDoctorEndpointProbesOverQUICWhenTransportIsQUIC(t *testing.T) {
+	var quicCfg agent.Config
+	quicCalls := 0
+	opts := doctorOptions{
+		Transport:  "quic",
+		Timeout:    time.Second,
+		ServerName: "edge.example.com",
+		Pin:        "sha256/pin",
+		Insecure:   true,
+		LookupHost: func(context.Context, string) ([]string, error) {
+			return []string{"203.0.113.10"}, nil
+		},
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			t.Error("QUIC transport probed the endpoint over TCP")
+			return nil, errors.New("tcp dial")
+		},
+		DialQUIC: func(_ context.Context, cfg agent.Config) (net.Conn, error) {
+			quicCalls++
+			quicCfg = cfg
+			left, right := net.Pipe()
+			right.Close()
+			return left, nil
+		},
+	}
+	check := checkDoctorEndpoint(opts, "edge.example.com:4443")
+	if check.Status != doctorPass || quicCalls != 1 {
+		t.Fatalf("check = %+v, quic dials = %d", check, quicCalls)
+	}
+	if quicCfg.ControlAddr != "edge.example.com:4443" || quicCfg.ServerName != "edge.example.com" || quicCfg.Pin != "sha256/pin" || !quicCfg.Insecure {
+		t.Fatalf("QUIC probe config = %+v", quicCfg)
+	}
+
+	opts.DialQUIC = func(context.Context, agent.Config) (net.Conn, error) { return nil, errors.New("no udp answer") }
+	check = checkDoctorEndpoint(opts, "edge.example.com:4443")
+	if check.Status != doctorFail || check.Name != "control.network" {
+		t.Fatalf("failed QUIC probe check = %+v", check)
+	}
+	if check.Details["error"] != "no udp answer" || !strings.Contains(check.Message, "no udp answer") {
+		t.Fatalf("failed QUIC probe hides the dial error: %+v", check)
+	}
 }

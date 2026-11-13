@@ -24,7 +24,7 @@ import (
 	"time"
 )
 
-func selfSignedTLSCert(t *testing.T, host string) (tls.Certificate, *x509.CertPool) {
+func selfSignedTLSCert(t *testing.T, host string, extraNames ...string) (tls.Certificate, *x509.CertPool) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -33,7 +33,7 @@ func selfSignedTLSCert(t *testing.T, host string) (tls.Certificate, *x509.CertPo
 	tmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(time.Now().UnixNano()),
 		Subject:               pkix.Name{CommonName: host, Organization: []string{"ngstone e2e local app"}},
-		DNSNames:              []string{host},
+		DNSNames:              append([]string{host}, extraNames...),
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().Add(time.Hour),
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
@@ -116,12 +116,12 @@ func TestTLSPassthroughEndToEnd(t *testing.T) {
 
 	startEdge(t, edgeBin, controlAddr, publicAddr, token, domain)
 
-	cmd := exec.Command(agentBin, "tls", localAddr,
+	cmd := quicAgent(exec.Command(agentBin, "tls", localAddr,
 		"--subdomain", "secure",
 		"--server", controlAddr,
 		"--token", token,
 		"--insecure",
-	)
+	))
 	agentSB := &syncBuf{}
 	cmd.Stdout = io.MultiWriter(os.Stderr, agentSB)
 	cmd.Stderr = io.MultiWriter(os.Stderr, agentSB)
@@ -206,13 +206,13 @@ func TestTLSPassthroughEndToEnd(t *testing.T) {
 	t.Run("http_bind_on_tls_hostname_is_rejected", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, agentBin, "port", origin.URL,
+		out, err := quicAgent(exec.CommandContext(ctx, agentBin, "port", origin.URL,
 			"--subdomain", "secure",
 			"--server", controlAddr,
 			"--token", token,
 			"--insecure",
 			"--no-tui",
-		).CombinedOutput()
+		)).CombinedOutput()
 		if err == nil {
 			t.Fatalf("http tunnel on a tls hostname exited cleanly:\n%s", out)
 		}

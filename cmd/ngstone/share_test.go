@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"flag"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -195,5 +198,148 @@ func TestConnectHintAndPolicyText(t *testing.T) {
 	spec.MaxUses = 3
 	if got := sharePolicyText(spec); !strings.Contains(got, "3 uses") {
 		t.Fatalf("policy text = %q", got)
+	}
+}
+
+func TestShareFlagSetsHaveTransport(t *testing.T) {
+	sets := map[string]*flag.FlagSet{}
+	sets["share"], _ = newShareFlagSet()
+	sets["connect"], _ = newConnectFlagSet()
+	for _, name := range []string{"shares", "unshare", "extend", "kick"} {
+		sets[name], _ = newOpFlagSet(name)
+	}
+	for name, fs := range sets {
+		f := fs.Lookup("transport")
+		if f == nil {
+			t.Errorf("%s has no --transport flag", name)
+			continue
+		}
+		if f.DefValue != agent.TransportAuto {
+			t.Errorf("%s --transport default = %q, want %q", name, f.DefValue, agent.TransportAuto)
+		}
+	}
+
+	fsShare, sf := newShareFlagSet()
+	if _, err := parsePermissive(fsShare, []string{"postgres", "--transport", "quic"}); err != nil || sf.transport != "quic" {
+		t.Fatalf("share --transport quic: transport = %q, err = %v", sf.transport, err)
+	}
+	fsConnect, cf := newConnectFlagSet()
+	if _, err := parsePermissive(fsConnect, []string{"--transport", "websocket"}); err != nil || cf.transport != "websocket" {
+		t.Fatalf("connect --transport websocket: transport = %q, err = %v", cf.transport, err)
+	}
+	fsOp, of := newOpFlagSet("shares")
+	if _, err := parsePermissive(fsOp, []string{"--transport", "raw"}); err != nil || of.transport != "raw" {
+		t.Fatalf("shares --transport raw: transport = %q, err = %v", of.transport, err)
+	}
+}
+
+func TestShareCommandsRejectInvalidTransport(t *testing.T) {
+	want := agent.ValidateTransport("carrier-pigeon")
+	if want == nil {
+		t.Fatal("ValidateTransport accepted carrier-pigeon")
+	}
+
+	if _, err := newOperator(&opFlags{transport: "carrier-pigeon"}); err == nil || err.Error() != want.Error() {
+		t.Fatalf("newOperator err = %v, want %v", err, want)
+	}
+
+	secret, _, err := agent.NewShareSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := agent.ShareLink("edge.example:4443", secret)
+	if code := cmdShare([]string{"postgres", "--transport", "carrier-pigeon"}); code != 2 {
+		t.Errorf("cmdShare exit = %d, want 2", code)
+	}
+	if code := cmdConnect([]string{link, "--transport", "carrier-pigeon"}); code != 2 {
+		t.Errorf("cmdConnect exit = %d, want 2", code)
+	}
+}
+
+func TestPrintShares(t *testing.T) {
+	exp := time.Now().Add(time.Hour).UnixMilli()
+	one := func(id, edge string) proto.ShareInfo {
+		return proto.ShareInfo{ShareID: id, Edge: edge, Label: "db", ExpiresAtMS: exp, MaxConns: 4, MaxConnectors: 2}
+	}
+	cases := []struct {
+		name     string
+		listed   proto.SharesOK
+		contains []string
+		absent   []string
+	}{
+		{
+			name:     "single edge keeps the old footer",
+			listed:   proto.SharesOK{Edge: "edge-a", Shares: []proto.ShareInfo{one("sh_1", "")}},
+			contains: []string{"sh_1", "Shares on edge edge-a; other edges may hold more."},
+			absent:   []string{"EDGE", "did not answer"},
+		},
+		{
+			name:     "group lists an edge column and every edge",
+			listed:   proto.SharesOK{Edge: "edge-a", Group: true, Shares: []proto.ShareInfo{one("sh_1", "edge-a"), one("sh_2", "edge-b")}},
+			contains: []string{"EDGE", "edge-a         sh_1", "edge-b         sh_2"},
+			absent:   []string{"other edges may hold more", "did not answer"},
+		},
+		{
+			name:     "group names unreached edges",
+			listed:   proto.SharesOK{Edge: "edge-a", Group: true, Unreached: []string{"edge-b", "edge-c"}, Shares: []proto.ShareInfo{one("sh_1", "edge-a")}},
+			contains: []string{"edges edge-b, edge-c did not answer; their shares are not shown."},
+			absent:   []string{"other edges may hold more"},
+		},
+		{
+			name:     "group says more edges were not queried",
+			listed:   proto.SharesOK{Edge: "edge-a", Group: true, Unreached: []string{"edge-b", proto.UnreachedMoreEdges}, Shares: []proto.ShareInfo{one("sh_1", "edge-a")}},
+			contains: []string{"edges edge-b did not answer", "more edges were not queried; their shares are not shown."},
+			absent:   []string{"+more"},
+		},
+		{
+			name:     "empty group still reports unreached edges",
+			listed:   proto.SharesOK{Edge: "edge-a", Group: true, Unreached: []string{"edge-b"}},
+			contains: []string{"no live shares", "edges edge-b did not answer"},
+			absent:   []string{"EDGE"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			printShares(&buf, tc.listed)
+			out := buf.String()
+			for _, want := range tc.contains {
+				if !strings.Contains(out, want) {
+					t.Errorf("output missing %q:\n%s", want, out)
+				}
+			}
+			for _, bad := range tc.absent {
+				if strings.Contains(out, bad) {
+					t.Errorf("output contains %q:\n%s", bad, out)
+				}
+			}
+		})
+	}
+}
+
+func TestPrintSharesJSON(t *testing.T) {
+	one := proto.ShareInfo{ShareID: "sh_1", Edge: "edge-a"}
+	var buf bytes.Buffer
+	printSharesJSON(&buf, proto.SharesOK{Group: true, Shares: []proto.ShareInfo{one}})
+	var plain []proto.ShareInfo
+	if err := json.Unmarshal(buf.Bytes(), &plain); err != nil || len(plain) != 1 || plain[0].ShareID != "sh_1" {
+		t.Fatalf("without unreached edges the output stays a share array: %q, %v", buf.String(), err)
+	}
+
+	buf.Reset()
+	unreached := proto.SharesOK{Group: true, Unreached: []string{"edge-b", proto.UnreachedMoreEdges}, Shares: []proto.ShareInfo{one}}
+	printSharesJSON(&buf, unreached)
+	var listed []proto.ShareInfo
+	if err := json.Unmarshal(buf.Bytes(), &listed); err != nil || len(listed) != 1 || listed[0].ShareID != "sh_1" {
+		t.Fatalf("with unreached edges stdout must still be a share array: %q, %v", buf.String(), err)
+	}
+	if strings.Contains(buf.String(), "+more") || strings.Contains(buf.String(), "edge-b") {
+		t.Fatalf("unreached edges leaked into stdout: %q", buf.String())
+	}
+
+	buf.Reset()
+	printUnreached(&buf, unreached)
+	if got := buf.String(); !strings.Contains(got, "edges edge-b did not answer") || !strings.Contains(got, "more edges were not queried") || strings.Contains(got, "+more") {
+		t.Fatalf("stderr notice: %q", got)
 	}
 }

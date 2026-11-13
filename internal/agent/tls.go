@@ -11,9 +11,18 @@ import (
 	"net"
 	"strings"
 	"time"
+
+	"github.com/quic-go/quic-go"
+
+	"ngstone/internal/tunnel"
 )
 
-const tlsHandshakeTimeout = 10 * time.Second
+const (
+	tlsHandshakeTimeout = 10 * time.Second
+	quicDialTimeout     = 20 * time.Second
+)
+
+var dialQUIC = tunnel.DialQUIC
 
 // tlsServerName picks the name the edge's certificate is verified against:
 // the explicit override when set, otherwise the host part of the control
@@ -83,6 +92,50 @@ func controlTLSConfig(cfg Config) (*tls.Config, error) {
 		tlsCfg.VerifyPeerCertificate = pinVerifier(want)
 	}
 	return tlsCfg, nil
+}
+
+func quicTLSConfig(cfg Config) (*tls.Config, error) {
+	if cfg.Insecure {
+		return &tls.Config{
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS13,
+			NextProtos:         []string{tunnel.QUICALPN},
+		}, nil
+	}
+	tlsCfg, err := controlTLSConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	tlsCfg.NextProtos = []string{tunnel.QUICALPN}
+	return tlsCfg, nil
+}
+
+func DialQUICControl(ctx context.Context, cfg Config) (net.Conn, error) {
+	return dialQUICControl(ctx, cfg)
+}
+
+func dialQUICControl(ctx context.Context, cfg Config) (net.Conn, error) {
+	tlsCfg, err := quicTLSConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	dctx, cancel := context.WithTimeout(ctx, quicDialTimeout)
+	defer cancel()
+	conn, err := dialQUIC(dctx, cfg.ControlAddr, tlsCfg)
+	if err != nil {
+		return nil, quicDialError(cfg.ControlAddr, err)
+	}
+	return conn, nil
+}
+
+func quicDialError(addr string, err error) error {
+	var idle *quic.IdleTimeoutError
+	var hs *quic.HandshakeTimeoutError
+	var dns *net.DNSError
+	if errors.As(err, &idle) || errors.As(err, &hs) || (errors.Is(err, context.DeadlineExceeded) && !errors.As(err, &dns)) {
+		return fmt.Errorf("agent: quic control: no answer from %s over UDP; the edge must run with -quic and UDP must be reachable: %w", addr, err)
+	}
+	return fmt.Errorf("agent: quic control: %w", err)
 }
 
 func parsePin(s string) ([sha256.Size]byte, error) {

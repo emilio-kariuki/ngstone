@@ -161,6 +161,42 @@ func migrate(ctx context.Context, db *sql.DB, driver string) error {
 			return err
 		}
 	}
+	if applied < 5 {
+		statements := []string{
+			`CREATE TABLE IF NOT EXISTS edge_peers (edge_id TEXT PRIMARY KEY, peer_addr TEXT NOT NULL, spki_sha256 TEXT NOT NULL, expires_at TEXT NOT NULL)`,
+			`CREATE INDEX IF NOT EXISTS idx_edge_peers_expiry ON edge_peers(expires_at)`,
+		}
+		if err := applyMigration(ctx, db, driver, 5, statements); err != nil {
+			return err
+		}
+	}
+	if applied < 6 {
+		statements := []string{
+			`CREATE TABLE IF NOT EXISTS share_directory (dir_key TEXT PRIMARY KEY, share_id TEXT NOT NULL, edge_id TEXT NOT NULL, owner_id TEXT NOT NULL, expires_at TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0)`,
+			`CREATE INDEX IF NOT EXISTS idx_share_directory_edge ON share_directory(edge_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_share_directory_share ON share_directory(share_id)`,
+			`CREATE INDEX IF NOT EXISTS idx_share_directory_expiry ON share_directory(expires_at)`,
+		}
+		if err := applyMigration(ctx, db, driver, 6, statements); err != nil {
+			return err
+		}
+	}
+	if applied < 7 {
+		statements := []string{
+			`UPDATE custom_domains SET status = 'pending' WHERE status <> 'pending'`,
+		}
+		if err := applyMigration(ctx, db, driver, 7, statements); err != nil {
+			return err
+		}
+	}
+	if applied < 8 {
+		statements := []string{
+			`CREATE INDEX IF NOT EXISTS idx_share_directory_owner ON share_directory(owner_id)`,
+		}
+		if err := applyMigration(ctx, db, driver, 8, statements); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -193,6 +229,12 @@ func applyMigrationOnce(ctx context.Context, db *sql.DB, driver string, version 
 			return fmt.Errorf("storage: migrate credential ownership: %w", err)
 		}
 	}
+	if version == 7 {
+		if err := addCustomDomainActivatedAt(ctx, tx, driver); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("storage: migrate custom domain activation: %w", err)
+		}
+	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			tx.Rollback()
@@ -215,4 +257,20 @@ func applyMigrationOnce(ctx context.Context, db *sql.DB, driver string, version 
 		return fmt.Errorf("storage: commit migration %d: %w", version, err)
 	}
 	return nil
+}
+
+func addCustomDomainActivatedAt(ctx context.Context, tx *sql.Tx, driver string) error {
+	if driver == DriverSQLite {
+		var present int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('custom_domains') WHERE name = 'activated_at'`).Scan(&present); err != nil {
+			return err
+		}
+		if present > 0 {
+			return nil
+		}
+		_, err := tx.ExecContext(ctx, `ALTER TABLE custom_domains ADD COLUMN activated_at TEXT`)
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `ALTER TABLE custom_domains ADD COLUMN IF NOT EXISTS activated_at TEXT`)
+	return err
 }

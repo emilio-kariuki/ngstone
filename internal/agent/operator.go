@@ -27,13 +27,8 @@ var ErrShareNotFound = errors.New("agent: no such live share")
 // session dials, authenticates and returns the live session; the caller
 // says goodbye and closes it.
 func (o *Operator) session(ctx context.Context) (tunnel.Session, *proto.IDGen, error) {
-	conn, err := dialControl(ctx, o.cfg)
+	sess, err := dialControlSessionModes(ctx, o.cfg)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
-	}
-	sess, err := tunnel.Client(conn)
-	if err != nil {
-		conn.Close()
 		return nil, nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
 	}
 	a := New(o.cfg)
@@ -122,17 +117,12 @@ func (o *Operator) once(ctx context.Context, typ string, data any) (proto.Msg, e
 	return m, nil
 }
 
-// ListShares returns every live share on the edge.
-func (o *Operator) ListShares(ctx context.Context) ([]proto.ShareInfo, error) {
+func (o *Operator) ListSharesOK(ctx context.Context) (proto.SharesOK, error) {
 	m, err := o.once(ctx, proto.TypeListShares, proto.ListShares{})
 	if err != nil {
-		return nil, err
+		return proto.SharesOK{}, err
 	}
-	ok, err := proto.Decode[proto.SharesOK](m)
-	if err != nil {
-		return nil, err
-	}
-	return ok.Shares, nil
+	return proto.Decode[proto.SharesOK](m)
 }
 
 // Unshare revokes a share by id.

@@ -45,7 +45,7 @@ func TestOwnershipMigrationPreservesPoliciesAndAssociations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.db.ExecContext(t.Context(), `DELETE FROM schema_migrations WHERE version = 4`); err != nil {
+	if _, err := s.db.ExecContext(t.Context(), `DELETE FROM schema_migrations WHERE version >= 4`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {

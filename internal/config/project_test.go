@@ -141,3 +141,17 @@ func TestParseTunnelsAcceptsOIDCVisitorLogin(t *testing.T) {
 		t.Fatalf("tunnel = %+v", f.Tunnels[0])
 	}
 }
+
+func TestLoadProjectQUICTransport(t *testing.T) {
+	project, err := LoadProject(writeProject(t, `{"tunnels":{"web":{"target":"3000","transport":"QUIC"}}}`))
+	if err != nil {
+		t.Fatalf("LoadProject with transport quic: %v", err)
+	}
+	if got := project.Tunnels["web"].Transport; strings.ToLower(got) != "quic" {
+		t.Fatalf("transport = %q, want quic", got)
+	}
+	_, err = LoadProject(writeProject(t, `{"tunnels":{"web":{"target":"3000","transport":"sctp"}}}`))
+	if err == nil || !strings.Contains(err.Error(), "quic") {
+		t.Fatalf("LoadProject with transport sctp: err = %v, want an error naming quic", err)
+	}
+}

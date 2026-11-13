@@ -67,7 +67,10 @@ export default function FailureModesPage() {
       <ParamTable>
         <Property name="Detection" type="">
           yamux keepalive failure or three missed application pings — about
-          45 s either way.
+          45 s either way. Over QUIC, a peer that vanishes without closing is
+          detected within about 20 s by the 5 s keep-alive and 15 s idle
+          timeout, against an immediate reset for a killed TCP process and
+          up to 45 s for a silent TCP path; a graceful shutdown is noticed at once on every transport.
         </Property>
         <Property name="Handling" type="">
           The edge eventually frees the binding, returning 404s. The agent

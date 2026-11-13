@@ -160,6 +160,9 @@ type Agent struct {
 	status      Status
 	control     *liveControl      // live control stream in sharer mode, for Approve/Kick/Extend
 	pendingMgmt map[uint64]string // ids of management requests awaiting a reply
+	tcpPort     int
+	subdomain   string
+	rememberOff bool
 }
 
 func New(cfg Config) *Agent {
@@ -599,7 +602,7 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		Name:                 a.cfg.Name,
 		Subdomain:            a.cfg.Subdomain,
 		RemotePort:           a.cfg.RemotePort,
-		Takeover:             a.bindKind() == proto.KindHTTP || a.bindKind() == proto.KindTLS,
+		Takeover:             true,
 		HTTP2:                a.cfg.HTTP2,
 		MultiConnector:       a.cfg.MultiConnector,
 		ConnectorTokenSHA256: connectorTokenDigest,
@@ -620,17 +623,41 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 		return proto.BindOK{}, errPlaintextWebhookSecret
 	}
 
-	bindID := idgen.Next()
-	if err := ctrl.Write(proto.TypeBind, bindID, bindMsg); err != nil {
-		return proto.BindOK{}, err
+	rememberPort := a.bindKind() == proto.KindTCP && a.cfg.RemotePort == 0 && a.remembering()
+	if rememberPort {
+		bindMsg.RemotePort = a.rememberedTCPPort()
 	}
-	msg, err := ctrl.Read()
+	rememberName := (a.bindKind() == proto.KindHTTP || a.bindKind() == proto.KindTLS) && a.cfg.Subdomain == "" && a.remembering()
+	if rememberName {
+		bindMsg.Subdomain = a.rememberedSubdomain()
+	}
+
+	bindOK, bindErr, err := a.bind(ctrl, idgen, bindMsg)
 	if err != nil {
 		return proto.BindOK{}, err
 	}
-	switch msg.Type {
-	case proto.TypeBindErr:
-		e, _ := proto.Decode[proto.BindErr](msg)
+	if bindErr != nil && rememberPort && bindMsg.RemotePort != 0 && bindErr.Code == proto.CodePortUnavailable {
+		slog.Warn("agent: previous tcp port unavailable, binding a new one", "port", bindMsg.RemotePort)
+		a.setRememberedTCPPort(0)
+		bindMsg.RemotePort = 0
+		bindOK, bindErr, err = a.bind(ctrl, idgen, bindMsg)
+		if err != nil {
+			return proto.BindOK{}, err
+		}
+	}
+	if bindErr != nil && rememberName && bindMsg.Subdomain != "" && (bindErr.Code == proto.CodeSubdomainTaken || bindErr.Code == proto.CodeKindConflict || bindErr.Code == proto.CodeCredentialScope) {
+		slog.Warn("agent: previous name unavailable, binding a new one", "subdomain", bindMsg.Subdomain, "code", bindErr.Code)
+		a.setRememberedSubdomain("")
+		if bindErr.Code == proto.CodeCredentialScope {
+			a.stopRemembering()
+		}
+		bindMsg.Subdomain = ""
+		bindOK, bindErr, err = a.bind(ctrl, idgen, bindMsg)
+		if err != nil {
+			return proto.BindOK{}, err
+		}
+	}
+	if e := bindErr; e != nil {
 		if e.Code == proto.CodeInvalidSubdomain || e.Code == proto.CodeKindUnsupported || e.Code == proto.CodeInvalidAccess || e.Code == proto.CodeConnectorConfigMismatch || e.Code == proto.CodeCredentialScope || e.Code == proto.CodeKindConflict {
 			return proto.BindOK{}, fmt.Errorf("%w: bind failed: %s: %s", errFatalHandshake, e.Code, e.Message)
 		}
@@ -638,30 +665,98 @@ func (a *Agent) handshake(sess tunnel.Session, idgen *proto.IDGen) (proto.BindOK
 			return proto.BindOK{}, fmt.Errorf("%w: bind failed: %s: %s", errFatalHandshake, e.Code, e.Message)
 		}
 		return proto.BindOK{}, fmt.Errorf("agent: bind failed: %s: %s", e.Code, e.Message)
+	}
+	if policyDigest != "" && bindOK.PolicyDigest != policyDigest {
+		return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge the traffic policy; upgrade ngstoned", errFatalHandshake)
+	}
+	if a.cfg.HTTP2 && !bindOK.HTTP2 {
+		return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge HTTP/2 mode; upgrade ngstoned", errFatalHandshake)
+	}
+	if a.cfg.MultiConnector && !bindOK.MultiConnector {
+		return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge multiple-connector mode; upgrade ngstoned", errFatalHandshake)
+	}
+	if webhookBind != nil && bindOK.Webhook != webhookBind.Provider {
+		return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge webhook verification; upgrade ngstoned", errFatalHandshake)
+	}
+	if a.cfg.OIDC != nil && !bindOK.OIDC {
+		return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge OIDC visitor login; upgrade ngstoned", errFatalHandshake)
+	}
+	if rememberPort && a.remembering() {
+		a.setRememberedTCPPort(bindOK.Port)
+	}
+	if rememberName && a.remembering() {
+		a.setRememberedSubdomain(subdomainOf(bindOK.Hostname))
+	}
+	return bindOK, nil
+}
+
+func (a *Agent) bind(ctrl *proto.Conn, idgen *proto.IDGen, bindMsg proto.Bind) (proto.BindOK, *proto.BindErr, error) {
+	if err := ctrl.Write(proto.TypeBind, idgen.Next(), bindMsg); err != nil {
+		return proto.BindOK{}, nil, err
+	}
+	msg, err := ctrl.Read()
+	if err != nil {
+		return proto.BindOK{}, nil, err
+	}
+	switch msg.Type {
+	case proto.TypeBindErr:
+		e, _ := proto.Decode[proto.BindErr](msg)
+		return proto.BindOK{}, &e, nil
 	case proto.TypeBindOK:
 		bindOK, err := proto.Decode[proto.BindOK](msg)
 		if err != nil {
-			return proto.BindOK{}, err
+			return proto.BindOK{}, nil, err
 		}
-		if policyDigest != "" && bindOK.PolicyDigest != policyDigest {
-			return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge the traffic policy; upgrade ngstoned", errFatalHandshake)
-		}
-		if a.cfg.HTTP2 && !bindOK.HTTP2 {
-			return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge HTTP/2 mode; upgrade ngstoned", errFatalHandshake)
-		}
-		if a.cfg.MultiConnector && !bindOK.MultiConnector {
-			return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge multiple-connector mode; upgrade ngstoned", errFatalHandshake)
-		}
-		if webhookBind != nil && bindOK.Webhook != webhookBind.Provider {
-			return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge webhook verification; upgrade ngstoned", errFatalHandshake)
-		}
-		if a.cfg.OIDC != nil && !bindOK.OIDC {
-			return proto.BindOK{}, fmt.Errorf("%w: edge did not acknowledge OIDC visitor login; upgrade ngstoned", errFatalHandshake)
-		}
-		return bindOK, nil
+		return bindOK, nil, nil
 	default:
-		return proto.BindOK{}, fmt.Errorf("agent: unexpected reply %q to bind", msg.Type)
+		return proto.BindOK{}, nil, fmt.Errorf("agent: unexpected reply %q to bind", msg.Type)
 	}
+}
+
+func (a *Agent) rememberedTCPPort() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.tcpPort
+}
+
+func (a *Agent) setRememberedTCPPort(port int) {
+	a.mu.Lock()
+	a.tcpPort = port
+	a.mu.Unlock()
+}
+
+func (a *Agent) rememberedSubdomain() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.subdomain
+}
+
+func (a *Agent) setRememberedSubdomain(name string) {
+	a.mu.Lock()
+	a.subdomain = name
+	a.mu.Unlock()
+}
+
+func (a *Agent) remembering() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return !a.rememberOff
+}
+
+func (a *Agent) stopRemembering() {
+	a.mu.Lock()
+	a.rememberOff = true
+	a.subdomain = ""
+	a.tcpPort = 0
+	a.mu.Unlock()
+}
+
+func subdomainOf(hostname string) string {
+	label, _, found := strings.Cut(hostname, ".")
+	if !found {
+		return ""
+	}
+	return label
 }
 
 func (a *Agent) sendGoodbye(sess tunnel.Session, idgen *proto.IDGen, reason string) {

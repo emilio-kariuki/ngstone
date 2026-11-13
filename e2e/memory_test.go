@@ -77,6 +77,7 @@ func TestConstantMemory100MB(t *testing.T) {
 		TokenSHA256:  mustSHA256(token),
 		PublicScheme: "http",
 		Insecure:     true,
+		QUIC:         quicControl,
 	})
 	if err != nil {
 		t.Fatalf("edge.New: %v", err)
@@ -93,6 +94,7 @@ func TestConstantMemory100MB(t *testing.T) {
 		Subdomain:   "mem",
 		TargetURL:   origin.URL,
 		Insecure:    true,
+		Transport:   quicTransport(),
 	})
 	go agt.Run(ctx)
 

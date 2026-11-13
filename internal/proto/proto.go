@@ -116,6 +116,9 @@ const (
 	ShareReasonEdgeShutdown = "edge_shutdown"
 	ShareReasonIdle         = "idle"   // share: no connection for idle_timeout
 	ShareReasonKicked       = "kicked" // connector: removed by the sharer
+	ShareReasonTaken        = "taken"
+	ShareReasonMoved        = "moved"
+	ShareReasonPublishErr   = "publish failed"
 )
 
 // ShareEvent.Event values.
@@ -391,11 +394,17 @@ type ShareInfo struct {
 	E2E           bool            `json:"e2e,omitempty"`
 	Connectors    []ConnectorInfo `json:"connectors"`
 	OpenConns     int             `json:"open_conns"`
+	Edge          string          `json:"edge,omitempty"`
 }
 
 type SharesOK struct {
-	Shares []ShareInfo `json:"shares"`
+	Shares    []ShareInfo `json:"shares"`
+	Edge      string      `json:"edge,omitempty"`
+	Group     bool        `json:"group,omitempty"`
+	Unreached []string    `json:"unreached,omitempty"`
 }
+
+const UnreachedMoreEdges = "+more"
 
 // WatchShares subscribes an operator session to every share's events.
 type WatchShares struct{}

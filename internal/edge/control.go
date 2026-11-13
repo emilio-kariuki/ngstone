@@ -55,6 +55,7 @@ type AgentSession struct {
 	leaseMu             sync.Mutex
 	durableLeases       map[string]string
 	durableLeaseNum     atomic.Int64
+	evicting            atomic.Bool
 	lastHeartbeat       atomic.Int64
 	observabilityMu     sync.Mutex
 	observabilityEvents map[string]struct{}
@@ -65,6 +66,10 @@ type AgentSession struct {
 	pendingShare *share
 	share        atomic.Pointer[share]
 	connectorID  string
+
+	relayToken   string
+	viaPeer      bool
+	remoteShares *remoteShareCache
 }
 
 func (a *AgentSession) isConnector() bool {
@@ -180,6 +185,22 @@ func rateLimitKey(ip string) string {
 	return prefix.Masked().String()
 }
 
+func unauthAddrKey(a net.Addr) string {
+	ap, err := netip.ParseAddrPort(a.String())
+	if err != nil {
+		return a.String()
+	}
+	return rateLimitKey(ap.Addr().Unmap().String())
+}
+
+func (s *Server) acquireUnauthAddr(a net.Addr) (func(), bool) {
+	release, ok := s.unauthPerAddr.acquire(unauthAddrKey(a))
+	if !ok {
+		metricRejectedUnauthPerAddr.Add(1)
+	}
+	return release, ok
+}
+
 func (l *authRateLimiter) allowed(ip string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -262,29 +283,62 @@ func (s *Server) serveControl(ctx context.Context, ln net.Listener) error {
 			conn.Close()
 			continue
 		}
-		if !s.acceptControl() {
+		releaseAddr, ok := s.acquireUnauthAddr(conn.RemoteAddr())
+		if !ok {
 			conn.Close()
 			s.unauthSem.release()
 			continue
 		}
+		if !s.acceptControl() {
+			conn.Close()
+			releaseAddr()
+			s.unauthSem.release()
+			continue
+		}
 		go func() {
-			defer s.controlConns.Done()
+			leave := sync.OnceFunc(s.controlConns.Done)
+			defer leave()
 			var once sync.Once
-			release := func() { once.Do(s.unauthSem.release) }
+			release := func() {
+				once.Do(func() {
+					releaseAddr()
+					s.unauthSem.release()
+				})
+			}
 			defer release()
-			s.handleControlConn(ctx, conn, release)
+			s.handleControlConn(ctx, conn, release, leave)
 		}()
 	}
 }
 
-func (s *Server) handleControlConn(ctx context.Context, conn net.Conn, releaseUnauth func()) {
-	s.handleControlConnTransport(ctx, conn, releaseUnauth, s.tlsMgr != nil)
+func (s *Server) handleControlConn(ctx context.Context, conn net.Conn, releaseUnauth, leave func()) {
+	s.handleControlConnTransport(ctx, conn, releaseUnauth, controlTransport{tls: s.tlsMgr != nil, leave: leave, name: "tcp"})
 }
 
-func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, releaseUnauth func(), applyTLS bool) {
-	ip := remoteIP(conn)
+type authOrigin int
 
-	deadline := time.Now().Add(authDeadline)
+const (
+	authDirect authOrigin = iota
+	authForwardedShare
+	authForwardedAdmin
+)
+
+type controlTransport struct {
+	tls      bool
+	origin   authOrigin
+	leave    func()
+	deadline time.Time
+	name     string
+}
+
+func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, releaseUnauth func(), tr controlTransport) {
+	ip := remoteIP(conn)
+	applyTLS := tr.tls
+
+	deadline := tr.deadline
+	if deadline.IsZero() {
+		deadline = time.Now().Add(authDeadline)
+	}
 	if err := conn.SetReadDeadline(deadline); err != nil {
 		conn.Close()
 		return
@@ -312,6 +366,13 @@ func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, 
 		conn = tlsConn
 	}
 
+	if tr.origin == authDirect && s.peers != nil {
+		var done bool
+		if conn, done = s.peers.routeControl(ctx, conn, ip, deadline, releaseUnauth, tr.leave); done {
+			return
+		}
+	}
+
 	sess, err := tunnel.Server(conn)
 	if err != nil {
 		slog.Warn("edge: control session setup failed", "ip", ip, "err", err)
@@ -322,13 +383,14 @@ func (s *Server) handleControlConnTransport(ctx context.Context, conn net.Conn, 
 	remote, _ := netip.ParseAddrPort(conn.RemoteAddr().String())
 
 	authCtx, cancelAuth := context.WithDeadline(ctx, deadline)
-	as, err := s.authenticate(authCtx, sess, ip, remote, deadline)
+	as, err := s.authenticate(authCtx, sess, ip, remote, deadline, tr.origin)
 	cancelAuth()
 	if err != nil {
 		sess.Close("auth failed")
 		return
 	}
 	releaseUnauth()
+	slog.Info("edge: auth attempt", "ip", ip, "result", "ok", "transport", tr.name, "scope", as.Scope, "instance_id", as.InstanceID, "session_id", as.ID)
 
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		sess.Close("clear read deadline failed")
@@ -351,7 +413,7 @@ func remoteIP(conn net.Conn) string {
 	return addrPort.Addr().String()
 }
 
-func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip string, remote netip.AddrPort, deadline time.Time) (*AgentSession, error) {
+func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip string, remote netip.AddrPort, deadline time.Time, origin authOrigin) (*AgentSession, error) {
 	ctrl := sess.Control()
 	if err := ctrl.SetReadDeadline(deadline); err != nil {
 		return nil, err
@@ -368,6 +430,9 @@ func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip strin
 		return nil, err
 	}
 	if msg.Type != proto.TypeAuth {
+		if origin != authDirect {
+			s.authLimiter.recordFailure(ip)
+		}
 		ctrl.Write(proto.TypeError, msg.ID, proto.Error{Code: proto.CodeMalformed, Message: "expected auth as first message"})
 		slog.Warn("edge: auth attempt", "ip", ip, "result", "unexpected_first_message", "type", msg.Type)
 		return nil, fmt.Errorf("edge: expected auth, got %q", msg.Type)
@@ -377,6 +442,20 @@ func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip strin
 		ctrl.Write(proto.TypeError, msg.ID, proto.Error{Code: proto.CodeMalformed, Message: "malformed auth"})
 		slog.Warn("edge: auth attempt", "ip", ip, "result", "malformed", "err", err)
 		return nil, err
+	}
+
+	if origin == authForwardedAdmin && (auth.Token == "" || auth.ShareSecret != "") {
+		s.authLimiter.recordFailure(ip)
+		ctrl.Write(proto.TypeError, msg.ID, proto.Error{Code: proto.CodeMalformed, Message: "forwarded admin sessions carry token auth only"})
+		slog.Warn("edge: auth attempt", "ip", ip, "result", "forwarded_not_token")
+		return nil, errors.New("edge: forwarded admin session is not a token session")
+	}
+
+	if origin == authForwardedShare && (auth.ShareSecret == "" || auth.Token != "") {
+		s.authLimiter.recordFailure(ip)
+		ctrl.Write(proto.TypeError, msg.ID, proto.Error{Code: proto.CodeMalformed, Message: "forwarded sessions carry share_secret auth only"})
+		slog.Warn("edge: auth attempt", "ip", ip, "result", "forwarded_not_share")
+		return nil, errors.New("edge: forwarded session is not a share connector")
 	}
 
 	if auth.Token != "" && auth.ShareSecret != "" {
@@ -444,6 +523,10 @@ func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip strin
 		streamSem:         newGlobalSemaphore(s.limitsOrDefault().PerSessionInFlight),
 		upgradeStreamSem:  newGlobalSemaphore(s.limitsOrDefault().PerSessionUpgradeInFlight),
 		pendingShare:      pending,
+		viaPeer:           origin == authForwardedAdmin,
+	}
+	if origin == authDirect && auth.Token != "" && s.peers != nil && (credential == nil || credential.Kind == credentials.KindShare) {
+		as.relayToken = auth.Token
 	}
 	as.markHeartbeat()
 
@@ -460,7 +543,6 @@ func (s *Server) authenticate(ctx context.Context, sess tunnel.Session, ip strin
 		return nil, err
 	}
 
-	slog.Info("edge: auth attempt", "ip", ip, "result", "ok", "scope", scope, "instance_id", auth.InstanceID, "session_id", as.ID)
 	s.recordEvent("info", "agent authenticated", map[string]string{
 		"session_id":  as.ID,
 		"instance_id": as.InstanceID,
@@ -540,9 +622,20 @@ func (s *Server) controlLoop(ctx context.Context, as *AgentSession) {
 				slog.Warn("edge: connector sent a forbidden message", "session_id", as.ID, "type", m.Type)
 				return
 			}
-			if as.Credential != nil && !credentialMaySend(m.Type) {
-				ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeForbidden, Message: fmt.Sprintf("%q is not allowed with a scoped tunnel credential", m.Type)})
+			if as.viaPeer && !peerAdminMaySend(m.Type) {
+				ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeForbidden, Message: fmt.Sprintf("%q is not allowed on a forwarded admin session", m.Type)})
+				slog.Warn("edge: forwarded admin session sent a forbidden message", "session_id", as.ID, "type", m.Type)
 				return
+			}
+			if as.Credential != nil {
+				allowed := credentialMaySend(m.Type)
+				if as.Credential.Kind == credentials.KindShare {
+					allowed = shareCredentialMaySend(m.Type)
+				}
+				if !allowed {
+					ctrl.Write(proto.TypeError, m.ID, proto.Error{Code: proto.CodeForbidden, Message: fmt.Sprintf("%q is not allowed with a scoped tunnel credential", m.Type)})
+					return
+				}
 			}
 			switch m.Type {
 			case proto.TypeBind:
@@ -695,9 +788,25 @@ func connectorMaySend(typ string) bool {
 	return false
 }
 
+func peerAdminMaySend(typ string) bool {
+	switch typ {
+	case proto.TypeShareUpdate, proto.TypeKick, proto.TypeListShares, proto.TypePing, proto.TypePong, proto.TypeGoodbye:
+		return true
+	}
+	return false
+}
+
 func credentialMaySend(typ string) bool {
 	switch typ {
 	case proto.TypeBind, proto.TypeUnbind, proto.TypePing, proto.TypePong, proto.TypeGoodbye:
+		return true
+	}
+	return false
+}
+
+func shareCredentialMaySend(typ string) bool {
+	switch typ {
+	case proto.TypeShare, proto.TypeShareUpdate, proto.TypeUnshare, proto.TypeKick, proto.TypeApprove, proto.TypeListShares, proto.TypeWatchShares, proto.TypePing, proto.TypePong, proto.TypeGoodbye:
 		return true
 	}
 	return false
@@ -861,7 +970,7 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 					Webhook:              webhookVerifier,
 				})
 				if bindErr != nil {
-					s.releaseDurableLease(as, durableLeaseKey("http", hostname, 0), lease.ID)
+					s.undoDurableLease(as, durableLeaseKey("http", hostname, 0), lease)
 					if errors.Is(bindErr, ErrSubdomainTaken) {
 						continue
 					}
@@ -936,9 +1045,7 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 		Webhook:              webhookVerifier,
 	})
 	if err != nil {
-		if lease.ID != "" {
-			s.releaseDurableLease(as, durableLeaseKey("http", hostname, 0), lease.ID)
-		}
+		s.undoDurableLease(as, durableLeaseKey("http", hostname, 0), lease)
 		if errors.Is(err, ErrKindConflict) {
 			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeKindConflict, Message: "subdomain is already bound to a tls tunnel"})
 			return
@@ -967,6 +1074,9 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 func (s *Server) validateCredentialBind(ctx context.Context, as *AgentSession, bind proto.Bind) error {
 	if as.Credential == nil {
 		return nil
+	}
+	if as.Credential.Kind == credentials.KindShare {
+		return errors.New("share credentials cannot bind tunnels")
 	}
 	if s.credentialStore == nil {
 		return errors.New("tunnel credential is inactive")
@@ -1022,15 +1132,18 @@ func (s *Server) handleBindTCP(as *AgentSession, ctrl *proto.Conn, id uint64, bi
 	if s.storage != nil && bind.RemotePort != 0 {
 		lease, err = s.acquireDurableLease(as, bind, s.cfg.Domain, bind.RemotePort, nil)
 		if err != nil {
-			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodePortUnavailable, Message: "requested port is already in use"})
+			if errors.Is(err, storage.ErrTunnelConflict) {
+				ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodePortUnavailable, Message: "requested port is already in use"})
+				return
+			}
+			code, message := durableLeaseError(err)
+			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: code, Message: message})
 			return
 		}
 	}
-	port, err := s.tcpMgr.bind(as, bind.RemotePort, s.cfg.Domain, ac.prefixes())
+	port, evicted, err := s.tcpMgr.bind(as, bind.RemotePort, s.cfg.Domain, ac.prefixes(), bind.Takeover)
 	if err != nil {
-		if lease.ID != "" {
-			s.releaseDurableLease(as, durableLeaseKey("tcp", s.cfg.Domain, bind.RemotePort), lease.ID)
-		}
+		s.undoDurableLease(as, durableLeaseKey("tcp", s.cfg.Domain, bind.RemotePort), lease)
 		if errors.Is(err, errTooManyBinds) {
 			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeTooManyBinds, Message: "too many tcp binds for this session"})
 			return
@@ -1046,7 +1159,12 @@ func (s *Server) handleBindTCP(as *AgentSession, ctrl *proto.Conn, id uint64, bi
 		lease, err = s.acquireDurableLease(as, bind, s.cfg.Domain, port, nil)
 		if err != nil {
 			s.tcpMgr.releasePort(as, port)
-			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodePortUnavailable, Message: "allocated port is already in use"})
+			if errors.Is(err, storage.ErrTunnelConflict) {
+				ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodePortUnavailable, Message: "allocated port is already in use"})
+				return
+			}
+			code, message := durableLeaseError(err)
+			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: code, Message: message})
 			return
 		}
 	}
@@ -1055,9 +1173,11 @@ func (s *Server) handleBindTCP(as *AgentSession, ctrl *proto.Conn, id uint64, bi
 	}
 	as.rememberDurableLease(durableLeaseKey("tcp", s.cfg.Domain, port), lease.ID)
 	s.recordLeaseAcquired(as, lease)
+	url := "tcp://" + s.cfg.Domain + ":" + strconv.Itoa(port)
+	evict(evicted, url)
 	ctrl.Write(proto.TypeBindOK, id, proto.BindOK{
 		Hostname: s.cfg.Domain,
-		URL:      "tcp://" + s.cfg.Domain + ":" + strconv.Itoa(port),
+		URL:      url,
 		Port:     port,
 	})
 	s.recordEvent("info", "tcp tunnel bound", map[string]string{
@@ -1079,14 +1199,19 @@ type finishBindOptions struct {
 	OIDC           bool
 }
 
-func (s *Server) finishBind(opts finishBindOptions) {
-	if opts.Evicted != nil {
-		opts.Evicted.Sess.Control().Write(proto.TypeEvicted, opts.Evicted.IDGen.Next(), proto.Evicted{
-			Hostname: opts.Hostname,
-			Reason:   "takeover",
-		})
-		opts.Evicted.Sess.Close("takeover")
+func evict(evicted *AgentSession, hostname string) {
+	if evicted == nil {
+		return
 	}
+	evicted.Sess.Control().Write(proto.TypeEvicted, evicted.IDGen.Next(), proto.Evicted{
+		Hostname: hostname,
+		Reason:   "takeover",
+	})
+	evicted.Sess.Close("takeover")
+}
+
+func (s *Server) finishBind(opts finishBindOptions) {
+	evict(opts.Evicted, opts.Hostname)
 	opts.Control.Write(proto.TypeBindOK, opts.ID, proto.BindOK{
 		Hostname:       opts.Hostname,
 		URL:            s.cfg.PublicScheme + "://" + opts.Hostname,

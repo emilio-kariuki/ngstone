@@ -106,13 +106,17 @@ func peekClientHello(r io.Reader, max int) (string, []byte, error) {
 
 type replayConn struct {
 	net.Conn
-	buf []byte
+	buf       []byte
+	forwarded bool
 }
 
 func (c *replayConn) Read(p []byte) (int, error) {
 	if len(c.buf) > 0 {
 		n := copy(p, c.buf)
 		c.buf = c.buf[n:]
+		if len(c.buf) == 0 {
+			c.buf = nil
+		}
 		return n, nil
 	}
 	return c.Conn.Read(p)
@@ -122,7 +126,7 @@ func (c *replayConn) CloseWrite() error {
 	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
 		return cw.CloseWrite()
 	}
-	return nil
+	return c.Conn.Close()
 }
 
 type sniListener struct {
@@ -151,6 +155,9 @@ func (s *Server) newSNIListener(inner net.Listener) *sniListener {
 	}
 	if l.timeout <= 0 {
 		l.timeout = DefaultReadHeaderTimeout
+	}
+	if s.peers != nil {
+		s.peers.public = l
 	}
 	go l.acceptLoop()
 	return l
@@ -213,35 +220,115 @@ func (l *sniListener) acceptLoop() {
 	}
 }
 
-func (l *sniListener) classify(c net.Conn) {
+func (l *sniListener) peek(c net.Conn) (string, []byte, error) {
 	if err := c.SetReadDeadline(time.Now().Add(l.timeout)); err != nil {
-		c.Close()
-		return
+		return "", nil, err
 	}
-	serverName, peeked, err := peekClientHello(c, l.maxPeek)
+	return peekClientHello(c, l.maxPeek)
+}
+
+func clearReadDeadline(c net.Conn) bool {
+	if err := c.SetReadDeadline(time.Time{}); err != nil {
+		c.Close()
+		return false
+	}
+	return true
+}
+
+func (l *sniListener) classify(c net.Conn) {
+	serverName, peeked, err := l.peek(c)
 	if err != nil && !errors.Is(err, errNotClientHello) {
 		c.Close()
 		return
 	}
 	replay := &replayConn{Conn: c, buf: peeked}
-	if err == nil && serverName != "" && l.srv.registry != nil {
-		if b, ok := l.srv.registry.RouteTLS(serverName); ok {
-			if err := c.SetReadDeadline(time.Time{}); err != nil {
-				c.Close()
-				return
-			}
+	if err != nil || serverName == "" || l.srv.registry == nil {
+		if clearReadDeadline(c) {
+			l.deliver(replay)
+		}
+		return
+	}
+	if b, ok := l.srv.registry.RouteTLS(serverName); ok {
+		if clearReadDeadline(c) {
 			l.srv.serveTLSPassthrough(b, serverName, replay, l.sem)
+		}
+		return
+	}
+	_, local := l.srv.registry.Route(serverName)
+	if !clearReadDeadline(c) {
+		return
+	}
+	if !local && l.srv.peers != nil && l.srv.peers.eligible(serverName) {
+		l.srv.peers.forward(replay, serverName)
+		return
+	}
+	if !local && !hostMatchesDomain(serverName, normalizeHost(l.srv.cfg.Domain)) {
+		target, b, state := l.srv.localAlias(serverName)
+		switch {
+		case state == aliasLocal && target.Kind == "tls":
+			l.srv.serveTLSPassthrough(b, target.Hostname, replay, l.sem)
+			return
+		case state == aliasRefused:
+			c.Close()
+			return
+		case state == aliasRemote && l.srv.peers != nil && l.srv.peers.eligible(target.Hostname):
+			l.srv.peers.forward(replay, target.Hostname)
 			return
 		}
 	}
-	if err := c.SetReadDeadline(time.Time{}); err != nil {
-		c.Close()
+	l.deliver(replay)
+}
+
+func (l *sniListener) classifyForwarded(c net.Conn) {
+	serverName, peeked, err := l.peek(c)
+	if err != nil || serverName == "" || l.srv.registry == nil {
+		l.refuse(c)
 		return
 	}
+	replay := &replayConn{Conn: c, buf: peeked}
+	if b, ok := l.srv.registry.RouteTLS(serverName); ok {
+		if l.acceptForwarded(c) {
+			l.srv.serveTLSPassthrough(b, serverName, replay, l.sem)
+		}
+		return
+	}
+	if _, local := l.srv.registry.Route(serverName); !local {
+		target, b, state := l.srv.localAlias(serverName)
+		if state != aliasLocal {
+			l.refuse(c)
+			return
+		}
+		if target.Kind == "tls" {
+			if l.acceptForwarded(c) {
+				l.srv.serveTLSPassthrough(b, target.Hostname, replay, l.sem)
+			}
+			return
+		}
+	}
+	replay.forwarded = true
+	if l.acceptForwarded(c) {
+		l.deliver(replay)
+	}
+}
+
+func (l *sniListener) acceptForwarded(c net.Conn) bool {
+	if !writePeerStatus(c, peerStatusAccept) {
+		c.Close()
+		return false
+	}
+	return clearReadDeadline(c)
+}
+
+func (l *sniListener) refuse(c net.Conn) {
+	writePeerStatus(c, peerStatusNotOwner)
+	c.Close()
+}
+
+func (l *sniListener) deliver(replay *replayConn) {
 	select {
 	case l.ready <- replay:
 	case <-l.done:
-		c.Close()
+		replay.Close()
 	}
 }
 
@@ -316,22 +403,29 @@ func (s *Server) serveTLSPassthrough(b *Binding, host string, client *replayConn
 		}
 	}()
 
-	idle := newIdleDeadline(s.limitsOrDefault().TCPIdleTimeout, client, stream)
+	bytesIn, bytesOut := splice(client, stream, s.limitsOrDefault().TCPIdleTimeout, 0)
+	s.observability.observeTCP(b.durableTunnelID(), host, time.Since(started), bytesIn, bytesOut)
+}
+
+func splice(client, upstream net.Conn, idle, grace time.Duration) (in, out int64) {
+	deadline := newIdleDeadline(idle, client, upstream)
 	var wg sync.WaitGroup
 	wg.Add(2)
-	var bytesIn, bytesOut int64
 	go func() {
 		defer wg.Done()
-		bytesIn, _ = io.Copy(stream, idle.reader(client))
-		closeWrite(stream)
+		in, _ = io.Copy(upstream, deadline.reader(client))
+		closeWrite(upstream)
 	}()
 	go func() {
 		defer wg.Done()
-		bytesOut, _ = io.Copy(client, idle.reader(stream))
-		closeWrite(client.Conn)
+		out, _ = io.Copy(client, deadline.reader(upstream))
+		closeWrite(client)
+		if grace > 0 {
+			deadline.capRead(client, time.Now().Add(grace))
+		}
 	}()
 	wg.Wait()
-	s.observability.observeTCP(b.durableTunnelID(), host, time.Since(started), bytesIn, bytesOut)
+	return in, out
 }
 
 func tlsTunnelURL(hostname, publicAddr string) string {
@@ -422,9 +516,7 @@ func (s *Server) bindTLSHost(as *AgentSession, bind proto.Bind, hostname string,
 		TLS:      true,
 	})
 	if err != nil {
-		if lease.ID != "" {
-			s.releaseDurableLease(as, key, lease.ID)
-		}
+		s.undoDurableLease(as, key, lease)
 		switch {
 		case errors.Is(err, ErrKindConflict):
 			return nil, &proto.BindErr{Code: proto.CodeKindConflict, Message: "subdomain is already bound to an http tunnel"}
@@ -441,13 +533,7 @@ func (s *Server) bindTLSHost(as *AgentSession, bind proto.Bind, hostname string,
 }
 
 func (s *Server) finishBindTLS(as *AgentSession, ctrl *proto.Conn, id uint64, hostname string, evicted *AgentSession) {
-	if evicted != nil {
-		evicted.Sess.Control().Write(proto.TypeEvicted, evicted.IDGen.Next(), proto.Evicted{
-			Hostname: hostname,
-			Reason:   "takeover",
-		})
-		evicted.Sess.Close("takeover")
-	}
+	evict(evicted, hostname)
 	ctrl.Write(proto.TypeBindOK, id, proto.BindOK{
 		Hostname: hostname,
 		URL:      tlsTunnelURL(hostname, s.cfg.PublicAddr),

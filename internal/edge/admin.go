@@ -1,6 +1,7 @@
 package edge
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -28,6 +29,11 @@ const (
 
 func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, adminapi.APIPrefix)
+	oidcRoute := path == "/auth/oidc/start" || path == "/auth/oidc/callback" || path == "/auth/logout"
+	if auth, ok := adminAuthFromContext(r.Context()); ok && auth.AuthType == adminAuthTypeMTLS && oidcRoute {
+		writeAdminError(w, http.StatusNotFound, "not_found", "management resource not found")
+		return
+	}
 	switch path {
 	case "/auth/oidc/start":
 		s.handleOIDCStart(w, r)
@@ -63,6 +69,9 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleAdminPolicy(w, r, strings.TrimPrefix(path, "/policies/"))
 	case path == "/domains":
 		s.handleAdminDomains(w, r)
+	case isDomainStatusPath(path):
+		id, _ := domainStatusPathID(path)
+		s.handleAdminDomainStatus(w, r, id)
 	case strings.HasPrefix(path, "/domains/"):
 		s.handleAdminDomain(w, r, strings.TrimPrefix(path, "/domains/"))
 	case strings.HasPrefix(path, "/tunnels/") && strings.HasSuffix(path, "/drain"):
@@ -74,6 +83,9 @@ func (s *Server) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authorizeAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if auth, ok := adminAuthFromContext(r.Context()); ok && auth.AuthType == adminAuthTypeMTLS {
+		return s.authorizeAdminRole(w, r, auth)
+	}
 	if session, ok := s.oidcSessionFromRequest(r); ok {
 		auth := adminAuth{Principal: session.Principal, AuthType: "oidc", CSRF: session.CSRF}
 		if !s.authorizeAdminRole(w, r, auth) {
@@ -224,7 +236,7 @@ func (s *Server) handleAdminCredentials(w http.ResponseWriter, r *http.Request) 
 			writeAdminError(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
 			return
 		}
-		s.recordEvent("info", "management credential issued", map[string]string{
+		s.recordAdminEvent(r, "management credential issued", map[string]string{
 			"credential_id": issued.Credential.ID,
 			"kind":          issued.Credential.Kind,
 		})
@@ -260,7 +272,7 @@ func (s *Server) handleAdminCredential(w http.ResponseWriter, r *http.Request, r
 		return
 	}
 	s.recordCredentialEventForID(id, "credential_revoked")
-	s.recordEvent("info", "management credential revoked", map[string]string{"credential_id": id})
+	s.recordAdminEvent(r, "management credential revoked", map[string]string{"credential_id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -328,7 +340,7 @@ func (s *Server) handleAdminPolicies(w http.ResponseWriter, r *http.Request) {
 			if saved.ID != id {
 				continue
 			}
-			s.recordEvent("info", "management traffic policy saved", map[string]string{"policy_id": saved.ID, "policy_name": saved.Name})
+			s.recordAdminEvent(r, "management traffic policy saved", map[string]string{"policy_id": saved.ID, "policy_name": saved.Name})
 			writeAdminData(w, http.StatusCreated, adminapi.TrafficPolicy{ID: saved.ID, Name: saved.Name, OwnerID: saved.OwnerID, Digest: digest, Policy: json.RawMessage(saved.PolicyJSON), CreatedAt: saved.CreatedAt, UpdatedAt: saved.UpdatedAt})
 			return
 		}
@@ -364,7 +376,7 @@ func (s *Server) handleAdminPolicy(w http.ResponseWriter, r *http.Request, rawID
 		writeAdminError(w, http.StatusInternalServerError, "internal_error", "could not delete traffic policy")
 		return
 	}
-	s.recordEvent("info", "management traffic policy deleted", map[string]string{"policy_id": id})
+	s.recordAdminEvent(r, "management traffic policy deleted", map[string]string{"policy_id": id})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -388,7 +400,20 @@ func (s *Server) handleAdminDomains(w http.ResponseWriter, r *http.Request) {
 			writeAdminError(w, http.StatusBadRequest, "invalid_json", err.Error())
 			return
 		}
-		domain, err := s.storage.CreateCustomDomain(r.Context(), storage.CustomDomainSpec{Domain: request.Domain, TunnelID: request.TunnelID, OwnerID: ownerID, Status: request.Status})
+		if status := strings.TrimSpace(request.Status); status != "" && status != "pending" {
+			if ownerID != credentials.GlobalOwnerID {
+				s.recordAdminEventLevel(r, "warn", "management custom domain status rejected", map[string]string{"domain": truncateField(strings.TrimSpace(request.Domain), 253)})
+				writeAdminError(w, http.StatusForbidden, "forbidden", "your role cannot perform this operation")
+				return
+			}
+			writeAdminError(w, http.StatusUnprocessableEntity, "validation_error", "set status with POST /api/v1/domains/{id}/status")
+			return
+		}
+		if name, ok := storage.NormalizeCustomDomain(request.Domain); ok && s.customDomainReserved(name) {
+			writeAdminError(w, http.StatusUnprocessableEntity, "validation_error", "custom domain is reserved")
+			return
+		}
+		domain, err := s.storage.CreateCustomDomain(r.Context(), storage.CustomDomainSpec{Domain: request.Domain, TunnelID: request.TunnelID, OwnerID: ownerID})
 		if err != nil {
 			if errors.Is(err, storage.ErrTunnelConflict) {
 				writeAdminError(w, http.StatusConflict, "domain_taken", "custom domain is already registered")
@@ -405,7 +430,7 @@ func (s *Server) handleAdminDomains(w http.ResponseWriter, r *http.Request) {
 			writeAdminError(w, http.StatusUnprocessableEntity, "validation_error", "custom domain is invalid")
 			return
 		}
-		s.recordEvent("info", "management custom domain registered", map[string]string{"domain_id": domain.ID, "domain": domain.Domain})
+		s.recordAdminEvent(r, "management custom domain registered", map[string]string{"domain_id": domain.ID, "domain": domain.Domain})
 		writeAdminData(w, http.StatusCreated, domain)
 	default:
 		writeAdminMethodNotAllowed(w, http.MethodGet, http.MethodPost)
@@ -434,8 +459,82 @@ func (s *Server) handleAdminDomain(w http.ResponseWriter, r *http.Request, rawID
 		writeAdminError(w, http.StatusInternalServerError, "internal_error", "could not delete custom domain")
 		return
 	}
-	s.recordEvent("info", "management custom domain deleted", map[string]string{"domain_id": id})
+	s.aliases.refresh(context.WithoutCancel(r.Context()))
+	s.recordAdminEvent(r, "management custom domain deleted", map[string]string{"domain_id": id})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func domainStatusPathID(path string) (string, bool) {
+	rest, ok := strings.CutPrefix(path, "/domains/")
+	if !ok {
+		return "", false
+	}
+	id, ok := strings.CutSuffix(rest, "/status")
+	if !ok || id == "" || strings.Contains(id, "/") {
+		return "", false
+	}
+	return id, true
+}
+
+func isDomainStatusPath(path string) bool {
+	_, ok := domainStatusPathID(path)
+	return ok
+}
+
+func (s *Server) handleAdminDomainStatus(w http.ResponseWriter, r *http.Request, rawID string) {
+	if s.storage == nil {
+		writeAdminError(w, http.StatusConflict, "durable_storage_disabled", "durable control-plane storage is not configured")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAdminMethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if adminOwnerID(r) != credentials.GlobalOwnerID {
+		writeAdminError(w, http.StatusForbidden, "forbidden", "your role cannot perform this operation")
+		return
+	}
+	id, err := url.PathUnescape(rawID)
+	if err != nil || id == "" || strings.ContainsAny(id, "/\\") {
+		writeAdminError(w, http.StatusNotFound, "not_found", "custom domain not found")
+		return
+	}
+	var request adminapi.CustomDomainStatusRequest
+	if err := decodeAdminJSON(w, r, &request); err != nil {
+		writeAdminError(w, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	status := strings.TrimSpace(request.Status)
+	if status != "active" && status != "disabled" {
+		writeAdminError(w, http.StatusUnprocessableEntity, "validation_error", "status must be active or disabled")
+		return
+	}
+	domain, err := s.storage.SetCustomDomainStatus(r.Context(), id, status)
+	if err != nil {
+		switch {
+		case errors.Is(err, storage.ErrNotFound):
+			writeAdminError(w, http.StatusNotFound, "not_found", "custom domain not found")
+		case errors.Is(err, storage.ErrInvalid):
+			writeAdminError(w, http.StatusUnprocessableEntity, "validation_error", "domain has no eligible tunnel or its tunnel owner changed")
+		default:
+			writeAdminError(w, http.StatusInternalServerError, "internal_error", "could not change custom domain status")
+		}
+		return
+	}
+	s.aliases.refresh(context.WithoutCancel(r.Context()))
+	s.recordAdminEvent(r, "management custom domain status changed", map[string]string{"domain_id": domain.ID, "domain": domain.Domain, "status": domain.Status})
+	writeAdminData(w, http.StatusOK, domain)
+}
+
+func (s *Server) customDomainReserved(domain string) bool {
+	return hostMatchesDomain(domain, strings.ToLower(s.cfg.Domain))
+}
+
+func truncateField(value string, max int) string {
+	if len(value) > max {
+		return value[:max]
+	}
+	return value
 }
 
 func adminOwnerID(r *http.Request) string {
@@ -481,7 +580,7 @@ func (s *Server) handleAdminDrain(w http.ResponseWriter, r *http.Request, rawHos
 		}
 		go s.drainSession(session, session.Sess.Control(), "management drain")
 	}
-	s.recordEvent("info", "management tunnel drain", map[string]string{
+	s.recordAdminEvent(r, "management tunnel drain", map[string]string{
 		"hostname":   host,
 		"connectors": fmt.Sprintf("%d", len(sessions)),
 	})

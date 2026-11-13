@@ -199,7 +199,50 @@ export default function LimitsTimeoutsPage() {
           Guards against an unauthenticated handshake flood.
         </Property>
         <Property name=":4443 unauthenticated sessions" type="int" defaultValue="32">
-          Guards against slow-auth session hoarding.
+          Guards against slow-auth session hoarding. QUIC connections share
+          both caps with TCP. An unauthenticated QUIC connection is closed no
+          later than 5 s after admission and holds its slot until it is
+          closed.
+        </Property>
+        <Property name=":4443 unauthenticated sessions per client address" type="int" defaultValue="4">
+          Set with <code>-unauth-per-addr</code>; the default is a quarter of{" "}
+          <code>-handshake-concurrency</code>, and never below 1. Counted per
+          IPv4 address or per IPv6 /48 and shared by TCP, QUIC, WebSocket and
+          forwarded control, where the address is the original client&apos;s.
+          Stops one address from filling the handshake cap, though four
+          addresses (or /48s) can still fill it. A refused client is
+          turned away without any control reply: a TCP connection is closed, a
+          QUIC connection is refused with <code>CONNECTION_REFUSED</code>, and
+          a WebSocket upgrade gets{" "}
+          <code>503 too many connections</code>. Refusals are counted in{" "}
+          <code>ngstoned_rejected_unauth_per_addr_total</code>. Many agents
+          behind one NAT or one IPv6 /48 that start together can hit it.
+        </Property>
+        <Property name="QUIC handshake idle timeout" type="duration" defaultValue="10s">
+          Applies only with <code>-quic</code>. A QUIC handshake that stalls
+          is dropped. The edge sends a QUIC Retry before it admits a
+          connection, so the agent&apos;s first handshake reply arrives two
+          round trips after it starts. The agent waits up to 10 s for it, and
+          the whole handshake and authentication must fit in the 5 s
+          pre-authentication budget after admission. A link with a round trip
+          above about 4.5 s cannot connect over QUIC and should use TCP.
+          Agents older than this release wait 5 s and are limited to about
+          2.5 s.
+        </Property>
+        <Property name="QUIC dial timeout" type="duration" defaultValue="20s">
+          Applies only with <code>-quic</code>. The agent&apos;s whole QUIC
+          dial budget. With UDP blocked, a literal address fails after 10 s. A
+          name with both an IPv4 and an IPv6 address tries IPv4 first and then
+          IPv6, so it fails after up to 20 s. With more than two records the 20 s
+          may run out after the first two.
+        </Property>
+        <Property name="QUIC max idle timeout" type="duration" defaultValue="15s">
+          Applies only with <code>-quic</code>. A peer that vanishes without
+          a clean close is noticed within about this long.
+        </Property>
+        <Property name="QUIC keep-alive" type="duration" defaultValue="5s">
+          Applies only with <code>-quic</code>. Keeps an idle connection open
+          and lets a vanished peer be detected.
         </Property>
       </ParamTable>
     </DocsArticle>

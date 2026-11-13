@@ -47,7 +47,7 @@ func requireCredentialFile(path string) (string, error) {
 func cmdCredentialIssue(args []string) int {
 	fs := flag.NewFlagSet("credentials issue", flag.ContinueOnError)
 	fileFlag := credentialFileFlag(fs)
-	kind := fs.String("kind", credentials.KindHTTP, "credential kind: http, tcp, tls, or preview")
+	kind := fs.String("kind", credentials.KindHTTP, "credential kind: http, tcp, tls, preview, or share")
 	subdomain := fs.String("subdomain", "", "exact HTTP or TLS subdomain this credential may bind")
 	remotePort := fs.Int("remote-port", 0, "exact TCP port this credential may bind")
 	ttl := fs.Duration("ttl", defaultCredentialTTL, "credential lifetime, up to 720h")

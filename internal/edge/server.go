@@ -1,9 +1,11 @@
 package edge
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"github.com/quic-go/quic-go"
 	"golang.org/x/sync/errgroup"
 
 	"ngstone/internal/credentials"
@@ -57,6 +60,15 @@ type Config struct {
 	HTTPAddr string
 	OpsAddr  string
 
+	AdminMTLSAddr         string
+	AdminMTLSClientCAFile string
+
+	PeerAddr        string
+	PeerListen      string
+	PublicTLSConfig *tls.Config
+	CustomCertDir   string
+	QUIC            bool
+
 	TCPPortRange string
 	TCPBindAddr  string
 
@@ -89,6 +101,9 @@ type Server struct {
 	ownsStorage     bool
 	randomName      func() string
 
+	aliases     *aliasResolver
+	customCerts []customCert
+
 	perIPLimiter *perIPLimiter
 	perIP        *perIPInflight
 	globalSem    *globalSemaphore
@@ -97,10 +112,15 @@ type Server struct {
 	unauthSem    *globalSemaphore
 	fallbackSem  *globalSemaphore
 
+	unauthPerAddr *perIPInflight
+
 	webhookBudget *byteBudget
+
+	adminClientCAs *x509.CertPool
 
 	tlsMgr *TLSManager
 	tcpMgr *tcpManager
+	peers  *peerForwarder
 
 	shares        *shareRegistry
 	shareSem      *globalSemaphore
@@ -145,8 +165,29 @@ func New(cfg Config) (*Server, error) {
 	}
 	cfg.Limits = limits
 
+	var adminClientCAs *x509.CertPool
+	if cfg.AdminMTLSAddr != "" || cfg.AdminMTLSClientCAFile != "" {
+		if cfg.AdminMTLSAddr == "" || cfg.AdminMTLSClientCAFile == "" {
+			return nil, errors.New("edge: admin mTLS needs both an address and a client CA file")
+		}
+		if cfg.Insecure {
+			return nil, errors.New("edge: admin mTLS cannot be combined with insecure mode")
+		}
+		adminClientCAs, err = loadAdminClientCAs(cfg.AdminMTLSClientCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("edge: %w", err)
+		}
+	}
+
 	registry := NewRegistry()
 	registry.SetLimits(limits)
+
+	storageConfigured := cfg.Storage != nil || strings.TrimSpace(cfg.StorageDriver) != "" || strings.TrimSpace(cfg.StorageDSN) != ""
+	if cfg.PeerAddr != "" || cfg.PeerListen != "" {
+		if err := validatePeerAddr(cfg, storageConfigured); err != nil {
+			return nil, err
+		}
+	}
 
 	var durableStore *storage.Store
 	if cfg.Storage != nil {
@@ -167,7 +208,26 @@ func New(cfg Config) (*Server, error) {
 			_ = durableStore.Close()
 		}
 	}
-
+	if cfg.PublicTLSConfig != nil && cfg.Insecure {
+		closeOpenedStorage()
+		return nil, errors.New("edge: a public TLS config cannot be combined with insecure mode")
+	}
+	if cfg.QUIC && cfg.PublicTLSConfig != nil {
+		closeOpenedStorage()
+		return nil, errors.New("edge: QUIC control needs managed certificates or insecure mode")
+	}
+	if cfg.CustomCertDir != "" {
+		switch {
+		case cfg.Insecure:
+			closeOpenedStorage()
+			return nil, errors.New("edge: custom certificates cannot be combined with insecure mode")
+		case cfg.PublicTLSConfig != nil:
+			closeOpenedStorage()
+			return nil, errors.New("edge: custom certificates cannot be combined with a public TLS config")
+		case durableStore == nil:
+			return nil, errors.New("edge: custom certificates need durable storage")
+		}
+	}
 	var credentialStore credentialStore
 	if durableStore != nil {
 		credentialStore = durableStore
@@ -242,6 +302,7 @@ func New(cfg Config) (*Server, error) {
 
 	srv := &Server{
 		cfg:               cfg,
+		adminClientCAs:    adminClientCAs,
 		startedAt:         time.Now(),
 		events:            newEventRing(200),
 		registry:          registry,
@@ -258,6 +319,7 @@ func New(cfg Config) (*Server, error) {
 		handshakeSem:      newGlobalSemaphore(int64(limits.HandshakeConcurrency)),
 		unauthSem:         newGlobalSemaphore(int64(limits.UnauthSessions)),
 		fallbackSem:       newGlobalSemaphore(int64(limits.UnauthSessions)),
+		unauthPerAddr:     newPerIPInflight(limits.UnauthPerAddr),
 		webhookBudget:     newByteBudget(limits.WebhookBufferBytes),
 		tcpMgr:            tcpMgr,
 		observability:     newObservabilityRegistry(),
@@ -268,6 +330,25 @@ func New(cfg Config) (*Server, error) {
 		proxyProtoTrusted: trustedPrefixes,
 		shares:            newShareRegistry(cfg.MaxShareTTL),
 		shareSem:          newGlobalSemaphore(maxGlobalShareConns),
+	}
+	if durableStore != nil {
+		srv.aliases = newAliasResolver(durableStore, srv.customDomainReserved, srv.leaseTTL)
+	}
+	if cfg.CustomCertDir != "" {
+		srv.customCerts, err = loadCustomCertificates(cfg.CustomCertDir, srv.customDomainReserved, normalizeHost(cfg.Domain), time.Now())
+		if err != nil {
+			alerts.close()
+			closeOpenedStorage()
+			return nil, fmt.Errorf("edge: %w", err)
+		}
+	}
+	if cfg.PeerAddr != "" {
+		srv.peers, err = newPeerForwarder(srv)
+		if err != nil {
+			alerts.close()
+			closeOpenedStorage()
+			return nil, err
+		}
 	}
 	srv.shares.onExpire = func(sh *share) { srv.closeShare(sh, proto.ShareReasonExpired) }
 	srv.shares.onIdle = func(sh *share) {
@@ -327,14 +408,8 @@ func (s *Server) Run(ctx context.Context) error {
 		return errors.New("edge: domain must not be empty")
 	}
 
-	if !s.cfg.Insecure {
-		mgr, err := NewTLSManager(TLSConfig{
-			Domain:      s.cfg.Domain,
-			DNSProvider: s.cfg.DNSProvider,
-			ACMEEmail:   s.cfg.ACMEEmail,
-			ACMECA:      s.cfg.ACMECA,
-			StoragePath: s.cfg.CertStoragePath,
-		})
+	if !s.cfg.Insecure && s.cfg.PublicTLSConfig == nil {
+		mgr, err := NewTLSManager(s.tlsManagerConfig())
 		if err != nil {
 			return fmt.Errorf("edge: tls setup: %w", err)
 		}
@@ -344,8 +419,15 @@ func (s *Server) Run(ctx context.Context) error {
 		if err := mgr.CheckApexReady(ctx); err != nil {
 			return fmt.Errorf("edge: refusing to start control plane: %w", err)
 		}
+		if len(s.customCerts) > 0 {
+			if err := mgr.AddCustomCertificates(ctx, s.customCerts); err != nil {
+				return fmt.Errorf("edge: %w", err)
+			}
+		}
 		s.tlsMgr = mgr
 	}
+
+	s.aliases.refresh(ctx)
 
 	controlLn, err := net.Listen("tcp", s.cfg.ControlAddr)
 	if err != nil {
@@ -368,8 +450,23 @@ func (s *Server) Run(ctx context.Context) error {
 
 	var httpLn net.Listener
 	var opsLn net.Listener
+	var adminMTLSLn net.Listener
+	var peerLn net.Listener
+	var quicTr *quic.Transport
+	var quicLn *quic.Listener
+
+	closeQUIC := func() {
+		if quicLn != nil {
+			quicLn.Close()
+		}
+		if quicTr != nil {
+			quicTr.Close()
+			quicTr.Conn.Close()
+		}
+	}
 
 	closeAll := func() {
+		closeQUIC()
 		controlLn.Close()
 		publicLn.Close()
 		if httpLn != nil {
@@ -377,6 +474,20 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		if opsLn != nil {
 			opsLn.Close()
+		}
+		if adminMTLSLn != nil {
+			adminMTLSLn.Close()
+		}
+		if peerLn != nil {
+			peerLn.Close()
+		}
+	}
+
+	if s.cfg.QUIC {
+		quicTr, quicLn, err = s.listenQUIC(controlLn.Addr().(*net.TCPAddr))
+		if err != nil {
+			closeAll()
+			return err
 		}
 	}
 
@@ -391,6 +502,8 @@ func (s *Server) Run(ctx context.Context) error {
 			return fmt.Errorf("edge: http redirect listen: %w", err)
 		}
 		publicLn = tls.NewListener(publicLn, s.tlsMgr.PublicTLSConfig())
+	} else if s.cfg.PublicTLSConfig != nil {
+		publicLn = tls.NewListener(publicLn, s.cfg.PublicTLSConfig)
 	}
 
 	if s.cfg.OpsAddr != "" {
@@ -399,6 +512,24 @@ func (s *Server) Run(ctx context.Context) error {
 			closeAll()
 			return fmt.Errorf("edge: ops listen: %w", err)
 		}
+	}
+
+	if s.adminClientCAs != nil {
+		rawLn, listenErr := net.Listen("tcp", s.cfg.AdminMTLSAddr)
+		if listenErr != nil {
+			closeAll()
+			return fmt.Errorf("edge: admin mtls listen: %w", listenErr)
+		}
+		adminMTLSLn = s.newAdminMTLSListener(rawLn)
+	}
+
+	if s.peers != nil {
+		peerLn, err = net.Listen("tcp", cmp.Or(s.cfg.PeerListen, s.cfg.PeerAddr))
+		if err != nil {
+			closeAll()
+			return fmt.Errorf("edge: peer listen: %w", err)
+		}
+		s.peers.ln = peerLn
 	}
 
 	limits := s.limitsOrDefault()
@@ -417,6 +548,8 @@ func (s *Server) Run(ctx context.Context) error {
 		protocols.SetUnencryptedHTTP2(true)
 		publicSrv.Protocols = &protocols
 	}
+
+	publicSrv.ConnContext = publicConnContext
 
 	var httpSrv *http.Server
 	if httpLn != nil {
@@ -438,16 +571,32 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}
 
+	var adminMTLSSrv *http.Server
+	if adminMTLSLn != nil {
+		adminMTLSSrv = &http.Server{
+			Handler:           s.adminMTLSHandler(),
+			ReadHeaderTimeout: limits.ReadHeaderTimeout,
+			ReadTimeout:       limits.ReadHeaderTimeout,
+			IdleTimeout:       limits.IdleTimeout,
+			MaxHeaderBytes:    limits.MaxHeaderBytes,
+			ErrorLog:          slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug),
+		}
+	}
+
 	g.Go(func() error {
 		return s.observabilityLoop(gctx)
 	})
 
 	g.Go(func() error {
 		<-gctx.Done()
+		s.peers.stop()
 		s.controlMu.Lock()
 		s.controlDraining = true
 		s.controlMu.Unlock()
 		controlLn.Close()
+		if quicLn != nil {
+			quicLn.Close()
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), drainTimeout+5*time.Second)
 		defer cancel()
 		publicSrv.Shutdown(shutdownCtx)
@@ -457,6 +606,10 @@ func (s *Server) Run(ctx context.Context) error {
 		if opsSrv != nil {
 			opsSrv.Shutdown(shutdownCtx)
 		}
+		if adminMTLSSrv != nil {
+			adminMTLSSrv.Shutdown(shutdownCtx)
+		}
+		s.peers.waitSplices(shutdownCtx)
 		return nil
 	})
 
@@ -468,6 +621,16 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	})
 
+	if quicLn != nil {
+		g.Go(func() error {
+			err := s.serveQUIC(gctx, quicLn)
+			if gctx.Err() != nil {
+				return nil
+			}
+			return err
+		})
+	}
+
 	g.Go(func() error {
 		err := publicSrv.Serve(publicLn)
 		if errors.Is(err, http.ErrServerClosed) {
@@ -475,6 +638,18 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 		return err
 	})
+
+	if s.aliases != nil {
+		g.Go(func() error { return s.aliases.watch(gctx) })
+	}
+
+	if s.peers != nil {
+		g.Go(func() error { return s.peers.acceptLoop(gctx) })
+		g.Go(func() error { return s.peers.heartbeat(gctx) })
+		if s.tcpMgr != nil {
+			g.Go(func() error { return s.peers.watchTCP(gctx) })
+		}
+	}
 
 	if httpSrv != nil {
 		g.Go(func() error {
@@ -496,7 +671,17 @@ func (s *Server) Run(ctx context.Context) error {
 		})
 	}
 
-	slog.Info("ngstoned: listeners up", "control", s.cfg.ControlAddr, "public", s.cfg.PublicAddr, "insecure", s.cfg.Insecure, "proxy_protocol", s.cfg.ProxyProtocol)
+	if adminMTLSSrv != nil {
+		g.Go(func() error {
+			err := adminMTLSSrv.Serve(adminMTLSLn)
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
+		})
+	}
+
+	slog.Info("ngstoned: listeners up", "control", s.cfg.ControlAddr, "public", s.cfg.PublicAddr, "insecure", s.cfg.Insecure, "proxy_protocol", s.cfg.ProxyProtocol, "peer_addr", s.cfg.PeerAddr, "peer_listen", s.cfg.PeerListen, "admin_mtls", s.cfg.AdminMTLSAddr, "quic", s.cfg.QUIC)
 	s.recordEvent("info", "listeners up", map[string]string{
 		"control": s.cfg.ControlAddr,
 		"public":  s.cfg.PublicAddr,
@@ -504,6 +689,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	err = g.Wait()
 	s.waitControlSessions(controlShutdownGrace)
+	closeQUIC()
 	s.shareAudit.close()
 	return err
 }
@@ -528,9 +714,12 @@ func (s *Server) waitControlSessions(grace time.Duration) {
 }
 
 func (s *Server) redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
-	if !hostMatchesDomain(stripPort(r.Host), s.cfg.Domain) {
-		http.NotFound(w, r)
-		return
+	host := stripPort(r.Host)
+	if !hostMatchesDomain(host, s.cfg.Domain) {
+		if _, ok := s.aliases.resolve(host); !ok {
+			http.NotFound(w, r)
+			return
+		}
 	}
 	target := "https://" + r.Host + r.URL.RequestURI()
 	http.Redirect(w, r, target, http.StatusMovedPermanently)
@@ -541,4 +730,19 @@ func hostMatchesDomain(host, domain string) bool {
 		return true
 	}
 	return strings.HasSuffix(host, "."+domain)
+}
+
+func (s *Server) tlsManagerConfig() TLSConfig {
+	tlsCfg := TLSConfig{
+		Domain:      s.cfg.Domain,
+		DNSProvider: s.cfg.DNSProvider,
+		ACMEEmail:   s.cfg.ACMEEmail,
+		ACMECA:      s.cfg.ACMECA,
+		StoragePath: s.cfg.CertStoragePath,
+		PublicAddr:  s.cfg.PublicAddr,
+	}
+	if s.aliases != nil {
+		tlsCfg.CustomDomainAllowed = s.autoCertAllowed
+	}
+	return tlsCfg
 }

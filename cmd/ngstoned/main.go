@@ -29,11 +29,15 @@ func main() {
 	controlAddr := flag.String("control", ":4443", "control plane listen address")
 	httpAddr := flag.String("http", ":80", "HTTP redirect listen address (unused with -insecure)")
 	opsAddr := flag.String("ops", "127.0.0.1:4041", "loopback ops endpoint address (dashboard, /api/state, /metrics, expvar, /healthz, pprof); empty disables it")
+	adminMTLSAddr := flag.String("admin-mtls-addr", "", "address for the mTLS management listener; requires -admin-mtls-client-ca")
+	adminMTLSClientCA := flag.String("admin-mtls-client-ca", "", "PEM file of CA certificates that issue management client certificates")
 	tokenSHA256Hex := flag.String("token-sha256", "", "legacy hex-encoded SHA-256 of the shared auth token (defaults to $NGSTONE_TOKEN_SHA256; prefer -credentials-file)")
 	credentialsFileFlag := flag.String("credentials-file", "", "versioned per-tunnel credential file (defaults to $NGSTONE_CREDENTIALS_FILE)")
 	databaseDriver := flag.String("database-driver", "", "control-plane database driver: sqlite or postgres (defaults from the database URL)")
 	databaseURLFlag := flag.String("database-url", "", "control-plane database URL (defaults to $NGSTONE_DATABASE_URL or SQLite at /var/lib/ngstoned/control.db; prefer the environment for PostgreSQL credentials)")
 	edgeID := flag.String("edge-id", "", "stable identifier for this edge server (defaults to $NGSTONE_EDGE_ID or a generated value)")
+	peerAddr := flag.String("peer-addr", "", "address (ip:port) this edge listens on for forwarded connections from other edges and advertises to them through the shared database; requires PostgreSQL; empty disables inter-edge forwarding (defaults to $NGSTONE_PEER_ADDR)")
+	peerListen := flag.String("peer-listen", "", "address (ip:port or :port) to listen on for peer connections when it differs from -peer-addr, for example inside a container; defaults to -peer-addr")
 	leaseTTL := flag.Duration("lease-ttl", storage.DefaultLeaseTTL, "connector lease lifetime; heartbeats renew leases before expiry")
 	adminTokenSHA256Hex := flag.String("admin-token-sha256", "", "hex-encoded SHA-256 of the management API bearer token (defaults to $NGSTONE_ADMIN_TOKEN_SHA256; loopback-only when unset)")
 	alertWebhookURL := flag.String("alert-webhook", "", "HTTP(S) webhook for credential, connector, and lease lifecycle alerts (defaults to $NGSTONE_ALERT_WEBHOOK_URL)")
@@ -60,9 +64,11 @@ func main() {
 	proxyProtocol := flag.Bool("proxy-protocol", false, "require a PROXY protocol v1/v2 header on every connection to the public listener, and use the address it carries as the client address; enable this only when the public port is reachable solely from a trusted TCP proxy (see deploy/README.md), and enable it on both sides at once")
 	proxyProtocolTrusted := flag.String("proxy-protocol-trusted", "", "comma-separated CIDRs trusted to originate PROXY protocol headers on the public listener (only meaningful with -proxy-protocol); connections from any other peer are closed immediately. If empty, PROXY headers are accepted from any peer and --allow-cidr per-tunnel checks cannot be trusted unless the public port is firewalled to the proxy")
 
+	quicControl := flag.Bool("quic", false, "also accept agent control connections over QUIC (UDP) on the -control port")
 	insecure := flag.Bool("insecure", false, "run with no TLS anywhere and no certificate management (dev/test only)")
 	acmeCA := flag.String("acme-ca", edge.ACMECAStaging, "ACME CA to use: \"staging\" (default) or \"production\"; a config mistake against production can rate-limit the domain for a week")
 	certEmail := flag.String("cert-email", "", "ACME account email (required unless -insecure)")
+	customCerts := flag.String("custom-certs", "", "directory of <name>.crt and <name>.key pairs served for active custom domains; changes need a restart")
 	certStorage := flag.String("cert-storage", edge.DefaultCertStoragePath, "certmagic FileStorage path; must match the systemd StateDirectory (see deploy/)")
 	dnsProvider := flag.String("dns-provider", edge.DefaultDNSProvider, "DNS provider used for the DNS-01 certificate challenges; its credentials are read from the environment. Use -dns-provider help to list providers and their variables")
 	cfAPIToken := flag.String("cf-api-token", "", "Cloudflare API token, for -dns-provider cloudflare (prefer $NGSTONE_CF_API_TOKEN; ps auxww exposes flags but not the environment)")
@@ -81,6 +87,7 @@ func main() {
 	perSessionUpgrade := flag.Int64("per-session-upgrade", 0, "per-session concurrent upgraded (websocket/SSE) stream cap; 0 uses the built-in default")
 	handshakeConcurrency := flag.Int("handshake-concurrency", edge.DefaultHandshakeConcurrency, ":4443 concurrent TLS handshake cap")
 	unauthSessions := flag.Int("unauth-sessions", edge.DefaultUnauthSessions, ":4443 unauthenticated-session cap")
+	unauthPerAddr := flag.Int("unauth-per-addr", 0, ":4443 unauthenticated-session cap per client address, shared by TCP, QUIC, WebSocket and forwarded control (IPv6 grouped by /48); 0 uses a quarter of -handshake-concurrency, at least 1")
 	perIPInFlight := flag.Int("per-ip-inflight", edge.DefaultPerIPInFlight, "max HTTP requests plus TCP tunnel connections one client address can have in flight (IPv6 grouped by /48)")
 	clientIdleTimeout := flag.Duration("client-idle-timeout", edge.DefaultClientIdleTimeout, "max time one read of a request body, or one write of a response, may wait on the public client; a stalled upload gets 408")
 	tcpIdleTimeout := flag.Duration("tcp-idle-timeout", edge.DefaultTCPIdleTimeout, "close a TCP tunnel connection after this long with no bytes in either direction")
@@ -119,6 +126,11 @@ func main() {
 	if resolvedEdgeID == "" {
 		resolvedEdgeID = *edgeID
 	}
+	resolvedAdminMTLSAddr := envOrFlag("NGSTONE_ADMIN_MTLS_ADDR", *adminMTLSAddr)
+	resolvedCustomCerts := envOrFlag("NGSTONE_CUSTOM_CERTS_DIR", *customCerts)
+	resolvedAdminMTLSClientCA := envOrFlag("NGSTONE_ADMIN_MTLS_CLIENT_CA", *adminMTLSClientCA)
+	resolvedPeerAddr := envOrFlag("NGSTONE_PEER_ADDR", *peerAddr)
+	resolvedPeerListen := envOrFlag("NGSTONE_PEER_LISTEN", *peerListen)
 	tokenSHA256HexVal := os.Getenv("NGSTONE_TOKEN_SHA256")
 	if tokenSHA256HexVal == "" {
 		tokenSHA256HexVal = *tokenSHA256Hex
@@ -230,6 +242,25 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if resolvedPeerListen != "" && resolvedPeerAddr == "" {
+		logger.Error("ngstoned: -peer-listen (or $NGSTONE_PEER_LISTEN) requires -peer-addr (or $NGSTONE_PEER_ADDR)")
+		os.Exit(1)
+	}
+	if resolvedPeerAddr != "" {
+		if databaseURL == "" {
+			logger.Error("ngstoned: -peer-addr (or $NGSTONE_PEER_ADDR) requires a database URL")
+			os.Exit(1)
+		}
+		driver, err := storage.ResolveDriver(resolvedDatabaseDriver, databaseURL)
+		if err != nil {
+			logger.Error("ngstoned: invalid database configuration", "err", err)
+			os.Exit(1)
+		}
+		if driver != storage.DriverPostgres {
+			logger.Error("ngstoned: -peer-addr (or $NGSTONE_PEER_ADDR) requires PostgreSQL", "driver", driver)
+			os.Exit(1)
+		}
+	}
 	var adminSum []byte
 	if adminTokenSHA256HexVal != "" {
 		var err error
@@ -284,6 +315,8 @@ func main() {
 		StorageDriver:     resolvedDatabaseDriver,
 		StorageDSN:        databaseURL,
 		EdgeID:            resolvedEdgeID,
+		PeerAddr:          resolvedPeerAddr,
+		PeerListen:        resolvedPeerListen,
 		LeaseTTL:          *leaseTTL,
 		AdminTokenSHA256:  adminSum,
 		PublicScheme:      *publicScheme,
@@ -297,12 +330,17 @@ func main() {
 		ShareAuditLogPath: *shareAuditLog,
 
 		Insecure:             *insecure,
+		QUIC:                 *quicControl,
 		ProxyProtocol:        *proxyProtocol,
 		ProxyProtocolTrusted: proxyProtocolTrustedList,
 		ACMECA:               *acmeCA,
 		ACMEEmail:            *certEmail,
 		CertStoragePath:      *certStorage,
+		CustomCertDir:        resolvedCustomCerts,
 		DNSProvider:          provider,
+
+		AdminMTLSAddr:         resolvedAdminMTLSAddr,
+		AdminMTLSClientCAFile: resolvedAdminMTLSClientCA,
 
 		Limits: edge.LimitsConfig{
 			ReadHeaderTimeout:         *readHeaderTimeout,
@@ -319,6 +357,7 @@ func main() {
 			PerSessionUpgradeInFlight: *perSessionUpgrade,
 			HandshakeConcurrency:      *handshakeConcurrency,
 			UnauthSessions:            *unauthSessions,
+			UnauthPerAddr:             *unauthPerAddr,
 			PerIPInFlight:             *perIPInFlight,
 			ClientIdleTimeout:         *clientIdleTimeout,
 			TCPIdleTimeout:            *tcpIdleTimeout,
@@ -331,7 +370,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "acme-ca", *acmeCA, "dns-provider", *dnsProvider, "proxy-protocol", *proxyProtocol, "scoped_credentials", credentialsFile != "", "durable_storage", databaseURL != "", "admin_bearer", adminTokenSHA256HexVal != "", "oidc", oidcConfig != nil)
+	logger.Info("ngstoned: starting", "control", *controlAddr, "public", *publicAddr, "domain", *domain, "insecure", *insecure, "quic", *quicControl, "acme-ca", *acmeCA, "dns-provider", *dnsProvider, "proxy-protocol", *proxyProtocol, "scoped_credentials", credentialsFile != "", "durable_storage", databaseURL != "", "peer_addr", resolvedPeerAddr, "peer_listen", resolvedPeerListen, "admin_bearer", adminTokenSHA256HexVal != "", "oidc", oidcConfig != nil, "admin_mtls", resolvedAdminMTLSAddr != "")
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("ngstoned: exited with error", "err", err)
 		os.Exit(1)

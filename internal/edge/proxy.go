@@ -131,10 +131,21 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		s.serveVisitorApex(rec, r)
 		return
 	}
+	ip := stripPort(r.RemoteAddr)
 	b, ok := s.registry.Route(host)
+	aliased := false
 	if !ok {
-		writeError(rec, s.routeMissStatus(host))
-		return
+		target, aliasBinding, state := s.localAlias(host)
+		switch {
+		case state == aliasLocal && target.Kind == "tls":
+			writeError(rec, http.StatusMisdirectedRequest)
+			return
+		case state == aliasLocal:
+			b, aliased, host = aliasBinding, true, target.Hostname
+		default:
+			writeError(rec, s.routeMissStatus(r, host))
+			return
+		}
 	}
 	var requestBytes countingReadCloser
 	started := time.Now()
@@ -156,7 +167,6 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 		ac = b.access.Load()
 	}
 
-	ip := stripPort(r.RemoteAddr)
 	if addr, err := netip.ParseAddr(ip); err == nil {
 		if !ac.allowIP(addr) {
 			metricRejectedForbiddenCIDR.Add(1)
@@ -192,6 +202,12 @@ func (s *Server) handlePublic(w http.ResponseWriter, r *http.Request) {
 	stripHeadersWithPrefix(r.Header, edgeHeaderPrefix)
 	var identity *visitorToken
 	if rule := ac.loginRule(); rule != nil {
+		if aliased {
+			rec.Header().Set("Cache-Control", "no-store")
+			metricCustomDomainLoginRejected.Add(1)
+			writeVisitorPage(rec, http.StatusForbidden, "Sign-in unavailable", "This tunnel requires sign-in, which is not available on custom domains.")
+			return
+		}
 		session, ok := s.authorizeVisitor(rec, r, rule)
 		if !ok {
 			return
@@ -470,8 +486,12 @@ func ambiguousRequestTarget(u *url.URL) bool {
 	return false
 }
 
-func (s *Server) routeMissStatus(host string) int {
+func (s *Server) routeMissStatus(r *http.Request, host string) int {
 	if _, ok := s.registry.RouteTLS(host); ok {
+		return http.StatusMisdirectedRequest
+	}
+	if s.peers != nil && (peerForwarded(r.Context()) || (r.TLS != nil && r.TLS.ServerName != "" && !strings.EqualFold(r.TLS.ServerName, host))) {
+		metricPeerMisdirected.Add(1)
 		return http.StatusMisdirectedRequest
 	}
 	return http.StatusNotFound

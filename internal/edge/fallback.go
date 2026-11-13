@@ -59,14 +59,26 @@ func (s *Server) handleWebSocketControl(ctx context.Context, w http.ResponseWrit
 		http.Error(w, "edge is shutting down", http.StatusServiceUnavailable)
 		return
 	}
-	defer s.controlConns.Done()
+	leave := sync.OnceFunc(s.controlConns.Done)
+	defer leave()
 	admission := s.fallbackAdmission()
 	if admission == nil || !admission.tryAcquire() {
 		http.Error(w, "too many connections", http.StatusServiceUnavailable)
 		return
 	}
+	releaseAddr, ok := s.acquireUnauthAddr(websocketAddr{network: "tcp", value: s.admissionAddr(r)})
+	if !ok {
+		admission.release()
+		http.Error(w, "too many connections", http.StatusServiceUnavailable)
+		return
+	}
 	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(admission.release) }
+	release := func() {
+		releaseOnce.Do(func() {
+			releaseAddr()
+			admission.release()
+		})
+	}
 	defer release()
 	wsServer := websocket.Server{
 		Handshake: func(config *websocket.Config, request *http.Request) error {
@@ -84,7 +96,7 @@ func (s *Server) handleWebSocketControl(ctx context.Context, w http.ResponseWrit
 				local:  websocketAddr{network: "tcp", value: r.Host},
 				remote: websocketAddr{network: "tcp", value: r.RemoteAddr},
 			}
-			s.handleControlConnTransport(ctx, conn, release, false)
+			s.handleControlConnTransport(ctx, conn, release, controlTransport{leave: leave, name: "websocket"})
 		},
 	}
 	wsServer.ServeHTTP(w, r)
