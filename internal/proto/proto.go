@@ -404,6 +404,8 @@ type SharesOK struct {
 	Unreached []string    `json:"unreached,omitempty"`
 }
 
+const UnreachedMoreEdges = "+more"
+
 // WatchShares subscribes an operator session to every share's events.
 type WatchShares struct{}
 

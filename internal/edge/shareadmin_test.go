@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -14,6 +15,7 @@ import (
 
 	"ngstone/internal/credentials"
 	"ngstone/internal/proto"
+	"ngstone/internal/storage"
 	"ngstone/internal/tunnel"
 )
 
@@ -519,6 +521,46 @@ func TestRemoteAdminHolderGoodbyeIsNotAReply(t *testing.T) {
 		m = readSession(t, op)
 		if k, _ := proto.Decode[proto.Error](m); m.Type != proto.TypeError || m.ID != 56 || !strings.Contains(k.Message, "did not answer") {
 			t.Fatalf("kick against a draining holder (goodbye id %d) = %s %s", goodbyeID, m.Type, m.Data)
+		}
+	}
+}
+
+func TestGroupListReportsTruncationPastEdgeLimit(t *testing.T) {
+	for _, tc := range []struct {
+		edges     int
+		truncated bool
+	}{{remoteListMaxEdges, false}, {remoteListMaxEdges + 1, true}} {
+		cl := newShareCluster(t)
+		useShareCredentials(cl)
+		token := issueShareToken(t, cl.a, "owner-o")
+		now := time.Now()
+		for i := 0; i < tc.edges; i++ {
+			id := fmt.Sprintf("far-%02d", i)
+			peer := storage.EdgePeer{EdgeID: id, PeerAddr: "127.0.0.1:1", SPKISHA256: "pin-" + id, ExpiresAt: now.Add(time.Hour)}
+			if err := cl.a.store.UpsertEdgePeer(context.Background(), peer); err != nil {
+				t.Fatal(err)
+			}
+			if err := cl.a.store.PublishShare(context.Background(), "key-"+id, "sh_"+id, id, "owner-o", now.Add(time.Hour)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		op := startRemoteOperator(t, cl.a, token, "operator")
+		ok := listFrom(t, op, 111)
+		more := len(ok.Unreached) > 0 && ok.Unreached[len(ok.Unreached)-1] == proto.UnreachedMoreEdges
+		if more != tc.truncated {
+			t.Fatalf("%d edges: unreached=%v, want the more-edges marker = %v", tc.edges, ok.Unreached, tc.truncated)
+		}
+		want := remoteListMaxEdges
+		if tc.truncated {
+			want++
+		}
+		if len(ok.Unreached) != want {
+			t.Fatalf("%d edges: %d unreached entries, want %d (%v)", tc.edges, len(ok.Unreached), want, ok.Unreached)
+		}
+		for _, e := range ok.Unreached {
+			if e == fmt.Sprintf("far-%02d", remoteListMaxEdges) {
+				t.Fatalf("edge %s past the limit was queried", e)
+			}
 		}
 	}
 }

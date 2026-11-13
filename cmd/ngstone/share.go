@@ -1048,7 +1048,21 @@ func printShares(w io.Writer, listed proto.SharesOK) {
 	}
 	switch {
 	case listed.Group && len(listed.Unreached) > 0:
-		fmt.Fprintf(w, "edges %s did not answer; their shares are not shown.\n", strings.Join(listed.Unreached, ", "))
+		var silent []string
+		more := false
+		for _, e := range listed.Unreached {
+			if e == proto.UnreachedMoreEdges {
+				more = true
+			} else {
+				silent = append(silent, e)
+			}
+		}
+		if len(silent) > 0 {
+			fmt.Fprintf(w, "edges %s did not answer; their shares are not shown.\n", strings.Join(silent, ", "))
+		}
+		if more {
+			fmt.Fprintln(w, "more edges were not queried; their shares are not shown.")
+		}
 	case !listed.Group && listed.Edge != "":
 		fmt.Fprintf(w, "Shares on edge %s; other edges may hold more.\n", listed.Edge)
 	}

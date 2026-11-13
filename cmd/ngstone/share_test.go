@@ -287,6 +287,12 @@ func TestPrintShares(t *testing.T) {
 			absent:   []string{"other edges may hold more"},
 		},
 		{
+			name:     "group says more edges were not queried",
+			listed:   proto.SharesOK{Edge: "edge-a", Group: true, Unreached: []string{"edge-b", proto.UnreachedMoreEdges}, Shares: []proto.ShareInfo{one("sh_1", "edge-a")}},
+			contains: []string{"edges edge-b did not answer", "more edges were not queried; their shares are not shown."},
+			absent:   []string{"+more"},
+		},
+		{
 			name:     "empty group still reports unreached edges",
 			listed:   proto.SharesOK{Edge: "edge-a", Group: true, Unreached: []string{"edge-b"}},
 			contains: []string{"no live shares", "edges edge-b did not answer"},

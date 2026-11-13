@@ -516,12 +516,16 @@ func (s *Server) groupShares(as *AgentSession) (shares []proto.ShareInfo, unreac
 	ctx, cancel := context.WithTimeout(context.Background(), remoteAdminBudget)
 	defer cancel()
 	budget, _ := ctx.Deadline()
-	edges, err := p.store.ShareEdgesForOwner(ctx, durableOwnerID(as), p.selfID, time.Now(), remoteListMaxEdges)
+	edges, err := p.store.ShareEdgesForOwner(ctx, durableOwnerID(as), p.selfID, time.Now(), remoteListMaxEdges+1)
 	p.lookupSem.release()
 	if err != nil {
 		metricPeerLookupErrors.Add(1)
 		slogStorageError("list share edges", err)
 		return nil, nil, false
+	}
+	truncated := len(edges) > remoteListMaxEdges
+	if truncated {
+		edges = edges[:remoteListMaxEdges]
 	}
 	type result struct {
 		shares []proto.ShareInfo
@@ -567,6 +571,9 @@ func (s *Server) groupShares(as *AgentSession) (shares []proto.ShareInfo, unreac
 		shares = append(shares, r.shares...)
 	}
 	sort.Strings(unreached)
+	if truncated {
+		unreached = append(unreached, proto.UnreachedMoreEdges)
+	}
 	as.remoteShares = &remoteShareCache{at: time.Now(), shares: shares, unreached: unreached}
 	return shares, unreached, true
 }
