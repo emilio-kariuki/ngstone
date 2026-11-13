@@ -363,6 +363,17 @@ func TestAutoCertFailureCoolsDownWithoutStorage(t *testing.T) {
 		}
 	}
 
+	cs.calls.Store(0)
+	if _, err := handshake(t, cfg, "app.example.org", []string{acmeTLS1}); err == nil {
+		t.Fatal("challenge handshake without a pending challenge succeeded")
+	}
+	if n := cs.calls.Load(); n != 1 {
+		t.Fatalf("storage accessed %d times for a challenge hello during the cool-down, want 1", n)
+	}
+	if n := fake.calls.Load(); n != 1 {
+		t.Fatalf("issuer calls after the challenge hello = %d, want 1", n)
+	}
+
 	advanceIssuanceClock(mgr, autoCertNameInterval+time.Minute)
 	if _, err := handshake(t, cfg, "app.example.org", []string{"h2"}); err == nil {
 		t.Fatal("third handshake succeeded with a failing issuer")
