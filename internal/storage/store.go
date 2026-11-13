@@ -96,6 +96,17 @@ type Lease struct {
 	ExpiresAt   time.Time
 	Reconnected bool
 	Replaced    bool
+	prior       *replacedLease
+}
+
+type replacedLease struct {
+	id         string
+	sessionID  string
+	edgeID     string
+	acquiredAt string
+	renewedAt  string
+	expiresAt  string
+	tunnel     storedTunnel
 }
 
 type Tunnel struct {
@@ -793,7 +804,7 @@ func (s *Store) acquireLeaseOnce(ctx context.Context, request LeaseRequest) (Lea
 	}
 	var tunnelID string
 	reconnected := false
-	replaced := false
+	var prior *replacedLease
 	if existing.ID == "" {
 		tunnelID, err = randomID()
 		if err != nil {
@@ -826,19 +837,20 @@ func (s *Store) acquireLeaseOnce(ctx context.Context, request LeaseRequest) (Lea
 			if existing.OwnerID != request.OwnerID {
 				return Lease{}, ErrTunnelConflict
 			}
-			var sameInstanceLease string
-			err := tx.QueryRowContext(ctx, s.bind(`SELECT id FROM connector_leases WHERE tunnel_id = $1 AND instance_id = $2 AND expires_at > $3`), tunnelID, request.InstanceID, nowString(now)).Scan(&sameInstanceLease)
+			var sameInstanceLease replacedLease
+			err := tx.QueryRowContext(ctx, s.bind(`SELECT id, session_id, edge_id, acquired_at, renewed_at, expires_at FROM connector_leases WHERE tunnel_id = $1 AND instance_id = $2 AND expires_at > $3`), tunnelID, request.InstanceID, nowString(now)).Scan(&sameInstanceLease.id, &sameInstanceLease.sessionID, &sameInstanceLease.edgeID, &sameInstanceLease.acquiredAt, &sameInstanceLease.renewedAt, &sameInstanceLease.expiresAt)
 			sameInstance := err == nil
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return Lease{}, fmt.Errorf("storage: inspect connector lease: %w", err)
 			}
 			if sameInstance {
 				reconnected = true
-				replaced = true
+				sameInstanceLease.tunnel = existing
+				prior = &sameInstanceLease
 				if (request.MultiConnector || asBool(existing.MultiConnector)) && !leaseConfigMatches(existing, request) {
 					return Lease{}, ErrConnectorConfigMismatch
 				}
-				if _, err := tx.ExecContext(ctx, s.bind(`DELETE FROM connector_leases WHERE id = $1`), sameInstanceLease); err != nil {
+				if _, err := tx.ExecContext(ctx, s.bind(`DELETE FROM connector_leases WHERE id = $1`), sameInstanceLease.id); err != nil {
 					return Lease{}, fmt.Errorf("storage: replace connector lease: %w", err)
 				}
 			} else if !(request.MultiConnector && asBool(existing.MultiConnector) && existing.OwnerID == request.OwnerID && leaseConfigMatches(existing, request)) {
@@ -865,7 +877,52 @@ func (s *Store) acquireLeaseOnce(ctx context.Context, request LeaseRequest) (Lea
 	if err := tx.Commit(); err != nil {
 		return Lease{}, fmt.Errorf("storage: commit lease: %w", err)
 	}
-	return Lease{ID: leaseID, TunnelID: tunnelID, Hostname: request.Hostname, Kind: request.Kind, RemotePort: request.RemotePort, InstanceID: request.InstanceID, SessionID: request.SessionID, EdgeID: request.EdgeID, OwnerID: request.OwnerID, AcquiredAt: now, RenewedAt: now, ExpiresAt: request.ExpiresAt, Reconnected: reconnected, Replaced: replaced}, nil
+	return Lease{ID: leaseID, TunnelID: tunnelID, Hostname: request.Hostname, Kind: request.Kind, RemotePort: request.RemotePort, InstanceID: request.InstanceID, SessionID: request.SessionID, EdgeID: request.EdgeID, OwnerID: request.OwnerID, AcquiredAt: now, RenewedAt: now, ExpiresAt: request.ExpiresAt, Reconnected: reconnected, Replaced: prior != nil, prior: prior}, nil
+}
+
+func (s *Store) RestoreReplacedLease(ctx context.Context, lease Lease) (bool, error) {
+	prior := lease.prior
+	if prior == nil {
+		return false, nil
+	}
+	var txOptions *sql.TxOptions
+	if s.driver == DriverPostgres {
+		txOptions = &sql.TxOptions{Isolation: sql.LevelReadCommitted}
+	}
+	tx, err := s.db.BeginTx(ctx, txOptions)
+	if err != nil {
+		return false, fmt.Errorf("storage: begin lease restore: %w", err)
+	}
+	defer tx.Rollback()
+	if s.driver == DriverPostgres {
+		var lockedID string
+		err := tx.QueryRowContext(ctx, s.bind(`SELECT id FROM tunnels WHERE id = $1 FOR UPDATE`), lease.TunnelID).Scan(&lockedID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("storage: lock tunnel for lease restore: %w", err)
+		}
+	}
+	result, err := tx.ExecContext(ctx, s.bind(`UPDATE connector_leases SET id = $1, session_id = $2, edge_id = $3, acquired_at = $4, renewed_at = $5, expires_at = $6 WHERE id = $7 AND session_id = $8 AND edge_id = $9`), prior.id, prior.sessionID, prior.edgeID, prior.acquiredAt, prior.renewedAt, prior.expiresAt, lease.ID, lease.SessionID, lease.EdgeID)
+	if err != nil {
+		return false, fmt.Errorf("storage: restore connector lease: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("storage: restore connector lease: %w", err)
+	}
+	if affected == 0 {
+		return false, nil
+	}
+	t := prior.tunnel
+	if _, err := tx.ExecContext(ctx, s.bind(`UPDATE tunnels SET name = $1, owner_id = $2, status = $3, edge_id = $4, instance_id = $5, session_id = $6, http2 = $7, multi_connector = $8, connector_token_digest = $9, allow_cidrs_json = $10, access_json = $11, policy_id = $12, policy_digest = $13, updated_at = $14, expires_at = $15 WHERE id = $16`), t.Name, t.OwnerID, t.Status, t.EdgeID, t.InstanceID, t.SessionID, t.HTTP2, t.MultiConnector, t.ConnectorTokenDigest, t.AllowCIDRsJSON, t.AccessJSON, t.PolicyID, t.PolicyDigest, t.UpdatedAt, t.ExpiresAt, t.ID); err != nil {
+		return false, fmt.Errorf("storage: restore tunnel: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("storage: commit lease restore: %w", err)
+	}
+	return true, nil
 }
 
 func (s *Store) checkHostnameKindConflict(ctx context.Context, tx *sql.Tx, request LeaseRequest, now time.Time) error {

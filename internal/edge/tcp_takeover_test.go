@@ -720,6 +720,69 @@ func TestHandleBindTCPTakeoverLocalBindFailureKeepsReplacedLease(t *testing.T) {
 	if len(tunnels) != 1 || tunnels[0].Status != "active" || len(tunnels[0].Connectors) != 1 || tunnels[0].Connectors[0].InstanceID != "inst-x" {
 		t.Fatalf("tunnels after the failed takeover = %+v, want one active tunnel with its lease", tunnels)
 	}
+	if err := s.renewDurableSession(oldPeer.as); err != nil {
+		t.Fatalf("old holder renewal after the failed takeover = %v, want nil", err)
+	}
+	if n, err := store.RenewSessionLeases(context.Background(), store.EdgeID(), newPeer.as.ID, time.Now()); err != nil || n != 0 {
+		t.Fatalf("failed takeover session still holds %d leases, err %v, want 0", n, err)
+	}
+	s.releaseDurableLease(oldPeer.as, durableLeaseKey("tcp", "example.com", port), "")
+	tunnels, err = store.ListTunnels(context.Background())
+	if err != nil {
+		t.Fatalf("list tunnels: %v", err)
+	}
+	for _, tun := range tunnels {
+		if len(tun.Connectors) != 0 {
+			t.Fatalf("tunnels after releasing the old lease = %+v, want no connectors", tunnels)
+		}
+	}
+}
+
+func TestHandleBindTCPTakeoverLocalBindFailureAcrossEdgesRestoresOldLease(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "control.db")
+	storeA, err := storage.Open(storage.Config{DSN: dsn, EdgeID: "edge-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeA.Close()
+	storeB, err := storage.Open(storage.Config{DSN: dsn, EdgeID: "edge-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storeB.Close()
+
+	mgr := newTakeoverManager(t)
+	newPeer := newTCPPeer(t, "inst-x", tagEchoHandler("new"))
+	defer releaseAll(mgr, newPeer)
+
+	s := newTestServer("tok")
+	s.tcpMgr = mgr
+	s.storage = storeB
+
+	const port = 20006
+	ctx := context.Background()
+	if _, err := storeA.AcquireLease(ctx, storage.LeaseRequest{
+		Hostname: "example.com", Kind: "tcp", RemotePort: port,
+		OwnerID: durableOwnerID(newPeer.as), InstanceID: "inst-x", SessionID: "old-sess", EdgeID: "edge-a",
+	}); err != nil {
+		t.Fatalf("acquire on edge-a: %v", err)
+	}
+	blocker, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		t.Fatalf("occupy port: %v", err)
+	}
+	defer blocker.Close()
+
+	reply := bindTCPVia(t, s, newPeer, 1, proto.Bind{Kind: proto.KindTCP, RemotePort: port, Takeover: true})
+	if reply.Type != proto.TypeBindErr {
+		t.Fatalf("takeover reply = %+v, want bind_err", reply)
+	}
+	if n, err := storeA.RenewSessionLeases(ctx, "edge-a", "old-sess", time.Now()); err != nil || n != 1 {
+		t.Fatalf("edge-a renewal after the failed takeover = %d, %v, want 1", n, err)
+	}
+	if n, err := storeB.RenewSessionLeases(ctx, "edge-b", newPeer.as.ID, time.Now()); err != nil || n != 0 {
+		t.Fatalf("edge-b session holds %d leases, err %v, want 0", n, err)
+	}
 }
 
 func TestHandleBindTCPLeaseStorageErrorIsInternal(t *testing.T) {

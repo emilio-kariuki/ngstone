@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"ngstone/internal/access"
 	"ngstone/internal/credentials"
 	"ngstone/internal/policy"
 )
@@ -436,4 +437,111 @@ func TestConcurrentStoreOpenRunsMigrationOnce(t *testing.T) {
 	if opened != 2 {
 		t.Fatalf("opened stores = %d, want 2", opened)
 	}
+}
+
+func restoreLeaseRequest(hostname, sessionID, accessJSON string) LeaseRequest {
+	return LeaseRequest{
+		Hostname: hostname, Kind: "http", OwnerID: "owner-1",
+		InstanceID: "instance-1", SessionID: sessionID, AccessJSON: accessJSON,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+}
+
+func assertRenewed(t *testing.T, s *Store, sessionID string, want int64) {
+	t.Helper()
+	got, err := s.RenewSessionLeases(context.Background(), s.EdgeID(), sessionID, time.Now())
+	if err != nil || got != want {
+		t.Fatalf("renew %s = %d, %v, want %d", sessionID, got, err, want)
+	}
+}
+
+func testRestoreReplacedLease(t *testing.T, s *Store) {
+	ctx := context.Background()
+	l1, err := s.AcquireLease(ctx, restoreLeaseRequest("restore.example.com", "s1", ""))
+	if err != nil {
+		t.Fatalf("acquire s1: %v", err)
+	}
+	l2, err := s.AcquireLease(ctx, restoreLeaseRequest("restore.example.com", "s2", ""))
+	if err != nil {
+		t.Fatalf("acquire s2: %v", err)
+	}
+	if !l2.Replaced {
+		t.Fatal("second lease did not report replacing the first")
+	}
+	restored, err := s.RestoreReplacedLease(ctx, l2)
+	if err != nil || !restored {
+		t.Fatalf("restore = %v, %v, want true", restored, err)
+	}
+	assertRenewed(t, s, "s1", 1)
+	assertRenewed(t, s, "s2", 0)
+	tunnels, err := s.ListTunnels(ctx)
+	if err != nil {
+		t.Fatalf("list tunnels: %v", err)
+	}
+	if len(tunnels) != 1 || tunnels[0].SessionID != "s1" || len(tunnels[0].Connectors) != 1 || tunnels[0].Connectors[0].ID != l1.ID {
+		t.Fatalf("tunnels after restore = %+v, want the s1 lease restored", tunnels)
+	}
+	if err := s.ReleaseLease(ctx, l1.ID); err != nil {
+		t.Fatalf("release restored lease: %v", err)
+	}
+	tunnels, err = s.ListTunnels(ctx)
+	if err != nil {
+		t.Fatalf("list tunnels: %v", err)
+	}
+	if len(tunnels) != 1 || len(tunnels[0].Connectors) != 0 {
+		t.Fatalf("tunnels after release = %+v, want no connectors", tunnels)
+	}
+
+	seedPeer(t, s, s.EdgeID(), time.Now().Add(time.Hour))
+	accessOne := `{"visitor_login":{"allow_domains":["one.example"]}}`
+	accessTwo := `{"visitor_login":{"allow_domains":["two.example"]}}`
+	if _, err := s.AcquireLease(ctx, restoreLeaseRequest("access.example.com", "s1", accessOne)); err != nil {
+		t.Fatalf("acquire access s1: %v", err)
+	}
+	replacing, err := s.AcquireLease(ctx, restoreLeaseRequest("access.example.com", "s2", accessTwo))
+	if err != nil {
+		t.Fatalf("acquire access s2: %v", err)
+	}
+	wantTwo, _ := access.CanonicalJSON(accessTwo)
+	if got, ok, err := s.LookupHostAccess(ctx, "access.example.com", time.Now()); err != nil || !ok || got != wantTwo {
+		t.Fatalf("access before restore = %q, %v, %v, want %q", got, ok, err, wantTwo)
+	}
+	if restored, err := s.RestoreReplacedLease(ctx, replacing); err != nil || !restored {
+		t.Fatalf("restore access lease = %v, %v, want true", restored, err)
+	}
+	wantOne, _ := access.CanonicalJSON(accessOne)
+	if got, ok, err := s.LookupHostAccess(ctx, "access.example.com", time.Now()); err != nil || !ok || got != wantOne {
+		t.Fatalf("access after restore = %q, %v, %v, want %q", got, ok, err, wantOne)
+	}
+}
+
+func testRestoreReplacedLeaseSkipsSuperseded(t *testing.T, s *Store) {
+	ctx := context.Background()
+	l1, err := s.AcquireLease(ctx, restoreLeaseRequest("superseded.example.com", "s1", ""))
+	if err != nil {
+		t.Fatalf("acquire s1: %v", err)
+	}
+	if restored, err := s.RestoreReplacedLease(ctx, l1); err != nil || restored {
+		t.Fatalf("restore of a non-replaced lease = %v, %v, want false, nil", restored, err)
+	}
+	l2, err := s.AcquireLease(ctx, restoreLeaseRequest("superseded.example.com", "s2", ""))
+	if err != nil {
+		t.Fatalf("acquire s2: %v", err)
+	}
+	if _, err := s.AcquireLease(ctx, restoreLeaseRequest("superseded.example.com", "s3", "")); err != nil {
+		t.Fatalf("acquire s3: %v", err)
+	}
+	if restored, err := s.RestoreReplacedLease(ctx, l2); err != nil || restored {
+		t.Fatalf("restore of a superseded lease = %v, %v, want false, nil", restored, err)
+	}
+	assertRenewed(t, s, "s3", 1)
+	assertRenewed(t, s, "s1", 0)
+}
+
+func TestRestoreReplacedLease(t *testing.T) {
+	testRestoreReplacedLease(t, openTestStore(t, filepath.Join(t.TempDir(), "control.db")))
+}
+
+func TestRestoreReplacedLeaseSkipsSuperseded(t *testing.T) {
+	testRestoreReplacedLeaseSkipsSuperseded(t, openTestStore(t, filepath.Join(t.TempDir(), "control.db")))
 }

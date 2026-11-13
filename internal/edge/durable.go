@@ -144,6 +144,24 @@ func (s *Server) releaseDurableLease(as *AgentSession, key string, leaseID strin
 	}
 }
 
+func (s *Server) undoDurableLease(as *AgentSession, key string, lease storage.Lease) {
+	if lease.ID == "" {
+		return
+	}
+	if !lease.Replaced {
+		s.releaseDurableLease(as, key, lease.ID)
+		return
+	}
+	if s.storage == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if _, err := s.storage.RestoreReplacedLease(ctx, lease); err != nil {
+		slogStorageError("restore replaced connector lease", err)
+	}
+}
+
 func (s *Server) releaseDurableSession(as *AgentSession) {
 	if s.storage == nil || as == nil {
 		return

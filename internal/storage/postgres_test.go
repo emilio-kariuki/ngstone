@@ -113,3 +113,11 @@ func TestPostgresConcurrentHTTPAndTLSClaims(t *testing.T) {
 		}
 	}
 }
+
+func TestPostgresRestoreReplacedLease(t *testing.T) {
+	testRestoreReplacedLease(t, openPostgresTestStore(t, postgresSchemaDSN(t), "edge-a"))
+}
+
+func TestPostgresRestoreReplacedLeaseSkipsSuperseded(t *testing.T) {
+	testRestoreReplacedLeaseSkipsSuperseded(t, openPostgresTestStore(t, postgresSchemaDSN(t), "edge-a"))
+}

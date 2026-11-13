@@ -1153,9 +1153,7 @@ func (s *Server) handleBindTCP(as *AgentSession, ctrl *proto.Conn, id uint64, bi
 	}
 	port, evicted, err := s.tcpMgr.bind(as, bind.RemotePort, s.cfg.Domain, ac.prefixes(), bind.Takeover)
 	if err != nil {
-		if lease.ID != "" && !lease.Replaced {
-			s.releaseDurableLease(as, durableLeaseKey("tcp", s.cfg.Domain, bind.RemotePort), lease.ID)
-		}
+		s.undoDurableLease(as, durableLeaseKey("tcp", s.cfg.Domain, bind.RemotePort), lease)
 		if errors.Is(err, errTooManyBinds) {
 			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeTooManyBinds, Message: "too many tcp binds for this session"})
 			return
