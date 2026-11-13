@@ -978,7 +978,7 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 					Webhook:              webhookVerifier,
 				})
 				if bindErr != nil {
-					s.releaseDurableLease(as, durableLeaseKey("http", hostname, 0), lease.ID)
+					s.undoDurableLease(as, durableLeaseKey("http", hostname, 0), lease)
 					if errors.Is(bindErr, ErrSubdomainTaken) {
 						continue
 					}
@@ -1053,9 +1053,7 @@ func (s *Server) handleBind(ctx context.Context, as *AgentSession, ctrl *proto.C
 		Webhook:              webhookVerifier,
 	})
 	if err != nil {
-		if lease.ID != "" {
-			s.releaseDurableLease(as, durableLeaseKey("http", hostname, 0), lease.ID)
-		}
+		s.undoDurableLease(as, durableLeaseKey("http", hostname, 0), lease)
 		if errors.Is(err, ErrKindConflict) {
 			ctrl.Write(proto.TypeBindErr, id, proto.BindErr{Code: proto.CodeKindConflict, Message: "subdomain is already bound to a tls tunnel"})
 			return

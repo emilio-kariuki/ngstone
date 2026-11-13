@@ -516,9 +516,7 @@ func (s *Server) bindTLSHost(as *AgentSession, bind proto.Bind, hostname string,
 		TLS:      true,
 	})
 	if err != nil {
-		if lease.ID != "" {
-			s.releaseDurableLease(as, key, lease.ID)
-		}
+		s.undoDurableLease(as, key, lease)
 		switch {
 		case errors.Is(err, ErrKindConflict):
 			return nil, &proto.BindErr{Code: proto.CodeKindConflict, Message: "subdomain is already bound to an http tunnel"}
