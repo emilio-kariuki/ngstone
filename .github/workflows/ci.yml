@@ -14,6 +14,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          # The self-hosted runner keeps the Go module and build caches on disk.
+          cache: false
 
       - name: Build
         run: go build ./...

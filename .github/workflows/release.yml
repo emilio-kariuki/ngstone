@@ -4,64 +4,83 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build and publish, e.g. v0.6.0"
+        required: true
 
 permissions:
   contents: write
 
+# Everything runs on the self-hosted papyrkit runner and keeps its files on
+# that machine's disk: binaries go straight from the build directory to the
+# release, and the Docker layer cache lives under ~/.cache/buildx. Nothing is
+# written to GitHub artifact or cache storage.
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
 jobs:
-  build:
+  release:
     runs-on: [self-hosted, papyrkit]
-    strategy:
-      matrix:
-        include:
-          - goos: darwin
-            goarch: amd64
-          - goos: darwin
-            goarch: arm64
-          - goos: linux
-            goarch: amd64
-          - goos: linux
-            goarch: arm64
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          # The runner keeps ~/go/pkg/mod and ~/.cache/go-build between runs.
+          cache: false
 
       - name: Build binaries
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
         run: |
-          version="${GITHUB_REF_NAME}"
-          commit="${GITHUB_SHA}"
+          commit="$(git rev-parse HEAD)"
           date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          ldflags="-s -w -X ngstone/internal/version.Version=${version} -X ngstone/internal/version.Commit=${commit} -X ngstone/internal/version.Date=${date}"
+          ldflags="-s -w -X ngstone/internal/version.Version=${TAG} -X ngstone/internal/version.Commit=${commit} -X ngstone/internal/version.Date=${date}"
 
-          mkdir -p dist
-          go build -trimpath -ldflags "$ldflags" -o dist/ngstone ./cmd/ngstone
-          go build -trimpath -ldflags "$ldflags" -o dist/ngstoned ./cmd/ngstoned
+          rm -rf dist release
+          mkdir -p release
+          for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            out="dist/${goos}_${goarch}"
+            mkdir -p "$out"
+            GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
+              go build -trimpath -ldflags "$ldflags" -o "$out/ngstone" ./cmd/ngstone
+            GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
+              go build -trimpath -ldflags "$ldflags" -o "$out/ngstoned" ./cmd/ngstoned
+            tar -czf "release/ngstone_${goos}_${goarch}.tar.gz" -C "$out" ngstone ngstoned
+          done
+          (cd release && sha256sum *.tar.gz > checksums.txt)
+          ls -l release
 
-      - name: Package archive
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          archive="ngstone_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
-          tar -czf "$archive" -C dist ngstone ngstoned
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ngstone_${{ matrix.goos }}_${{ matrix.goarch }}
-          path: ngstone_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz
-          if-no-files-found: error
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/*.tar.gz release/checksums.txt --clobber
+          else
+            gh release create "$TAG" \
+              release/*.tar.gz release/checksums.txt \
+              --title "$TAG" \
+              --generate-notes \
+              --verify-tag
+          fi
 
   docker:
     runs-on: [self-hosted, papyrkit]
     permissions:
       contents: read
       packages: write
+    env:
+      CACHE_DIR: /home/ubuntu/.cache/buildx/ngstoned
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       # The Dockerfile cross-compiles on the build platform, so no QEMU.
       - uses: docker/setup-buildx-action@v3
@@ -80,11 +99,13 @@ jobs:
           flavor: |
             latest=auto
           tags: |
-            type=semver,pattern=v{{version}}
-            type=semver,pattern={{version}}
+            type=semver,pattern=v{{version}},value=${{ env.TAG }}
+            type=semver,pattern={{version}},value=${{ env.TAG }}
 
       - id: build-info
-        run: echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v6
         with:
@@ -94,36 +115,14 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VERSION=${{ github.ref_name }}
-            COMMIT=${{ github.sha }}
+            VERSION=${{ env.TAG }}
+            COMMIT=${{ steps.build-info.outputs.commit }}
             DATE=${{ steps.build-info.outputs.date }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=local,src=${{ env.CACHE_DIR }}
+          cache-to: type=local,dest=${{ env.CACHE_DIR }}-new,mode=max
 
-  release:
-    needs: build
-    runs-on: [self-hosted, papyrkit]
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Assemble release assets
+      # Swap in the fresh cache so the old one does not grow without bound.
+      - name: Rotate layer cache
         run: |
-          mkdir -p release
-          find artifacts -name "*.tar.gz" -exec cp {} release/ \;
-          (cd release && sha256sum *.tar.gz > checksums.txt)
-          ls -l release
-
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            release/*.tar.gz release/checksums.txt \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes
+          rm -rf "$CACHE_DIR"
+          mv "${CACHE_DIR}-new" "$CACHE_DIR"
