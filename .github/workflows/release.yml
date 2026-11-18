@@ -70,6 +70,49 @@ jobs:
               --verify-tag
           fi
 
+      # The tag's own tree may predate the formula script, so read it from the
+      # commit this workflow file came from.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: workflow-src
+          sparse-checkout: .github/scripts
+
+      - name: Update Homebrew formula
+        # Prereleases (v1.2.3-rc.1) stay out of the tap.
+        if: ${{ !contains(env.TAG, '-') }}
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+        run: |
+          key="$RUNNER_TEMP/homebrew-tap-key"
+          tap="$RUNNER_TEMP/homebrew-tap"
+          trap 'rm -rf "$key" "$tap"' EXIT
+          install -m 600 /dev/null "$key"
+          printf '%s\n' "$TAP_DEPLOY_KEY" > "$key"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+
+          rm -rf "$tap"
+          git clone --depth 1 git@github.com:emilio-kariuki/homebrew-tap.git "$tap"
+
+          # Never move the tap backwards when an older tag is rebuilt.
+          current="$(grep -oE 'releases/download/v[^/]+' "$tap/Formula/ngstone.rb" | head -1 | sed 's|.*/v||')"
+          newest="$(printf '%s\n%s\n' "$current" "${TAG#v}" | sort -V | tail -1)"
+          if [ -n "$current" ] && [ "$newest" != "${TAG#v}" ]; then
+            echo "Tap is on $current, newer than $TAG; leaving it alone."
+            exit 0
+          fi
+
+          workflow-src/.github/scripts/homebrew-formula.sh "$TAG" release/checksums.txt > "$tap/Formula/ngstone.rb"
+          cd "$tap"
+          if git diff --quiet; then
+            echo "Formula already up to date."
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -am "chore(ngstone): update formula to ${TAG#v}"
+          git push origin HEAD
+
   docker:
     runs-on: [self-hosted, papyrkit]
     permissions:
